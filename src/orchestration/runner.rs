@@ -1,7 +1,6 @@
 //! RecursiveRunner — thin wrapper: task dir init + spawn root FittingAgent.
 //! The actual recursion is owned by FittingAgent's recursive_decompose tool.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use crate::agents::factory::AgentFactory;
@@ -27,18 +26,12 @@ use tokio::time::{timeout, Duration};
 pub struct RecursiveRunner {
     factory: Arc<AgentFactory>,
     config: TaijiConfig,
-    data_root: PathBuf,
 }
 
 impl RecursiveRunner {
     /// Create a new runner bound to a specific factory and configuration.
     pub fn new(factory: Arc<AgentFactory>, config: TaijiConfig) -> Self {
-        let data_root = PathBuf::from(&config.data_root);
-        Self {
-            factory,
-            config,
-            data_root,
-        }
+        Self { factory, config }
     }
 
     /// Execute a task description end-to-end.

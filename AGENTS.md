@@ -109,16 +109,17 @@
 
 ## 12. 测试映射
 
-以下规则对应测试文件（Rust `#[test]` / `#[tokio::test]`）：
+以下规则对应内嵌单元测试（`#[cfg(test)]` 模块，非独立 `tests/` 目录文件）。
+标有 ⚠ 的测试依赖外部 Qdrant 服务，默认 `#[ignore]`。
 
-| 规则 | 测试文件（预期） |
-|------|-----------------|
-| TPN 循环死循环防护 | `tests/test_tpn_loop.rs` |
-| LLM 结构化输出回退 | `tests/test_structured_output.rs` |
-| 工具安全拦截 | `tests/test_safety_hook.rs` |
-| 约束检查前置 | `tests/test_constraint_engine.rs` |
-| Qdrant 并发写入冲突 | `tests/test_qdrant_concurrency.rs` |
-| Trace 轮转与脱敏 | `tests/test_trace.rs` |
-| RateLimiter token bucket | `tests/test_rate_limiter.rs` |
-| DMN 演化正确性 | `tests/test_cognition_evolver.rs` |
-| 递归深度限制 | `tests/test_recursive_depth.rs` |
+| 规则 | 实际位置（`src/` 内嵌） | 状态 |
+|------|------------------------|------|
+| TPN 循环死循环防护 | `src/orchestration/runner.rs`（循环境辑）+ `src/agents/fitting.rs`（depth check） | ⚠ runner 无独立 UT；fitting depth check 可用 |
+| LLM 结构化输出回退 | 无独立单元测试（需 mock LLM） | — |
+| 工具安全拦截 | `src/hooks/safety.rs`（23 项测试：文件路径/命令/URL/路由） | ✅ 完整 |
+| 约束检查前置 | `src/orchestration/constraint_engine.rs`（13 项测试） | ✅ 完整 |
+| Qdrant 并发写入冲突 | 无独立单元测试（需 Qdrant） | — |
+| Trace 轮转与脱敏 | `src/hooks/trace.rs`（7 项测试：脱敏 + 写入） | ✅ 脱敏覆盖；轮转未覆盖 |
+| RateLimiter token bucket | `src/infra/rate_limiter.rs` 无内嵌测试 | — |
+| DMN 演化正确性 | `src/orchestration/cognition_evolver.rs`（7 项测试） | ⚠ 需 Qdrant |
+| 递归深度限制 | `src/agents/fitting.rs` `test_fitting_agent_depth_check` | ✅ |

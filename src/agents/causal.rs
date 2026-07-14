@@ -47,6 +47,7 @@ use crate::types::verification::{
 /// constraints and passes LLM-based verification.
 ///
 /// Created by [`AgentFactory::create_causal_verify_agent`].
+#[allow(dead_code)] // R2 production path reserve — fields used when LLM verify is wired
 pub struct CausalVerifyAgentBuilder {
     engine_ctx: EngineContext,
     constraint_engine: Arc<ConstraintEngine>,
@@ -237,6 +238,7 @@ impl CausalVerifyAgentBuilder {
 ///
 /// Starts with the required Chinese identifier per AGENTS.md §2:
 /// "CausalAgent verify 模式的 system prompt 必须以 '你是因果验证器' 开头".
+#[allow(dead_code)] // R2 production path reserve — used in verify() production path
 const VERIFY_SYSTEM_PROMPT: &str = r#"你是因果验证器 (Causal Verifier · Yin Agent).
 
 Your role is to verify whether the task output satisfies all applicable
@@ -272,6 +274,7 @@ while false negatives (accepting incorrect output) degrade the knowledge base.
 /// decides whether the overall task has converged.
 ///
 /// Created by [`AgentFactory::create_causal_converge_agent`].
+#[allow(dead_code)] // R2 production path reserve — fields used when LLM converge is wired
 pub struct CausalConvergeAgentBuilder {
     engine_ctx: EngineContext,
     model: String,
@@ -397,6 +400,7 @@ impl CausalConvergeAgentBuilder {
 ///
 /// Starts with the required Chinese identifier per AGENTS.md §2:
 /// "CausalAgent converge 模式的 system prompt 必须以 '你是收敛判决器' 开头".
+#[allow(dead_code)] // R2 production path reserve — used in converge() production path
 const CONVERGE_SYSTEM_PROMPT: &str = r#"你是收敛判决器 (Convergence Judge · Yin Agent).
 
 Your role is to aggregate results from all subtasks of a recursive

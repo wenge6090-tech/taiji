@@ -30,6 +30,7 @@ use crate::types::agent::{MetaContext, YangPrompt};
 /// Encapsulates all configuration needed to construct and execute a Rig agent
 /// that extracts reasoning paths from the NSKG.  Created by
 /// [`AgentFactory::create_meta_agent`](super::factory::AgentFactory::create_meta_agent).
+#[allow(dead_code)] // R2 production path reserve — fields used when Rig agent is wired
 pub struct MetaAgentBuilder {
     task_id: String,
     nskg: Arc<NskgClient>,
@@ -139,6 +140,7 @@ impl MetaAgentBuilder {
 ///
 /// The Chinese prefix anchors the agent's role per project convention
 /// (see AGENTS.md §2: "CausalAgent verify mode starts with '你是因果验证器'").
+#[allow(dead_code)] // R2 production path reserve — used in run() production path
 const META_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Update · Meta Agent).
 
 Your role is to traverse the Neural-Symbolic Knowledge Graph (NSKG) and extract

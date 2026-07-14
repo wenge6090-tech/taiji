@@ -5,8 +5,9 @@ use governor::{DefaultDirectRateLimiter, Quota};
 
 /// Token-bucket rate limiter for LLM API calls using the governor crate.
 pub struct RateLimiter {
-    requests_per_minute: u32,
-    tokens_per_minute: u32,
+    /// Stored for potential future introspection/logging; not read elsewhere.
+    _config_requests_per_minute: u32,
+    _config_tokens_per_minute: u32,
     request_limiter: Arc<DefaultDirectRateLimiter>,
     token_limiter: Arc<DefaultDirectRateLimiter>,
 }
@@ -26,8 +27,8 @@ impl RateLimiter {
         };
 
         Self {
-            requests_per_minute: r,
-            tokens_per_minute: t,
+            _config_requests_per_minute: r,
+            _config_tokens_per_minute: t,
             request_limiter: Arc::new(governor::RateLimiter::direct(
                 Quota::per_minute(NonZeroU32::new(r).unwrap()),
             )),
