@@ -124,8 +124,31 @@
 | RateLimiter token bucket | `src/infra/rate_limiter.rs` 无内嵌测试 | — |
 | DMN 演化正确性 | `src/orchestration/cognition_evolver.rs`（7 项测试） | ⚠ 需文件系统 I/O |
 | 递归深度限制 | `src/agents/fitting.rs` `test_fitting_agent_depth_check` | ✅ |
+| 工具选择（SkillTriggerEngine） | `src/orchestration/trigger_engine.rs`（14 项测试：正则/标签/排序/去重/上限） | ✅ 完整 |
+| FittingAgent 工具接线 | `src/agents/fitting.rs`（4 项测试：builder/系统提示/深度检查/集成） | ✅ builder、prompt、depth check 覆盖 |
+| CancellationToken 传播 | `src/orchestration/dmn_consumer.rs`（2 项含 cancellation 测试）+ `recursive_decompose.rs` 内嵌 | ✅ 取消/超时/死信覆盖 |
+| WorkerPool 并发限流 | `src/orchestration/worker_pool.rs`（5 项测试：并发/信号量/panic） | ✅ 完整 |
+| TaskSpec 解析 | `src/infra/task_spec.rs`（7 项测试：frontmatter/验证） | ✅ 完整 |
+| DMN Consumer 流程 | `src/orchestration/dmn_consumer.rs`（4 项测试：启动/取消/有效/死信） | ⚠ 需文件系统 I/O |
 
 ## 13. 测试隔离与清理规则
 
 - [ ] 所有在测试中创建的临时目录（`tmp_dir` / `temp_dir`）必须在测试末尾通过 `tokio::fs::remove_dir_all` 清理，变量名用 `tmp_dir` 而**非** `_tmp_dir`（下划线前缀会绕过 `unused` 警告同时也不在测试末尾清理）
 - [ ] L1 Skill 工具注册时必须同时实现 Rig `Tool` trait 和 `ToolDyn` trait（动态名称工具通过 `.tools(Vec<Box<dyn ToolDyn>>)` 注册），缺一不可
+- [ ] **Rig 提供 blanket impl `impl<T: Tool> ToolDyn for T`**，因此实现 `Tool` 后自动获得 `ToolDyn`，无需重复实现
+
+## 14. FittingAgent 工具接线规则
+
+- [ ] 工具注册顺序必须是：`hook()` → `.tool(static_tool)` → `.tools(dyn_tools)` → `.build()`，先注册 SafetyHook/TraceHook，再注册静态单例工具，最后注册动态名称工具列表
+- [ ] 静态名称工具（`RecursiveDecomposeTool`、`CausalVerifyTool`）通过 `.tool()` 注册，它们的 `NAME` 关联常量在编译期确定
+- [ ] 动态名称工具（L1 Skills，如 `SkillTool`）通过 `.tools(Vec<Box<dyn ToolDyn>>)` 注册，名称在运行时由 `skill.tool_name` 动态决定
+- [ ] `SkillTool` 必须实现 Rig `Tool` trait 的 `fn name(&self) -> String` 方法以返回动态名称，而不是依赖 `const NAME`
+- [ ] 所有工具在 FittingAgent 构造阶段（`build_agent_runner`）预先注册完毕，运行阶段不再增减
+
+## 15. CancellationToken 传播规则
+
+- [ ] `CancellationToken` 必须从 FittingAgent 构造参数传入，存储在 `RecursiveDecomposeTool` 等可分解工具的字段中
+- [ ] 子任务 spawn 前必须检查 `cancel.is_cancelled()`，返回 `TaijiError::Other("Task cancelled")`
+- [ ] 子任务内部也必须在实际执行前再次检查 cancellation
+- [ ] 父 token 通过 `cancel.child_token()` 创建链接子 token，传递给子 `TpnCycle`；父 token 取消时所有子 token 自动传播取消信号
+- [ ] `CancellationToken` 与 `WorkerPool` 的 `Semaphore` 配合使用：先 acquire permit 再 spawn，确保取消时 permit 正确释放

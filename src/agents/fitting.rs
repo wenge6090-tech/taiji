@@ -503,7 +503,7 @@ mod tests {
     #[tokio::test]
     async fn test_fitting_agent_builder_construction() {
         let config = make_config();
-        let (factory, _tmp_dir) = build_factory_arc(config).await;
+        let (factory, tmp_dir) = build_factory_arc(config).await;
         let meta_ctx = sample_meta_context();
         let engine_ctx = EngineContext {
             task_id: "test-task-1".into(),
@@ -518,6 +518,9 @@ mod tests {
         assert!(builder.is_ok());
         let builder = builder.unwrap();
         assert_eq!(builder.engine_ctx().task_id, "test-task-1");
+
+        // Cleanup temp directory
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
     #[tokio::test]
@@ -526,7 +529,7 @@ mod tests {
         // Integration test: runs the full Rig agent pipeline.
         // Requires a valid DEEPSEEK_API_KEY.
         let config = make_config();
-        let (factory, _tmp_dir) = build_factory_arc(config).await;
+        let (factory, tmp_dir) = build_factory_arc(config).await;
         let meta_ctx = sample_meta_context();
         let engine_ctx = EngineContext {
             task_id: "test-task-2".into(),
@@ -559,12 +562,15 @@ mod tests {
                 );
             }
         }
+
+        // Cleanup temp directory
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
     #[tokio::test]
     async fn test_fitting_agent_depth_check() {
         let config = make_config();
-        let (factory, _tmp_dir) = build_factory_arc(config).await;
+        let (factory, tmp_dir) = build_factory_arc(config).await;
         let meta_ctx = sample_meta_context();
 
         // Depth 1, but max_depth defaults to 2 — should pass the guard.
@@ -597,5 +603,8 @@ mod tests {
                 }
             }
         }
+
+        // Cleanup temp directory
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 }
