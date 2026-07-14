@@ -1,0 +1,47 @@
+[package]
+name = "taiji"
+version = "0.1.0"
+edition = "2024"
+description = "taiji — lightweight AGI cognitive kernel (TPN-DMN-NSKG)"
+
+[dependencies]
+# LLM agent framework
+rig = { version = "0.39" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# Logging / tracing
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+# Error handling
+thiserror = "2"
+
+# Safety / trigger matching
+regex = "1"
+
+# Async trait support (used by skills module)
+async-trait = "0.1"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Qdrant (direct client, for schema management)
+qdrant-client = "1"
+
+# MCP protocol
+rmcp = { version = "0.8", features = ["server", "client", "transport-child-process"] }
+
+# Rate limiting
+tokio-util = "0.7"
+governor = "0.6"
