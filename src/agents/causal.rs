@@ -28,6 +28,10 @@
 
 use std::sync::Arc;
 
+use rig::client::CompletionClient;
+use rig::completion::Prompt;
+use rig::providers::deepseek;
+
 use crate::infra::error::TaijiError;
 use crate::infra::provider::ProviderRegistry;
 use crate::orchestration::constraint_engine::ConstraintEngine;
@@ -207,30 +211,59 @@ impl CausalVerifyAgentBuilder {
             );
         }
 
-        // ── Step 2: LLM verification (TODO: wire Rig agent) ──
-        // The code block below shows the intended production path.
-        let _ = task_output;
-        let _ = tool_results;
+        // ── Step 2: LLM verification (production path) ──
+        // Build soft violation context for the LLM prompt
+        let soft_context: Vec<String> = pre_check
+            .violations
+            .iter()
+            .filter(|v| v.severity == crate::types::verification::ConstraintSeverity::Soft)
+            .map(|v| format!("[Soft] {}: {}", v.truth_name, v.reason))
+            .collect();
 
-        // ── Degraded mode: return low-confidence pass ──
-        tracing::warn!(
-            task_id = %self.engine_ctx.task_id,
-            "CausalVerifyAgent.verify() degraded mode — return low-confidence pass"
+        // Call the LLM for verification
+        let client: Arc<deepseek::Client> = self.provider.client("deepseek")?;
+        let agent = client
+            .agent(&self.model)
+            .preamble(VERIFY_SYSTEM_PROMPT)
+            .max_tokens(1024u64)
+            .default_max_turns(3usize)
+            .build();
+
+        let input = format!(
+            "Task output:\n{task_output}\n\nTool results:\n{results}\n\nSoft violations:\n{soft}",
+            task_output = task_output,
+            results = tool_results.join("\n---\n"),
+            soft = if soft_context.is_empty() {
+                "None".to_string()
+            } else {
+                soft_context.join("\n")
+            },
         );
 
-        Ok(VerificationReport {
-            route: VerificationRoute::Pass,
-            confidence: 0.0, // Low confidence — no LLM verification
-            summary: format!(
-                "[DEGRADED] Skipped LLM verification for task {}",
-                self.engine_ctx.task_id
-            ),
-            constraint_violations: pre_check
-                .violations
-                .iter()
-                .map(|v| v.reason.clone())
-                .collect(),
-        })
+        let response = agent.prompt(&input).await.map_err(|e| {
+            TaijiError::LLMCallFailed {
+                context: format!("CausalVerifyAgent LLM call failed: {e}"),
+            }
+        })?;
+
+        // Parse structured output into VerificationReport
+        let report: VerificationReport =
+            serde_json::from_str(response.as_ref()).map_err(|e| {
+                TaijiError::StructuredOutputParseFailed {
+                    context: format!(
+                        "Failed to parse VerificationReport from LLM response: {e}. Raw: {response}"
+                    ),
+                }
+            })?;
+
+        tracing::info!(
+            task_id = %self.engine_ctx.task_id,
+            route = ?report.route,
+            confidence = report.confidence,
+            "CausalVerifyAgent — LLM verification completed"
+        );
+
+        Ok(report)
     }
 }
 
@@ -238,7 +271,6 @@ impl CausalVerifyAgentBuilder {
 ///
 /// Starts with the required Chinese identifier per AGENTS.md §2:
 /// "CausalAgent verify 模式的 system prompt 必须以 '你是因果验证器' 开头".
-#[allow(dead_code)] // R2 production path reserve — used in verify() production path
 const VERIFY_SYSTEM_PROMPT: &str = r#"你是因果验证器 (Causal Verifier · Yin Agent).
 
 Your role is to verify whether the task output satisfies all applicable
@@ -342,54 +374,49 @@ impl CausalConvergeAgentBuilder {
         &self,
         subtask_results: &[DecomposeResult],
     ) -> Result<ConvergenceDecision, TaijiError> {
-        // ── Deterministic heuristic (used in degraded mode) ──
         let total = subtask_results.len();
+
+        // ── Empty results short-circuit ──
         if total == 0 {
             return Ok(ConvergenceDecision {
                 status: ConvergenceStatus::Converged,
-                task_summary: format!("Task {} has no subtasks", self.engine_ctx.task_id),
+                task_summary: format!("Task {} has no subtasks — trivially converged", self.engine_ctx.task_id),
             });
         }
 
-        let diverged_count = subtask_results
-            .iter()
-            .filter(|r| r.status == ConvergenceStatus::Diverged)
-            .count();
-        let partial_count = subtask_results
-            .iter()
-            .filter(|r| r.status == ConvergenceStatus::Partial)
-            .count();
+        // ── Production path: LLM convergence judgment ──
+        let client: Arc<deepseek::Client> = self.provider.client("deepseek")?;
+        let agent = client
+            .agent(&self.model)
+            .preamble(CONVERGE_SYSTEM_PROMPT)
+            .max_tokens(1024u64)
+            .default_max_turns(3usize)
+            .build();
 
-        let status = if diverged_count == total {
-            ConvergenceStatus::Diverged
-        } else if diverged_count > 0 || partial_count > 0 {
-            ConvergenceStatus::Partial
-        } else {
-            ConvergenceStatus::Converged
-        };
+        let input = serde_json::to_string_pretty(subtask_results).map_err(|e| {
+            TaijiError::Serde(e)
+        })?;
 
-        let task_summary = format!(
-            "Task {}: {} subtask(s) evaluated — {:?}",
-            self.engine_ctx.task_id,
-            total,
-            status,
-        );
+        let response = agent.prompt(&input).await.map_err(|e| {
+            TaijiError::LLMCallFailed {
+                context: format!("CausalConvergeAgent LLM call failed: {e}"),
+            }
+        })?;
 
-        // ── Production path: LLM convergence judgment (TODO) ──
-        // The deterministic heuristic above is used in degraded mode.
-        // The true production path invokes a Rig agent with CONVERGE_SYSTEM_PROMPT
-        // for nuanced aggregation.
+        let decision: ConvergenceDecision =
+            serde_json::from_str(response.as_ref()).map_err(|e| {
+                TaijiError::StructuredOutputParseFailed {
+                    context: format!(
+                        "Failed to parse ConvergenceDecision from LLM response: {e}. Raw: {response}"
+                    ),
+                }
+            })?;
 
-        let decision = ConvergenceDecision {
-            status,
-            task_summary,
-        };
-
-        tracing::debug!(
+        tracing::info!(
             task_id = %self.engine_ctx.task_id,
             subtasks = total,
             status = ?decision.status,
-            "CausalConvergeAgent.converge() — deterministic heuristic"
+            "CausalConvergeAgent — LLM convergence judgment completed"
         );
 
         Ok(decision)
@@ -447,7 +474,7 @@ mod tests {
                 ..Default::default()
             },
             runtime: crate::infra::config::RuntimeConfig::default(),
-            qdrant: crate::infra::config::QdrantConfig::default(),
+            knowledge: crate::infra::config::KnowledgeConfig::default(),
             safety: SafetyConfig::default(),
             mcp_servers: vec![],
         }
@@ -466,6 +493,7 @@ mod tests {
     // ── CausalVerifyAgentBuilder tests ──────────────────────────────────
 
     #[tokio::test]
+    #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_verify_returns_default_pass() {
         let builder = CausalVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
@@ -478,7 +506,6 @@ mod tests {
 
         let report = builder.verify("CausalAgent executed and verified the task output against all L4 Truth constraints.", &[]).await.expect("verify");
         assert_eq!(report.route, VerificationRoute::Pass);
-        assert_eq!(report.confidence, 0.0, "degraded mode confidence should be 0");
     }
 
     #[tokio::test]
@@ -502,6 +529,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_verify_with_soft_violations_passes() {
         // A short summary (< 10 chars) triggers the soft auditability
         // constraint, but since it's soft the verify should still pass.
@@ -536,6 +564,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_converge_all_ok_converged() {
         let builder = CausalConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
@@ -563,6 +592,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_converge_some_partial() {
         let builder = CausalConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
@@ -590,6 +620,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_converge_all_diverged() {
         let builder = CausalConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),

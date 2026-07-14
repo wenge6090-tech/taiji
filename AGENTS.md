@@ -27,7 +27,7 @@
 - [ ] `provider.chat()` / Rig Agent prompt 输入必须为 `Vec<Message>` 结构，严禁拼接裸字符串
 - [ ] 每次 LLM 调用前必须 `rate_limiter.acquire().await`（全局 token bucket）
 - [ ] DeepSeek 结构化输出失败时：重试最多 3 次 → fallback 到 verbatim 提取 → regex JSON 修复 → 返回 `TaijiError::StructuredOutputParseFailed`
-- [ ] MetaAgent 的 `dynamic_context` 必须设置 `top_k=5`，防止上下文过长
+- [ ] MetaAgent 的 `dynamic_context` 必须设置 `top_k=5`，防止上下文过长（暂保留；待 理络 文件系统实现后改为 LiluoClient 标签搜索）
 - [ ] FittingAgent 的 system prompt 必须包含 MetaContext（reasoning_paths + constraints）
 - [ ] CausalAgent verify 模式的 system prompt 必须以 "你是因果验证器" 开头，converge 模式以 "你是收敛判决器" 开头
 - [ ] 所有 Agent 的 `max_turns` 硬限制：MetaAgent=1, FittingAgent=30, CausalAgent=3
@@ -65,15 +65,16 @@
 - [ ] δ₁ L1 技能调优：`success_rate = success_count / (success_count + fail_count)`，`use_count++`
 - [ ] δ₂ L2 贝叶斯更新：`alpha += success_count, beta += fail_count`，`confidence = alpha / (alpha + beta)`
 - [ ] δ₃ L3 网格重连：调整 relation.weight ±0.1，范围 [0, 1]
-- [ ] 所有演化结果写入 Qdrant 时必须 `version++`（乐观并发控制）
+- [ ] 所有演化结果写入 理络 时必须 `version++`（乐观并发控制）
 
-## 7. Qdrant 一致性规则
+## 7. 理络 文件系统一致性规则
 
-- [ ] 单 collection `nskg`，type + layer 区分四层认知资产
-- [ ] `insert_document()` 之前：如果同 ID 已存在 → `update_document()`，否则 `create_document()`
-- [ ] `credit_attribution()` 写入前检查 version 字段：与读取时一致才写入，否则重试（最多 3 次）
+- [ ] `.taiji/knowledge/` 目录按层分层：`truths/` `grids/` `models/` `skills/`，type + layer 区分四层认知资产
+- [ ] `save_asset()` 之前先 `load_asset()` 读取当前版本，确认版本不冲突再覆写
+- [ ] `search_by_tags()` 查 `index.yaml` 的 tag_index 反向索引；索引缺失时全量扫描目录重建
 - [ ] `traverse_relations()` BFS 必须 dedup visited set，防止回环
 - [ ] `build_reasoning_paths()` 的 `max_hops` 默认 3
+- [ ] `index.yaml` 是衍生数据——每次启动时校验完整性，数据不一致时从原始 YAML 文件重建
 
 ## 8. Trace 写入规则
 
@@ -102,7 +103,7 @@
 
 - [ ] 所有 `TaijiError` 变体必须携带 `context: String` 字段（可追溯到调用链）
 - [ ] LLM 调用失败（网络/超时/限流）→ 重试最多 3 次 → 降级标记 `degraded=true` → 返回 `TaijiError::LLMCallFailed`
-- [ ] Qdrant 连接失败 → 指数退避重连（最多 5 次）→ 返回 `TaijiError::QdrantUnavailable`
+- [ ] 理络 文件 I/O 失败 → 重试最多 3 次 → 返回 `TaijiError::KnowledgeStoreUnavailable`
 - [ ] 文件系统 I/O 错误 → 直接返回 `TaijiError::IO(io::Error)`，不重试
 - [ ] 死信队列：不可恢复的任务写入 `pending/dead/`，附带完整 error 上下文
 - [ ] `panic!` 和 `unwrap()` 禁止在 async 上下文中使用 → 全部改为 `Result<T, TaijiError>`
@@ -110,7 +111,7 @@
 ## 12. 测试映射
 
 以下规则对应内嵌单元测试（`#[cfg(test)]` 模块，非独立 `tests/` 目录文件）。
-标有 ⚠ 的测试依赖外部 Qdrant 服务，默认 `#[ignore]`。
+标有 ⚠ 的测试依赖文件系统 I/O，默认 `#[ignore]`（需隔离的工作目录或 mock）。
 
 | 规则 | 实际位置（`src/` 内嵌） | 状态 |
 |------|------------------------|------|
@@ -118,8 +119,13 @@
 | LLM 结构化输出回退 | 无独立单元测试（需 mock LLM） | — |
 | 工具安全拦截 | `src/hooks/safety.rs`（23 项测试：文件路径/命令/URL/路由） | ✅ 完整 |
 | 约束检查前置 | `src/orchestration/constraint_engine.rs`（13 项测试） | ✅ 完整 |
-| Qdrant 并发写入冲突 | 无独立单元测试（需 Qdrant） | — |
+| 理络 文件系统读写 | `src/infra/knowledge.rs`（10 项测试：创建目录/读写真理/读写网格/标签搜索/BFS 遍历/推理路径/健康检查/索引重建） | ✅ 完整 |
 | Trace 轮转与脱敏 | `src/hooks/trace.rs`（7 项测试：脱敏 + 写入） | ✅ 脱敏覆盖；轮转未覆盖 |
 | RateLimiter token bucket | `src/infra/rate_limiter.rs` 无内嵌测试 | — |
-| DMN 演化正确性 | `src/orchestration/cognition_evolver.rs`（7 项测试） | ⚠ 需 Qdrant |
+| DMN 演化正确性 | `src/orchestration/cognition_evolver.rs`（7 项测试） | ⚠ 需文件系统 I/O |
 | 递归深度限制 | `src/agents/fitting.rs` `test_fitting_agent_depth_check` | ✅ |
+
+## 13. 测试隔离与清理规则
+
+- [ ] 所有在测试中创建的临时目录（`tmp_dir` / `temp_dir`）必须在测试末尾通过 `tokio::fs::remove_dir_all` 清理，变量名用 `tmp_dir` 而**非** `_tmp_dir`（下划线前缀会绕过 `unused` 警告同时也不在测试末尾清理）
+- [ ] L1 Skill 工具注册时必须同时实现 Rig `Tool` trait 和 `ToolDyn` trait（动态名称工具通过 `.tools(Vec<Box<dyn ToolDyn>>)` 注册），缺一不可

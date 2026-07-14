@@ -1,9 +1,8 @@
 //! MetaAgent builder (权重更新·元) — "weight update, the meta phase".
 //!
 //! The MetaAgent is the **first** agent in the TPN cycle.  It traverses the
-//! Neural-Symbolic Knowledge Graph (NSKG) via Rig's `dynamic_context`
-//! mechanism to extract reasoning paths that serve as cognitive bias for
-//! downstream agents.
+//! 理络 (cognitive network) via Rig's `dynamic_context` mechanism to extract
+//! reasoning paths that serve as cognitive bias for downstream agents.
 //!
 //! # Constraints (AGENTS.md §2, §4)
 //! - `max_turns = 1` — the MetaAgent is a single-shot structured extractor.
@@ -21,19 +20,19 @@
 use std::sync::Arc;
 
 use crate::infra::error::TaijiError;
+use crate::infra::knowledge::LiluoClient;
 use crate::infra::provider::ProviderRegistry;
-use crate::infra::qdrant::NskgClient;
 use crate::types::agent::{MetaContext, YangPrompt};
 
 /// Builder for the MetaAgent (权重更新·元).
 ///
 /// Encapsulates all configuration needed to construct and execute a Rig agent
-/// that extracts reasoning paths from the NSKG.  Created by
+/// that extracts reasoning paths from the 理络.  Created by
 /// [`AgentFactory::create_meta_agent`](super::factory::AgentFactory::create_meta_agent).
 #[allow(dead_code)] // R2 production path reserve — fields used when Rig agent is wired
 pub struct MetaAgentBuilder {
     task_id: String,
-    nskg: Arc<NskgClient>,
+    liluo: Arc<LiluoClient>,
     provider: Arc<ProviderRegistry>,
     model: String,
     /// max_turns = 1 — MetaAgent is always single-shot structured extraction.
@@ -47,32 +46,32 @@ impl MetaAgentBuilder {
     /// callers should use the factory rather than constructing this directly.
     pub fn new(
         task_id: &str,
-        nskg: Arc<NskgClient>,
+        liluo: Arc<LiluoClient>,
         provider: Arc<ProviderRegistry>,
         model: &str,
     ) -> Self {
         Self {
             task_id: task_id.to_string(),
-            nskg,
+            liluo,
             provider,
             model: model.to_string(),
             max_turns: 1, // MetaAgent is always single-shot
         }
     }
 
-    /// Run the MetaAgent: traverse the NSKG and produce a [`MetaContext`].
+    /// Run the MetaAgent: traverse the 理络 and produce a [`MetaContext`].
     ///
     /// # Production path
     /// In the fully wired implementation, `run()` will:
     /// 1. Obtain the provider client from `self.provider.client()`.
-    /// 2. Build a Rig agent with `dynamic_context(5, self.nskg)`:
+    /// 2. Build a Rig agent with `dynamic_context(5, self.liluo)`:
     ///    ```ignore
     ///    let client = self.provider.client("deepseek")?;
     ///    let agent = client
     ///        .agent(&self.model)
     ///        .preamble(META_SYSTEM_PROMPT)
     ///        .max_turns(1)
-    ///        .dynamic_context(5, self.nskg)
+    ///        .dynamic_context(5, self.liluo)
     ///        .build();
     ///    ```
     /// 3. Call `agent.prompt(task_description).await` to get structured output.
@@ -80,8 +79,8 @@ impl MetaAgentBuilder {
     ///
     /// # Current behaviour (degraded mode)
     /// Returns an empty `MetaContext` with no reasoning paths.  This allows the
-    /// system to compile and run without a Qdrant-backed dynamic context index,
-    /// albeit without cognitive bias from prior knowledge.
+    /// system to compile and run without a wired dynamic context index, albeit
+    /// without cognitive bias from prior knowledge.
     pub async fn run(&self) -> Result<MetaContext, TaijiError> {
         // ── Production implementation (pinned for Rig API verification) ──
         //
@@ -97,11 +96,11 @@ impl MetaAgentBuilder {
         //     .agent(&self.model)
         //     .preamble(META_SYSTEM_PROMPT)
         //     .max_turns(1)
-        //     // TODO: dynamic_context(5, self.nskg) once the NSKG index is wired
+        //     // TODO: dynamic_context(5, self.liluo) once the 理络 index is wired
         //     .build();
         //
         // let response = agent
-        //     .prompt("Traverse the NSKG and extract reasoning paths for task")
+        //     .prompt("Traverse the 理络 and extract reasoning paths for task")
         //     .await
         //     .map_err(|e| TaijiError::LLMCallFailed {
         //         context: format!("MetaAgent LLM call failed: {e}"),
@@ -135,7 +134,7 @@ impl MetaAgentBuilder {
 
 /// System prompt for the MetaAgent.
 ///
-/// Instructs the LLM to traverse the NSKG, discover relevant reasoning chains,
+/// Instructs the LLM to traverse the 理络, discover relevant reasoning chains,
 /// and emit a structured [`MetaContext`] JSON object.
 ///
 /// The Chinese prefix anchors the agent's role per project convention
@@ -143,11 +142,11 @@ impl MetaAgentBuilder {
 #[allow(dead_code)] // R2 production path reserve — used in run() production path
 const META_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Update · Meta Agent).
 
-Your role is to traverse the Neural-Symbolic Knowledge Graph (NSKG) and extract
+Your role is to traverse the 理络 (cognitive network) and extract
 reasoning paths relevant to the current task.
 
 Instructions:
-1. Use the dynamic context to query the NSKG for relevant knowledge grids.
+1. Use the dynamic context to query the 理络 for relevant knowledge grids.
 2. Follow 1-3 hop BFS relations from matching source grids.
 3. Compile a list of ReasoningPath objects, each showing the chain of evidence.
 4. Identify any L4 Truth constraints that apply to the current task type tags.
@@ -166,7 +165,7 @@ Output must be a valid JSON object matching the MetaContext schema:
 }
 
 Do not fabricate reasoning paths. Only include chains that are grounded
-in the NSKG data returned by the context index.
+in the 理络 data returned by the context index.
 "#;
 
 #[cfg(test)]
@@ -189,26 +188,30 @@ mod tests {
                 ..Default::default()
             },
             runtime: crate::infra::config::RuntimeConfig::default(),
-            qdrant: crate::infra::config::QdrantConfig::default(),
+            knowledge: crate::infra::config::KnowledgeConfig::default(),
             safety: crate::infra::config::SafetyConfig::default(),
             mcp_servers: vec![],
         }
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_meta_agent_run_returns_empty_context() {
         let config = make_config();
-        let nskg = Arc::new(
-            NskgClient::new(&config.qdrant)
+        let tmp_dir = std::env::temp_dir()
+            .join(format!("taiji_meta_test_{}", std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()));
+        let liluo = Arc::new(
+            LiluoClient::new(&tmp_dir)
                 .await
-                .expect("Qdrant must be running"),
+                .expect("LiluoClient should initialise"),
         );
         let provider = Arc::new(
             ProviderRegistry::new(&config).expect("ProviderRegistry"),
         );
 
-        let builder = MetaAgentBuilder::new("test-task", nskg, provider, "deepseek-chat");
+        let builder = MetaAgentBuilder::new("test-task", liluo, provider, "deepseek-chat");
         let ctx = builder.run().await.expect("MetaAgent run");
 
         // In degraded mode, all fields are empty.
@@ -216,6 +219,8 @@ mod tests {
         assert!(ctx.constraints.is_empty());
         assert!(ctx.matched_skills.is_empty());
         assert!(ctx.yang_prompt.task_description.is_empty());
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
     #[test]

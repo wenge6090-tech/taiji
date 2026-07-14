@@ -12,6 +12,9 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use rig::completion::ToolDefinition;
+use rig::tool::{Tool, ToolError};
+use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 
 use crate::infra::error::TaijiError;
@@ -249,6 +252,61 @@ impl SkillTool {
             "webfetch" => Some(Arc::new(WebfetchTool::default())),
             _ => None,
         }
+    }
+}
+
+// ── Rig Tool implementation ────────────────────────────────────────────
+
+/// Arguments for a `SkillTool` call.
+#[derive(Debug, Deserialize)]
+pub struct SkillToolArgs {
+    /// Raw input arguments for the skill (JSON string or object).
+    input: Option<String>,
+}
+
+/// Serialized output wrapper for tool results.
+#[derive(Debug, Serialize)]
+pub struct SkillToolOutput(String);
+
+impl Tool for SkillTool {
+    const NAME: &'static str = "skill_tool";
+
+    type Error = ToolError;
+    type Args = SkillToolArgs;
+    type Output = SkillToolOutput;
+
+    /// Dynamic name — returns the skill's tool_name.
+    fn name(&self) -> String {
+        self.skill.tool_name.clone()
+    }
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: self.skill.tool_name.clone(),
+            description: format!("L1 Skill: {} — {}", self.skill.id, self.skill.name),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "string",
+                        "description": "Raw input arguments for the skill"
+                    }
+                }
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        let input: JsonValue = args
+            .input
+            .as_deref()
+            .and_then(|s| serde_json::from_str(s).ok())
+            .unwrap_or_default();
+
+        self.execute(&input)
+            .await
+            .map(|v| SkillToolOutput(v.to_string()))
+            .map_err(|e| ToolError::ToolCallError(Box::new(e)))
     }
 }
 

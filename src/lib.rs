@@ -1,8 +1,8 @@
-// taiji — lightweight AGI cognitive kernel (TPN-DMN-NSKG)
+// taiji — lightweight AGI cognitive kernel (TPN-DMN-理络)
 //
 // Module structure (7-layer):
 //   L0 types          — foundational data types
-//   L1 infra          — infrastructure (config, qdrant, providers, trace, etc.)
+//   L1 infra          — infrastructure (config, knowledge, providers, trace, etc.)
 //   L2 hooks          — Rig AgentHook implementations (safety, trace)
 //   L3 agents         — transient Rig Agents (meta, fitting, causal) + tools
 //   L4 orchestration  — runner, constraint engine, trigger engine, cognition evolver

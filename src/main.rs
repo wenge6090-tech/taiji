@@ -17,7 +17,7 @@ enum Command {
         /// Task description (space-separated words, joined internally)
         description: Vec<String>,
     },
-    /// Initialize workspace (.taiji/ + Qdrant collection)
+    /// Initialize workspace (.taiji/ + 理络 knowledge store)
     Init,
     /// Show task trace
     Trace {
@@ -73,16 +73,13 @@ async fn cmd_run(description: Vec<String>) -> Result<(), Box<dyn std::error::Err
     // Provider registry (LLM clients).
     let providers = Arc::new(taiji::infra::provider::ProviderRegistry::new(&config)?);
 
-    // NSKG client — Qdrant-backed cognitive knowledge graph.
-    let nskg = match taiji::infra::qdrant::NskgClient::new(&config.qdrant).await {
+    // 理络 client — file-system cognitive knowledge warehouse.
+    let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
+    let liluo = match taiji::infra::knowledge::LiluoClient::new(&knowledge_dir).await {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            tracing::warn!("Qdrant unavailable (running in degraded mode): {e}");
-            let stub_cfg = taiji::infra::config::QdrantConfig {
-                url: "http://localhost:6334".into(),
-                collection_name: "nskg".into(),
-            };
-            Arc::new(taiji::infra::qdrant::NskgClient::new_degraded(&stub_cfg))
+            tracing::warn!("理络 knowledge store unavailable, creating sparse client: {e}");
+            Arc::new(taiji::infra::knowledge::LiluoClient::new_sparse(&knowledge_dir).await?)
         }
     };
 
@@ -98,7 +95,7 @@ async fn cmd_run(description: Vec<String>) -> Result<(), Box<dyn std::error::Err
 
     // Agent factory — creates transient Rig Agents on demand.
     let factory = Arc::new(taiji::agents::factory::AgentFactory::new(
-        nskg,
+        liluo,
         providers,
         config.clone(),
         safety_hook,
@@ -131,17 +128,18 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(dir)?;
     }
 
-    // Try to connect Qdrant and create the nskg collection.
-    match taiji::infra::qdrant::NskgClient::new(&config.qdrant).await {
-        Ok(client) => {
+    // Initialize 理络 knowledge store.
+    let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
+    match taiji::infra::knowledge::LiluoClient::new(&knowledge_dir).await {
+        Ok(_) => {
             println!(
-                "✓ Qdrant connected, collection '{}' ready",
-                client.collection_name()
+                "✓ 理络 knowledge store initialised at {}",
+                knowledge_dir.display()
             );
         }
         Err(e) => {
-            println!("⚠ Qdrant not available (will run in degraded mode): {e}");
-            println!("  Create .taiji/config.json with qdrant.url to connect");
+            println!("⚠ 理络 knowledge store initialisation failed: {e}");
+            println!("  The system will run with a sparse (empty) knowledge store");
         }
     }
 
@@ -251,7 +249,10 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
     println!("taiji status:");
     println!("  Workspace: {}", config.workspace);
     println!("  Data root: {}", data_root.display());
-    println!("  Qdrant: {}", config.qdrant.url);
+    println!(
+        "  理络 knowledge store: {}",
+        config.knowledge.data_dir
+    );
     println!(
         "  LLM provider: {} / {}",
         config.llm.default_provider, config.llm.default_model
@@ -291,16 +292,13 @@ async fn cmd_mcp() -> Result<(), Box<dyn std::error::Error>> {
     // Provider registry (LLM clients).
     let providers = Arc::new(taiji::infra::provider::ProviderRegistry::new(&config)?);
 
-    // NSKG client — Qdrant-backed cognitive knowledge graph.
-    let nskg = match taiji::infra::qdrant::NskgClient::new(&config.qdrant).await {
+    // 理络 client — file-system cognitive knowledge warehouse.
+    let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
+    let liluo = match taiji::infra::knowledge::LiluoClient::new(&knowledge_dir).await {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            tracing::warn!("Qdrant unavailable (running in degraded mode): {e}");
-            let stub_cfg = taiji::infra::config::QdrantConfig {
-                url: "http://localhost:6334".into(),
-                collection_name: "nskg".into(),
-            };
-            Arc::new(taiji::infra::qdrant::NskgClient::new_degraded(&stub_cfg))
+            tracing::warn!("理络 knowledge store unavailable, creating sparse client: {e}");
+            Arc::new(taiji::infra::knowledge::LiluoClient::new_sparse(&knowledge_dir).await?)
         }
     };
 
@@ -316,7 +314,7 @@ async fn cmd_mcp() -> Result<(), Box<dyn std::error::Error>> {
 
     // Agent factory.
     let factory = Arc::new(taiji::agents::factory::AgentFactory::new(
-        nskg,
+        liluo,
         providers,
         config.clone(),
         safety_hook,

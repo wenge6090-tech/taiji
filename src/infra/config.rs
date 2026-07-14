@@ -13,7 +13,7 @@ pub struct TaijiConfig {
     #[serde(default)]
     pub runtime: RuntimeConfig,
     #[serde(default)]
-    pub qdrant: QdrantConfig,
+    pub knowledge: KnowledgeConfig,
     #[serde(default)]
     pub safety: SafetyConfig,
     #[serde(default)]
@@ -98,16 +98,14 @@ impl Default for RuntimeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct QdrantConfig {
-    pub url: String,
-    pub collection_name: String,
+pub struct KnowledgeConfig {
+    pub data_dir: String,
 }
 
-impl Default for QdrantConfig {
+impl Default for KnowledgeConfig {
     fn default() -> Self {
         Self {
-            url: "http://localhost:6334".into(),
-            collection_name: "nskg".into(),
+            data_dir: ".taiji/knowledge".into(),
         }
     }
 }

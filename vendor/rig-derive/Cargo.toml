@@ -1,0 +1,22 @@
+[package]
+edition = "2024"
+name = "rig-derive"
+version = "0.39.0"
+description = "Internal crate that implements Rig derive macros (vendor local copy)"
+license = "MIT"
+repository = "https://github.com/0xPlaygrounds/rig"
+
+[lib]
+name = "rig_derive"
+path = "src/lib.rs"
+proc-macro = true
+
+[dependencies]
+convert_case = "0.11"
+deluxe = { version = "0.5", features = ["full"] }
+indoc = "2"
+proc-macro-crate = "3"
+proc-macro2 = { version = "1", features = ["proc-macro"] }
+quote = "1"
+serde_json = "1"
+syn = { version = "2", features = ["full"] }

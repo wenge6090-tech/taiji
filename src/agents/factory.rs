@@ -1,6 +1,6 @@
 //! AgentFactory — central hub for creating transient Rig Agents.
 //!
-//! Holds all shared infrastructure references (NSKG client, provider registry,
+//! Holds all shared infrastructure references (理络 LiluoClient, provider registry,
 //! config, safety hook, worker pool, constraint engine, trigger engine) and
 //! provides factory methods that create fresh agent builders per cycle.
 //!
@@ -24,14 +24,16 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use tokio_util::sync::CancellationToken;
+
 use crate::agents::causal::{CausalConvergeAgentBuilder, CausalVerifyAgentBuilder};
 use crate::agents::fitting::FittingAgentBuilder;
 use crate::agents::meta::MetaAgentBuilder;
 use crate::hooks::safety::SafetyHook;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
+use crate::infra::knowledge::LiluoClient;
 use crate::infra::provider::ProviderRegistry;
-use crate::infra::qdrant::NskgClient;
 use crate::orchestration::constraint_engine::ConstraintEngine;
 use crate::orchestration::trigger_engine::SkillTriggerEngine;
 use crate::orchestration::worker_pool::WorkerPool;
@@ -45,8 +47,8 @@ use crate::types::execution::EngineContext;
 /// exposing Rig internals.  The caller invokes `.run()` on the builder to
 /// instantiate and execute the Rig agent.
 pub struct AgentFactory {
-    /// NSKG client for traversing the knowledge graph.
-    pub nskg: Arc<NskgClient>,
+    /// 理络 LiluoClient for traversing the cognitive knowledge warehouse.
+    pub liluo: Arc<LiluoClient>,
     pub providers: Arc<ProviderRegistry>,
     pub config: TaijiConfig,
     pub safety_hook: Arc<SafetyHook>,
@@ -63,7 +65,7 @@ impl AgentFactory {
     /// `data_root` is initialised from `config.data_root` (defaulting to
     /// `"./data"` when the config value is empty).
     pub fn new(
-        nskg: Arc<NskgClient>,
+        liluo: Arc<LiluoClient>,
         providers: Arc<ProviderRegistry>,
         config: TaijiConfig,
         safety_hook: Arc<SafetyHook>,
@@ -83,7 +85,7 @@ impl AgentFactory {
         );
 
         Self {
-            nskg,
+            liluo,
             providers,
             config,
             safety_hook,
@@ -98,7 +100,7 @@ impl AgentFactory {
 
     /// Create a [`MetaAgentBuilder`] (权重更新·元) for the given task ID.
     ///
-    /// The MetaAgent traverses the NSKG via dynamic context injection to
+    /// The MetaAgent traverses the 理络 via dynamic context injection to
     /// extract reasoning paths that bias downstream agents.  It is always
     /// limited to `max_turns = 1` (single-shot structured extraction).
     ///
@@ -113,7 +115,7 @@ impl AgentFactory {
         );
         Ok(MetaAgentBuilder::new(
             task_id,
-            self.nskg.clone(),
+            self.liluo.clone(),
             self.providers.clone(),
             &model,
         ))
@@ -136,6 +138,7 @@ impl AgentFactory {
         depth: u32,
         meta_ctx: &MetaContext,
         engine_ctx: &EngineContext,
+        cancel: CancellationToken,
     ) -> Result<FittingAgentBuilder, TaijiError> {
         let (_provider, model) = self.agent_llm_config("fitting");
         tracing::debug!(
@@ -150,6 +153,7 @@ impl AgentFactory {
             engine_ctx.clone(),
             self.clone(),
             &model,
+            cancel,
         ))
     }
 
@@ -279,10 +283,20 @@ impl std::fmt::Debug for AgentFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::config::{AgentLlmConfig, LlmConfig, SafetyConfig};
+    use crate::infra::config::{AgentLlmConfig, KnowledgeConfig, LlmConfig, SafetyConfig};
     use crate::infra::provider::ProviderRegistry;
+    use std::time::{SystemTime, UNIX_EPOCH};
 
-    /// Minimal config fixture for tests that don't connect to Qdrant.
+    /// Create a unique temporary directory for test isolation.
+    async fn test_knowledge_dir() -> PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("taiji_factory_test_{ts}"))
+    }
+
+    /// Minimal config fixture for tests.
     fn make_config() -> TaijiConfig {
         TaijiConfig {
             version: "0.1.0".into(),
@@ -297,7 +311,7 @@ mod tests {
                 ..Default::default()
             },
             runtime: crate::infra::config::RuntimeConfig::default(),
-            qdrant: crate::infra::config::QdrantConfig::default(),
+            knowledge: KnowledgeConfig::default(),
             safety: SafetyConfig {
                 enabled: false,
                 trusted_mcp_servers: vec![],
@@ -307,67 +321,62 @@ mod tests {
     }
 
     /// Build every transient dependency needed by [`AgentFactory::new`].
-    /// This connects to Qdrant — tests that call this helper require
-    /// Qdrant to be running on `localhost:6334`.
-    fn build_factory(config: TaijiConfig) -> AgentFactory {
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let nskg = rt
-            .block_on(NskgClient::new(&config.qdrant))
-            .expect("Qdrant must be running on localhost:6334 for this test");
+    async fn build_factory(config: TaijiConfig) -> (AgentFactory, PathBuf) {
+        let tmp_dir = test_knowledge_dir().await;
+        let liluo = Arc::new(
+            LiluoClient::new(&tmp_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
         let providers =
             ProviderRegistry::new(&config).expect("ProviderRegistry should build");
 
-        AgentFactory::new(
-            Arc::new(nskg),
+        let factory = AgentFactory::new(
+            liluo,
             Arc::new(providers),
             config,
             Arc::new(SafetyHook::new(&SafetyConfig::default())),
             Arc::new(WorkerPool::new(4)),
             Arc::new(ConstraintEngine::new()),
             Arc::new(SkillTriggerEngine::new()),
-        )
+        );
+        (factory, tmp_dir)
     }
 
-    #[test]
-    #[ignore = "requires Qdrant on localhost:6334"]
-    fn test_create_meta_agent() {
+    #[tokio::test]
+    async fn test_create_meta_agent() {
         let config = make_config();
-        let factory = build_factory(config);
+        let (factory, tmp_dir) = build_factory(config).await;
         let builder = factory
             .create_meta_agent("test-task-1")
             .expect("MetaAgentBuilder creation");
         // Verify the builder is properly initialised by checking internal
         // fields through its public API (run returns a MetaContext).
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let ctx = rt.block_on(builder.run()).expect("MetaAgent run");
+        let ctx = builder.run().await.expect("MetaAgent run");
         assert_eq!(ctx.reasoning_paths.len(), 0);
+        // Cleanup
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
-    #[test]
-    #[ignore = "requires Qdrant on localhost:6334"]
-    fn test_agent_llm_config_returns_defaults() {
-        // We can read the config directly through the factory without Qdrant
-        // by constructing a factory manually.
+    #[tokio::test]
+    async fn test_agent_llm_config_returns_defaults() {
         let config = make_config();
+        let tmp_dir = test_knowledge_dir().await;
+        let liluo = Arc::new(
+            LiluoClient::new(&tmp_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let providers =
+            ProviderRegistry::new(&config).expect("ProviderRegistry");
         let data_root = if config.data_root.is_empty() {
             PathBuf::from("./data")
         } else {
             PathBuf::from(&config.data_root)
         };
 
-        // ProviderRegistry::new doesn't connect — it just creates HTTP clients.
-        let providers = ProviderRegistry::new(&config).expect("ProviderRegistry");
-        // NskgClient needs a stub for the factory; we use a disconnected one.
-        // Since we only call agent_llm_config (no Qdrant ops), this is safe.
-        // We construct NskgClient directly with a fake client — the fields
-        // are private so we use the proper constructor with a tokio runtime.
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let nskg = rt
-            .block_on(NskgClient::new(&config.qdrant))
-            .expect("Qdrant must be running");
-
         let factory = AgentFactory {
-            nskg: Arc::new(nskg),
+            liluo,
             providers: Arc::new(providers),
             config,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
@@ -380,11 +389,12 @@ mod tests {
         let (provider, model) = factory.agent_llm_config("meta");
         assert_eq!(provider, "deepseek");
         assert_eq!(model, "deepseek-chat");
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
-    #[test]
-    #[ignore = "requires Qdrant on localhost:6334"]
-    fn test_agent_llm_config_with_override() {
+    #[tokio::test]
+    async fn test_agent_llm_config_with_override() {
         let mut config = make_config();
         config.llm.agent_overrides.insert(
             "meta".into(),
@@ -396,34 +406,34 @@ mod tests {
             },
         );
 
-        let factory = build_factory(config);
+        let (factory, tmp_dir) = build_factory(config).await;
         let (provider, model) = factory.agent_llm_config("meta");
         assert_eq!(provider, "deepseek");
         assert_eq!(model, "deepseek-reasoner");
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
-    #[test]
-    #[ignore = "requires Qdrant on localhost:6334"]
-    fn test_task_dir_construction() {
+    #[tokio::test]
+    async fn test_task_dir_construction() {
         let config = make_config();
+        let tmp_dir = test_knowledge_dir().await;
+        let liluo = Arc::new(
+            LiluoClient::new(&tmp_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let providers =
+            ProviderRegistry::new(&config).expect("ProviderRegistry");
         let data_root = if config.data_root.is_empty() {
             PathBuf::from("./data")
         } else {
             PathBuf::from(&config.data_root)
         };
 
-        // Build a minimal factory with a disconnected NskgClient just to
-        // test the path logic (no Qdrant ops are performed).
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let nskg = rt
-            .block_on(NskgClient::new(&config.qdrant))
-            .expect("Qdrant must be running");
-
         let factory = AgentFactory {
-            nskg: Arc::new(nskg),
-            providers: Arc::new(
-                ProviderRegistry::new(&config).expect("ProviderRegistry"),
-            ),
+            liluo,
+            providers: Arc::new(providers),
             config,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
             worker_pool: Arc::new(WorkerPool::new(4)),
@@ -435,23 +445,25 @@ mod tests {
         let dir = factory.task_dir("task-001");
         let expected: PathBuf = [".", "test_data", "tasks", "task-001"].iter().collect();
         assert_eq!(dir, expected);
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
-    #[test]
-    #[ignore = "requires Qdrant on localhost:6334"]
-    fn test_agent_llm_config_unknown_agent_returns_defaults() {
-        // Unknown agent types should get defaults.
+    #[tokio::test]
+    async fn test_agent_llm_config_unknown_agent_returns_defaults() {
         let config = make_config();
-        let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        let nskg = rt
-            .block_on(NskgClient::new(&config.qdrant))
-            .expect("Qdrant must be running");
+        let tmp_dir = test_knowledge_dir().await;
+        let liluo = Arc::new(
+            LiluoClient::new(&tmp_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let providers =
+            ProviderRegistry::new(&config).expect("ProviderRegistry");
 
         let factory = AgentFactory {
-            nskg: Arc::new(nskg),
-            providers: Arc::new(
-                ProviderRegistry::new(&config).expect("ProviderRegistry"),
-            ),
+            liluo,
+            providers: Arc::new(providers),
             config,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
             worker_pool: Arc::new(WorkerPool::new(4)),
@@ -463,5 +475,7 @@ mod tests {
         let (provider, model) = factory.agent_llm_config("nonexistent-agent");
         assert_eq!(provider, "deepseek");
         assert_eq!(model, "deepseek-chat");
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 }

@@ -9,10 +9,23 @@
 
 use std::sync::Arc;
 
+use rig::completion::ToolDefinition;
+use rig::tool::Tool;
+use serde::Deserialize;
+
 use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
 use crate::types::execution::EngineContext;
-use crate::types::verification::VerificationReport;
+
+/// Arguments for the causal_verify tool.
+#[derive(Debug, Deserialize)]
+pub struct CausalVerifyArgs {
+    /// The task output text produced by the FittingAgent.
+    pub task_output: String,
+    /// Raw result strings from any L1 skill tools that were called.
+    #[serde(default)]
+    pub tool_results: Vec<String>,
+}
 
 /// Tool that invokes CausalAgent verification on a task output.
 pub struct CausalVerifyTool {
@@ -37,16 +50,49 @@ impl CausalVerifyTool {
     /// 1. Creates a `CausalVerifyAgentBuilder` via the factory.
     /// 2. Calls `builder.verify(task_output, tool_results)`.
     /// 3. Returns the resulting `VerificationReport`.
-    ///
-    /// - `task_output` — the text output produced by the FittingAgent.
-    /// - `tool_results` — raw result strings from any L1 skill tools that were called.
     pub async fn execute(
         &self,
         task_output: &str,
         tool_results: &[String],
-    ) -> Result<VerificationReport, TaijiError> {
+    ) -> Result<String, TaijiError> {
         let builder = self.factory.create_causal_verify_agent(&self.engine_ctx)?;
         let report = builder.verify(task_output, tool_results).await?;
-        Ok(report)
+        serde_json::to_string(&report).map_err(|e| TaijiError::Serde(e))
+    }
+}
+
+// ── Rig Tool implementation ─────────────────────────────────────────────
+
+impl Tool for CausalVerifyTool {
+    const NAME: &'static str = "causal_verify";
+
+    type Error = TaijiError;
+    type Args = CausalVerifyArgs;
+    type Output = String;
+
+    async fn definition(&self, _prompt: String) -> ToolDefinition {
+        ToolDefinition {
+            name: Self::NAME.to_string(),
+            description: "Verify a task output against L4 Truth constraints and produce a VerificationReport. Returns a JSON-serialized VerificationReport.".to_string(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "task_output": {
+                        "type": "string",
+                        "description": "The text output produced by the FittingAgent"
+                    },
+                    "tool_results": {
+                        "type": "array",
+                        "items": { "type": "string" },
+                        "description": "Raw result strings from any L1 skill tools that were called"
+                    }
+                },
+                "required": ["task_output"]
+            }),
+        }
+    }
+
+    async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
+        self.execute(&args.task_output, &args.tool_results).await
     }
 }

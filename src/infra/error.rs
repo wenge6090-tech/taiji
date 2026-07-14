@@ -6,8 +6,8 @@ pub enum TaijiError {
     #[error("config error: {context}")]
     Config { context: String },
 
-    #[error("Qdrant unavailable: {context}")]
-    QdrantUnavailable { context: String },
+    #[error("理络 knowledge store unavailable: {context}")]
+    KnowledgeStoreUnavailable { context: String },
 
     #[error("LLM call failed: {context}")]
     LLMCallFailed { context: String },

@@ -8,11 +8,14 @@
 //! - δ₂: L2 Bayesian confidence update.
 //! - δ₃: L3 grid rewiring (relation weight adjustments).
 //! - evolve(): Run δ₀→δ₃ in sequence, producing an EvolutionReport.
+//!
+//! # 理络 integration
+//! Evolution results are written to the 理络 knowledge store as cognitive
+//! assets (Grid type) so they can be revisited by future TPN cycles.
 
 use crate::infra::error::TaijiError;
-use crate::infra::qdrant::NskgClient;
+use crate::infra::knowledge::LiluoClient;
 use crate::infra::trace::TraceRecord;
-use qdrant_client::qdrant::{PointStruct, UpsertPointsBuilder};
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
@@ -44,17 +47,17 @@ pub struct EvolutionReport {
 
 /// DMN Cognitive Evolution Engine.
 ///
-/// Drives the four evolution operators (δ₀–δ₃) over the NSKG.
-/// Qdrant writes are logged rather than executed so the evolver
-/// remains functional even when the vector store is unavailable.
+/// Drives the four evolution operators (δ₀–δ₃) over the 理络 knowledge store.
+/// All writes go through [`LiluoClient`] which handles version++ and index
+/// maintenance automatically.
 pub struct CognitionEvolver {
-    nskg: Arc<NskgClient>,
+    liluo: Arc<LiluoClient>,
 }
 
 impl CognitionEvolver {
-    /// Create a new evolver with a reference to the NSKG client.
-    pub fn new(nskg: Arc<NskgClient>) -> Self {
-        Self { nskg }
+    /// Create a new evolver with a reference to the 理络 client.
+    pub fn new(liluo: Arc<LiluoClient>) -> Self {
+        Self { liluo }
     }
 
     /// δ₀: Prune low-confidence cognitive assets.
@@ -62,16 +65,15 @@ impl CognitionEvolver {
     /// Logs which nodes would be removed (confidence < `threshold`)
     /// and returns the count of hypothetical pruned nodes.
     pub async fn prune_low_confidence(&self, threshold: f64) -> Result<u64, TaijiError> {
-        let collection = self.nskg.collection_name();
         tracing::info!(
-            collection = %collection,
+            knowledge_dir = %self.liluo.knowledge_dir().display(),
             threshold = threshold,
             "[δ₀] prune_low_confidence: would remove nodes with confidence < {threshold}",
         );
 
-        // In a production implementation this would query Qdrant for
-        // points whose `confidence` payload field is below threshold,
-        // then delete them in batches. Here we log and return 0.
+        // In a production implementation this would query the 理络 via
+        // `search_by_tags()` or directory scan, then delete assets whose
+        // `confidence` is below threshold. Here we log and return 0.
         Ok(0)
     }
 
@@ -79,9 +81,8 @@ impl CognitionEvolver {
     ///
     /// Logs the tuning event. Returns `Ok(())` on success.
     pub async fn tune_skill(&self, skill_id: &str, success: bool) -> Result<(), TaijiError> {
-        let collection = self.nskg.collection_name();
         tracing::info!(
-            collection = %collection,
+            knowledge_dir = %self.liluo.knowledge_dir().display(),
             skill_id = %skill_id,
             success = success,
             "[δ₁] tune_skill: skill={skill_id} success={success}",
@@ -103,9 +104,8 @@ impl CognitionEvolver {
         let new_confidence =
             (1.0 + success_count as f64) / (2.0 + total);
 
-        let collection = self.nskg.collection_name();
         tracing::info!(
-            collection = %collection,
+            knowledge_dir = %self.liluo.knowledge_dir().display(),
             model_id = %model_id,
             success_count = success_count,
             fail_count = fail_count,
@@ -124,12 +124,10 @@ impl CognitionEvolver {
         grid_id: &str,
         relation_adjustments: &[RelationAdjustment],
     ) -> Result<(), TaijiError> {
-        let collection = self.nskg.collection_name();
-
         for adj in relation_adjustments {
             let clamped_delta = adj.delta.clamp(-1.0, 1.0);
             tracing::info!(
-                collection = %collection,
+                knowledge_dir = %self.liluo.knowledge_dir().display(),
                 grid_id = %grid_id,
                 target_id = %adj.target_id,
                 relation_type = %adj.relation_type,
@@ -156,9 +154,8 @@ impl CognitionEvolver {
         task_id: &str,
         trace_records: &[TraceRecord],
     ) -> Result<EvolutionReport, TaijiError> {
-        let collection = self.nskg.collection_name();
         tracing::info!(
-            collection = %collection,
+            knowledge_dir = %self.liluo.knowledge_dir().display(),
             task_id = %task_id,
             trace_count = trace_records.len(),
             "[evolve] starting evolution cycle for task={task_id} with {} trace records",
@@ -169,31 +166,24 @@ impl CognitionEvolver {
         let pruned = self.prune_low_confidence(0.1).await?;
 
         // δ₁: Tune skills from trace records.
-        // Each trace record with phase containing "工具调用" or "tool" is treated
-        // as a skill invocation. In a production system the successful/failed
-        // outcome would be determined by the trace's output or degraded flag.
         let mut skills_tuned = 0u64;
         for record in trace_records {
             if record.phase.contains("工具调用") || record.phase.contains("tool") {
-                // Determine success from the degraded flag (false = success).
                 self.tune_skill(&record.task_id, !record.degraded).await?;
                 skills_tuned += 1;
             }
         }
 
         // δ₂: Bayesian updates from trace records (placeholder logic).
-        // In production, trace records would be grouped by model_id for batch updates.
         let mut models_updated = 0u64;
         let mut confidence_delta = 0.0;
         for record in trace_records {
             if record.phase.contains("概率拟合") || record.phase.contains("fitting") {
-                // Simple heuristic: treat each fitting record as one success + one fail
-                // to keep the model evolving. Production code would use real counters.
                 let new_conf = self
                     .bayesian_update(&record.task_id, 1, 1)
                     .await?;
                 models_updated += 1;
-                confidence_delta += new_conf - 0.5; // diff from uniform prior
+                confidence_delta += new_conf - 0.5;
             }
         }
 
@@ -210,7 +200,7 @@ impl CognitionEvolver {
         };
 
         tracing::info!(
-            collection = %collection,
+            knowledge_dir = %self.liluo.knowledge_dir().display(),
             task_id = %task_id,
             pruned = report.pruned,
             skills_tuned = report.skills_tuned,
@@ -225,52 +215,59 @@ impl CognitionEvolver {
             report.confidence_delta,
         );
 
-        // ── Write evolution result to Qdrant ──
+        // ── Write evolution result to 理络 ──
         self.write_evolution(task_id, &report).await?;
 
         Ok(report)
     }
 
-    /// Write an evolution record as a Qdrant point (version++ pattern).
+    /// Write an evolution record as a 理络 cognitive asset.
+    ///
+    /// Stores the evolution report as a Grid asset in the knowledge store so
+    /// it can be discovered by future TPN cycles via BFS traversal.
     pub async fn write_evolution(
         &self,
         task_id: &str,
         report: &EvolutionReport,
     ) -> Result<(), TaijiError> {
-        let payload: serde_json::Map<String, serde_json::Value> = serde_json::to_value(report)
-            .map_err(|e| TaijiError::Other(e.to_string()))?
-            .as_object()
-            .cloned()
-            .unwrap_or_default();
-        let point = PointStruct::new(
-            format!("evolution::{task_id}"),
-            vec![0.0f32; 1536], // placeholder vector
-            payload,
-        );
-
-        let upsert = UpsertPointsBuilder::new(
-            self.nskg.collection_name(),
-            vec![point],
-        );
-
-        let qdrant = match self.nskg.client() {
-            Some(c) => c,
-            None => {
-                tracing::warn!(
-                    "Qdrant unavailable (degraded mode), skipping evolution write for {task_id}"
-                );
-                return Ok(());
-            }
+        use crate::infra::knowledge::{
+            AssetHeader, CognitiveAsset, GridAsset,
         };
 
-        qdrant
-            .upsert_points(upsert)
-            .await
-            .map_err(|e| TaijiError::QdrantUnavailable {
-                context: format!("failed to write evolution: {e}"),
-            })?;
+        let evolution_id = format!("evolution::{task_id}");
+        let mut grid = CognitiveAsset::Grid(GridAsset {
+            header: AssetHeader {
+                asset_type: "grid".into(),
+                layer: 3,
+                id: evolution_id.clone(),
+                name: format!("Evolution: {task_id}"),
+                description: format!(
+                    "DMN evolution cycle: pruned={} tuned={} updated={} rewired={} Δ={:.4}",
+                    report.pruned,
+                    report.skills_tuned,
+                    report.models_updated,
+                    report.grids_rewired,
+                    report.confidence_delta,
+                ),
+                tags: vec![
+                    "evolution".into(),
+                    "dmn".into(),
+                ],
+                confidence: 0.9,
+                version: 0, // set to 1 by save_asset
+            },
+            relations: vec![],
+        });
 
-        tracing::info!(task_id, evolution = ?report, "Evolution written to Qdrant");
+        self.liluo.save_asset(&mut grid).await?;
+
+        tracing::info!(
+            task_id,
+            evolution_id = %evolution_id,
+            evolution = ?report,
+            "Evolution written to 理络 knowledge store",
+        );
+
         Ok(())
     }
 }
@@ -278,47 +275,50 @@ impl CognitionEvolver {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::config::QdrantConfig;
     use std::sync::Arc;
+    use std::time::{SystemTime, UNIX_EPOCH};
+    use crate::infra::knowledge::LiluoClient;
 
-    /// Helper to build a CognitionEvolver backed by a real (or mock) NskgClient.
-    /// Uses a dedicated collection name to avoid colliding with production data.
-    async fn test_evolver() -> CognitionEvolver {
-        let config = QdrantConfig {
-            url: "http://localhost:6334".to_string(),
-            collection_name: "test_nskg_evolver".to_string(),
-        };
-        // If Qdrant is not running, NskgClient::new will fail. We wrap in an
-        // option so tests can gracefully skip. For unit-test purposes we
-        // tolerate the failure by constructing a minimal fallback.
-        let client = NskgClient::new(&config).await.unwrap_or_else(|_| {
-            // Minimal stub — NskgClient is required but not called for real I/O.
-            // In a real test environment, start Qdrant or mock the client.
-            panic!("Qdrant must be running on localhost:6334 for evolver tests");
-        });
-        CognitionEvolver::new(Arc::new(client))
+    /// Create a unique temporary directory for test isolation.
+    async fn test_knowledge_dir() -> std::path::PathBuf {
+        let ts = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("taiji_evolver_test_{ts}"))
+    }
+
+    /// Helper to build a CognitionEvolver backed by a file-system LiluoClient.
+    async fn test_evolver() -> (CognitionEvolver, std::path::PathBuf) {
+        let dir = test_knowledge_dir().await;
+        let client = Arc::new(
+            LiluoClient::new(&dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let evolver = CognitionEvolver::new(client);
+        (evolver, dir)
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_prune_low_confidence() {
-        let evolver = test_evolver().await;
+        let (evolver, dir) = test_evolver().await;
         let count = evolver.prune_low_confidence(0.1).await.unwrap();
         assert_eq!(count, 0);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_tune_skill() {
-        let evolver = test_evolver().await;
+        let (evolver, dir) = test_evolver().await;
         evolver.tune_skill("skill_test_001", true).await.unwrap();
         evolver.tune_skill("skill_test_002", false).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_bayesian_update() {
-        let evolver = test_evolver().await;
+        let (evolver, dir) = test_evolver().await;
         // 5 successes, 1 failure → (1+5)/(2+5+1) = 6/8 = 0.75
         let conf = evolver.bayesian_update("model_a", 5, 1).await.unwrap();
         assert!((conf - 0.75).abs() < 1e-10);
@@ -330,12 +330,13 @@ mod tests {
         // 10 successes, 0 failures → (1+10)/(2+10+0) = 11/12 ≈ 0.9167
         let conf = evolver.bayesian_update("model_c", 10, 0).await.unwrap();
         assert!((conf - 11.0 / 12.0).abs() < 1e-10);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_grid_rewire() {
-        let evolver = test_evolver().await;
+        let (evolver, dir) = test_evolver().await;
         let adjustments = vec![
             RelationAdjustment {
                 target_id: "node_a".to_string(),
@@ -349,23 +350,23 @@ mod tests {
             },
         ];
         evolver.grid_rewire("grid_001", &adjustments).await.unwrap();
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_evolve_empty_traces() {
-        let evolver = test_evolver().await;
+        let (evolver, dir) = test_evolver().await;
         let report = evolver.evolve("task_empty", &[]).await.unwrap();
         assert_eq!(report.pruned, 0);
         assert_eq!(report.skills_tuned, 0);
         assert_eq!(report.models_updated, 0);
         assert_eq!(report.grids_rewired, 0);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_evolve_with_traces() {
-        let evolver = test_evolver().await;
+        let (evolver, dir) = test_evolver().await;
         let traces = vec![
             TraceRecord {
                 ts: "2026-01-01T00:00:00Z".to_string(),
@@ -399,6 +400,22 @@ mod tests {
         let report = evolver.evolve("task_traced", &traces).await.unwrap();
         assert_eq!(report.skills_tuned, 1);
         assert_eq!(report.models_updated, 1);
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_evolve_writes_to_knowledge_store() {
+        let (evolver, dir) = test_evolver().await;
+        let _report = evolver.evolve("write_test", &[]).await.unwrap();
+
+        // The evolution report should have been saved as a Grid asset.
+        let loaded = evolver
+            .liluo
+            .load_asset("grid", "evolution::write_test")
+            .await;
+        assert!(loaded.is_ok(), "evolution asset should exist in knowledge store");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 
     #[test]

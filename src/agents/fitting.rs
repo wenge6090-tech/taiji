@@ -28,8 +28,12 @@ use std::sync::Arc;
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::providers::deepseek;
+use rig::tool::ToolDyn;
+use tokio_util::sync::CancellationToken;
 
 use crate::agents::factory::AgentFactory;
+use crate::agents::tools::causal_verify::CausalVerifyTool;
+use crate::agents::tools::recursive_decompose::RecursiveDecomposeTool;
 use crate::hooks::trace::TraceHook;
 use crate::infra::error::TaijiError;
 use crate::types::agent::MetaContext;
@@ -40,13 +44,17 @@ use crate::types::task::TPNResult;
 ///
 /// Created by [`AgentFactory::create_fitting_agent`].  Encapsulates the
 /// reasoning bias ([`MetaContext`]), engine context (depth, cycle, round),
-/// and a handle to the factory for spawning sub-agents during recursion.
+/// cancellation token, and a handle to the factory for spawning sub-agents
+/// during recursion.
 pub struct FittingAgentBuilder {
     depth: u32,
     meta_ctx: MetaContext,
     engine_ctx: EngineContext,
     factory: Arc<AgentFactory>,
     model: String,
+    /// Cancellation token propagated from the runner.
+    /// Used by [`RecursiveDecomposeTool`] to signal cancellation to subtasks.
+    cancel: CancellationToken,
 }
 
 impl FittingAgentBuilder {
@@ -60,6 +68,7 @@ impl FittingAgentBuilder {
         engine_ctx: EngineContext,
         factory: Arc<AgentFactory>,
         model: &str,
+        cancel: CancellationToken,
     ) -> Self {
         Self {
             depth,
@@ -67,6 +76,7 @@ impl FittingAgentBuilder {
             engine_ctx,
             factory,
             model: model.to_string(),
+            cancel,
         }
     }
 
@@ -187,24 +197,35 @@ impl FittingAgentBuilder {
         let safety_hook = self.factory.safety_hook.as_ref().clone();
         let agent_builder = agent_builder.hook(safety_hook).hook(trace_hook);
 
-        // ── Register L1 skill tools ──
-        // Each matched SkillRef is wrapped in a SkillTool adapter.
-        // The adapter implements Rig's Tool trait so the LLM can call it.
-        for skill in &self.meta_ctx.matched_skills {
-            let skill_tool = crate::agents::tools::skills::SkillTool::new(skill.clone());
-            // TODO: Register as Rig Tool<M> once SkillTool implements the Rig Tool trait.
-            // In the current phase (pre-Rig-API-verification), skills are tracked
-            // in the system prompt but not registered as callable tools.
-            let _ = skill_tool;
-        }
+        // ── Register L1 skill tools (dynamic names → ToolDyn) ──
+        let skill_tools: Vec<Box<dyn ToolDyn>> = self
+            .meta_ctx
+            .matched_skills
+            .iter()
+            .map(|skill| {
+                Box::new(crate::agents::tools::skills::SkillTool::new(skill.clone()))
+                    as Box<dyn ToolDyn>
+            })
+            .collect();
 
         // ── Register built-in composite tools ──
-        // RecursiveDecomposeTool and CausalVerifyTool need Rig Tool<M> adapters.
-        // For now they are documented in the system prompt instructions.
-        // TODO: agent_builder = agent_builder.tool(RecursiveDecomposeRigAdapter::new(...));
+        let recursive_decompose = RecursiveDecomposeTool::new(
+            self.factory.clone(),
+            self.engine_ctx.clone(),
+            self.depth,
+            self.cancel.clone(),
+            self.meta_ctx.clone(),
+        );
+        let causal_verify = CausalVerifyTool::new(
+            self.factory.clone(),
+            self.engine_ctx.clone(),
+        );
 
-        // ── Build the agent ──
-        let agent = agent_builder.build();
+        let agent = agent_builder
+            .tool(recursive_decompose)
+            .tool(causal_verify)
+            .tools(skill_tools)
+            .build();
 
         // ── Execute the prompt ──
         let response = agent
@@ -214,13 +235,47 @@ impl FittingAgentBuilder {
                 context: format!("FittingAgent LLM call failed: {e}"),
             })?;
 
+        // ── Extract tool call info from response (basic parsing) ──
+        // The LLM response may mention which tools were used; we capture
+        // available tool names from the registered set as a best-effort summary.
+        let registered_tool_names: Vec<String> = self
+            .meta_ctx
+            .matched_skills
+            .iter()
+            .map(|s| s.tool_name.clone())
+            .chain(std::iter::once("recursive_decompose".to_string()))
+            .chain(std::iter::once("causal_verify".to_string()))
+            .collect();
+
+        // Check which tools appear in the response text
+        let tools_used: Vec<String> = registered_tool_names
+            .into_iter()
+            .filter(|name| response.contains(name))
+            .collect();
+
+        // Deliverables directory exists per BCP — list files if any
+        let deliverables_dir = self.engine_ctx.task_dir.join("deliverables");
+        let deliverables: Vec<String> = if deliverables_dir.exists() {
+            std::fs::read_dir(&deliverables_dir)
+                .ok()
+                .map(|entries| {
+                    entries
+                        .filter_map(|e| e.ok())
+                        .map(|e| e.path().to_string_lossy().to_string())
+                        .collect()
+                })
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+
         Ok(TPNResult {
             task_id: self.engine_ctx.task_id.clone(),
             content: response,
-            tools_used: Vec::new(),
-            deliverables: Vec::new(),
+            tools_used,
+            deliverables,
             depth: self.depth,
-            rounds: 1,
+            rounds: self.engine_ctx.round + 1,
         })
     }
 
@@ -323,7 +378,7 @@ mod tests {
     use crate::hooks::safety::SafetyHook;
     use crate::infra::config::{LlmConfig, SafetyConfig, TaijiConfig};
     use crate::infra::provider::ProviderRegistry;
-    use crate::infra::qdrant::NskgClient;
+    use crate::infra::knowledge::LiluoClient;
     use crate::orchestration::constraint_engine::ConstraintEngine;
     use crate::orchestration::trigger_engine::SkillTriggerEngine;
     use crate::orchestration::worker_pool::WorkerPool;
@@ -344,32 +399,40 @@ mod tests {
                 ..Default::default()
             },
             runtime: crate::infra::config::RuntimeConfig::default(),
-            qdrant: crate::infra::config::QdrantConfig::default(),
+            knowledge: crate::infra::config::KnowledgeConfig::default(),
             safety: SafetyConfig::default(),
             mcp_servers: vec![],
         }
     }
 
-    /// Build an Arc<AgentFactory> for testing (requires Qdrant).
-    async fn build_factory_arc(config: TaijiConfig) -> Arc<AgentFactory> {
-        let nskg = Arc::new(
-            NskgClient::new(&config.qdrant)
+    /// Build an Arc<AgentFactory> for testing.
+    async fn build_factory_arc(config: TaijiConfig) -> (Arc<AgentFactory>, std::path::PathBuf) {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "taiji_fitting_test_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let liluo = Arc::new(
+            LiluoClient::new(&tmp_dir)
                 .await
-                .expect("Qdrant must be running"),
+                .expect("LiluoClient should initialise"),
         );
         let providers = Arc::new(
             ProviderRegistry::new(&config).expect("ProviderRegistry"),
         );
 
-        Arc::new(AgentFactory::new(
-            nskg,
+        let factory = Arc::new(AgentFactory::new(
+            liluo,
             providers,
             config,
             Arc::new(SafetyHook::new(&SafetyConfig::default())),
             Arc::new(WorkerPool::new(4)),
             Arc::new(ConstraintEngine::new()),
             Arc::new(SkillTriggerEngine::new()),
-        ))
+        ));
+        (factory, tmp_dir)
     }
 
     fn sample_meta_context() -> MetaContext {
@@ -438,10 +501,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_fitting_agent_builder_construction() {
         let config = make_config();
-        let factory = build_factory_arc(config).await;
+        let (factory, _tmp_dir) = build_factory_arc(config).await;
         let meta_ctx = sample_meta_context();
         let engine_ctx = EngineContext {
             task_id: "test-task-1".into(),
@@ -451,19 +513,20 @@ mod tests {
             round: 0,
         };
 
-        let builder = factory.create_fitting_agent(0, &meta_ctx, &engine_ctx);
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let builder = factory.create_fitting_agent(0, &meta_ctx, &engine_ctx, cancel);
         assert!(builder.is_ok());
         let builder = builder.unwrap();
         assert_eq!(builder.engine_ctx().task_id, "test-task-1");
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant + LLM API key"]
+    #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_fitting_agent_run_integration() {
         // Integration test: runs the full Rig agent pipeline.
-        // Requires Qdrant (for factory construction) + a valid DEEPSEEK_API_KEY.
+        // Requires a valid DEEPSEEK_API_KEY.
         let config = make_config();
-        let factory = build_factory_arc(config).await;
+        let (factory, _tmp_dir) = build_factory_arc(config).await;
         let meta_ctx = sample_meta_context();
         let engine_ctx = EngineContext {
             task_id: "test-task-2".into(),
@@ -473,8 +536,9 @@ mod tests {
             round: 0,
         };
 
+        let cancel = tokio_util::sync::CancellationToken::new();
         let builder = factory
-            .create_fitting_agent(1, &meta_ctx, &engine_ctx)
+            .create_fitting_agent(1, &meta_ctx, &engine_ctx, cancel)
             .expect("builder");
 
         let result = builder.run("Write a test for the logging module").await;
@@ -498,10 +562,9 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_fitting_agent_depth_check() {
         let config = make_config();
-        let factory = build_factory_arc(config).await;
+        let (factory, _tmp_dir) = build_factory_arc(config).await;
         let meta_ctx = sample_meta_context();
 
         // Depth 1, but max_depth defaults to 2 — should pass the guard.
@@ -512,15 +575,16 @@ mod tests {
             cycle: 1,
             round: 0,
         };
+        let cancel = tokio_util::sync::CancellationToken::new();
         let builder = factory
-            .create_fitting_agent(1, &meta_ctx, &engine_ctx)
+            .create_fitting_agent(1, &meta_ctx, &engine_ctx, cancel)
             .expect("builder");
 
         // run() should NOT return MaxDepthExceeded because 1 <= 2.
         // It will return LLMCallFailed because no API key is available.
         let result = builder.run("test").await;
         match result {
-            Ok(_) => { /* valid result — requires Qdrant + API key */ }
+            Ok(_) => { /* valid result — requires API key */ }
             Err(e) => {
                 match e {
                     TaijiError::MaxDepthExceeded { .. } => {

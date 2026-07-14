@@ -187,7 +187,7 @@ impl DmnConsumer {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&file_name);
 
-                // Evolve with retry (3 attempts for transient Qdrant errors).
+                // Evolve with retry (3 attempts for transient errors).
                 const MAX_EVOLVE_RETRIES: u32 = 3;
                 let mut evolve_result = Err(TaijiError::Other("not started".into()));
                 for attempt in 1..=MAX_EVOLVE_RETRIES {
@@ -316,8 +316,7 @@ async fn move_to_dead(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::config::QdrantConfig;
-    use crate::infra::qdrant::NskgClient;
+    use crate::infra::knowledge::LiluoClient;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -332,19 +331,23 @@ mod tests {
         root
     }
 
-    /// Build a DmnConsumer backed by a real evolver (requires Qdrant).
-    async fn test_consumer(data_root: &Path) -> DmnConsumer {
-        let config = QdrantConfig {
-            url: "http://localhost:6334".to_string(),
-            collection_name: "test_nskg_dmn".to_string(),
-        };
+    /// Build a DmnConsumer backed by a file-system LiluoClient.
+    async fn test_consumer(data_root: &Path) -> (DmnConsumer, PathBuf) {
+        let knowledge_dir = std::env::temp_dir().join(format!(
+            "taiji_dmn_knowledge_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let client = Arc::new(
-            NskgClient::new(&config)
+            LiluoClient::new(&knowledge_dir)
                 .await
-                .expect("Qdrant must be running on localhost:6334 for DMN consumer tests"),
+                .expect("LiluoClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client));
-        DmnConsumer::new(evolver, CancellationToken::new(), data_root)
+        let consumer = DmnConsumer::new(evolver, CancellationToken::new(), data_root);
+        (consumer, knowledge_dir)
     }
 
     /// Clean up a test root directory.
@@ -353,14 +356,47 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_spawn_and_cancel() {
         let data_root = create_test_root("spawn_cancel").await;
-        let cancel = CancellationToken::new();
-        let consumer = test_consumer(&data_root).await;
+        let (consumer, knowledge_dir) = test_consumer(&data_root).await;
         let handle = consumer.spawn();
 
         // Give the loop time to spin once, then cancel.
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+        // The consumer was created with its own CancellationToken.
+        // We create a new token to cancel it from outside.
+        // Actually, we need to drop the consumer or signal its token.
+        // For this test we just drop the handle after a timeout.
+        // The consumer loops forever so we use timeout.
+        let result = tokio::time::timeout(
+            tokio::time::Duration::from_millis(500),
+            handle,
+        ).await;
+
+        // The handle should still be running (timeout), or done if cancelled.
+        // Since we didn't cancel the internal token, it runs forever.
+        // We just verify it started without panicking.
+        assert!(result.is_err(), "consumer should run indefinitely until cancelled");
+
+        // Manually join to clean up
+        // The consumer will run until the process exits; we just clean up the dirs.
+        cleanup(&data_root).await;
+        cleanup(&knowledge_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_spawn_with_cancellation() {
+        let data_root = create_test_root("spawn_cancel2").await;
+        let cancel = CancellationToken::new();
+        let (consumer, knowledge_dir) = test_consumer(&data_root).await;
+
+        // Recreate consumer with the external cancellation token.
+        let evolver = consumer.evolver; // reuse the evolver
+        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root);
+        let handle = consumer.spawn();
+
+        // Give the loop time to spin once.
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
         cancel.cancel();
 
@@ -371,13 +407,14 @@ mod tests {
             .expect("consumer task panicked");
 
         cleanup(&data_root).await;
+        cleanup(&knowledge_dir).await;
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_process_valid_file() {
         let data_root = create_test_root("valid_file").await;
         let pending = data_root.join("pending");
+        let cancel = CancellationToken::new();
 
         // Write a valid JSON task file.
         let task_file = pending.join("task_abc123.json");
@@ -389,8 +426,20 @@ mod tests {
             .await
             .unwrap();
 
-        let cancel = CancellationToken::new();
-        let consumer = test_consumer(&data_root).await;
+        let knowledge_dir = std::env::temp_dir().join(format!(
+            "taiji_dmn_knowledge_vf_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let client = Arc::new(
+            LiluoClient::new(&knowledge_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let evolver = Arc::new(CognitionEvolver::new(client));
+        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root);
         let handle = consumer.spawn();
 
         // Allow one processing cycle.
@@ -405,20 +454,33 @@ mod tests {
         assert!(!task_file.exists(), "expected processed file to be deleted");
 
         cleanup(&data_root).await;
+        cleanup(&knowledge_dir).await;
     }
 
     #[tokio::test]
-    #[ignore = "requires Qdrant on localhost:6334"]
     async fn test_process_invalid_file_moves_to_dead() {
         let data_root = create_test_root("invalid_file").await;
         let pending = data_root.join("pending");
+        let cancel = CancellationToken::new();
 
         // Write a corrupt JSON file.
         let task_file = pending.join("corrupt.json");
         fs::write(&task_file, b"not valid json").await.unwrap();
 
-        let cancel = CancellationToken::new();
-        let consumer = test_consumer(&data_root).await;
+        let knowledge_dir = std::env::temp_dir().join(format!(
+            "taiji_dmn_knowledge_if_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let client = Arc::new(
+            LiluoClient::new(&knowledge_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let evolver = Arc::new(CognitionEvolver::new(client));
+        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root);
         let handle = consumer.spawn();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
@@ -443,5 +505,6 @@ mod tests {
         );
 
         cleanup(&data_root).await;
+        cleanup(&knowledge_dir).await;
     }
 }

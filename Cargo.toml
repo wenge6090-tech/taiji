@@ -36,12 +36,14 @@ async-trait = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
-# Qdrant (direct client, for schema management)
-qdrant-client = "1"
-
 # MCP protocol
 rmcp = { version = "0.8", features = ["server", "client", "transport-child-process"] }
 
 # Rate limiting
 tokio-util = "0.7"
 governor = "0.6"
+
+[patch.crates-io]
+rig = { path = "vendor/rig" }
+rig-core = { path = "vendor/rig-core" }
+rig-derive = { path = "vendor/rig-derive" }
