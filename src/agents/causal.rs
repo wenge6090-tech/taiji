@@ -35,6 +35,7 @@ use rig::providers::deepseek;
 use crate::infra::error::TaijiError;
 use crate::infra::provider::ProviderRegistry;
 use crate::orchestration::constraint_engine::ConstraintEngine;
+use crate::types::agent::{AgentMode, MetaContext};
 use crate::types::execution::EngineContext;
 use crate::types::task::DecomposeResult;
 use crate::types::verification::{
@@ -162,6 +163,8 @@ impl CausalVerifyAgentBuilder {
         &self,
         task_output: &str,
         tool_results: &[String],
+        meta_ctx: &MetaContext,
+        mode: AgentMode,
     ) -> Result<VerificationReport, TaijiError> {
         // ── Load constraints relevant to this task ──
         // In production, pass actual task_type_tags from the task spec.
@@ -203,7 +206,7 @@ impl CausalVerifyAgentBuilder {
             }
 
             // Soft violations only — we'll still run the LLM with them as
-            // additional context.  In degraded mode we just note them.
+            // additional context.
             tracing::debug!(
                 task_id = %self.engine_ctx.task_id,
                 soft_violations = pre_check.violations.len(),
@@ -211,7 +214,15 @@ impl CausalVerifyAgentBuilder {
             );
         }
 
-        // ── Step 2: LLM verification (production path) ──
+        // ── Step 2: Select prompt — prefer MetaAgent-composed, fallback to mode template ──
+        let system_prompt = match &meta_ctx.verify_system_prompt {
+            Some(prompt) => prompt.as_str(),
+            None => match mode {
+                AgentMode::Orchestration => VERIFY_ORC_SYSTEM_PROMPT,
+                AgentMode::Execution => VERIFY_EXEC_SYSTEM_PROMPT,
+            },
+        };
+
         // Build soft violation context for the LLM prompt
         let soft_context: Vec<String> = pre_check
             .violations
@@ -224,7 +235,7 @@ impl CausalVerifyAgentBuilder {
         let client: Arc<deepseek::Client> = self.provider.client("deepseek")?;
         let agent = client
             .agent(&self.model)
-            .preamble(VERIFY_SYSTEM_PROMPT)
+            .preamble(system_prompt)
             .max_tokens(1024u64)
             .default_max_turns(3usize)
             .build();
@@ -260,6 +271,7 @@ impl CausalVerifyAgentBuilder {
             task_id = %self.engine_ctx.task_id,
             route = ?report.route,
             confidence = report.confidence,
+            mode = ?mode,
             "CausalVerifyAgent — LLM verification completed"
         );
 
@@ -267,33 +279,77 @@ impl CausalVerifyAgentBuilder {
     }
 }
 
-/// System prompt for the CausalAgent in **verify** mode.
+/// System prompt for the CausalAgent in **verify · Orchestration** mode.
 ///
-/// Starts with the required Chinese identifier per AGENTS.md §2:
-/// "CausalAgent verify 模式的 system prompt 必须以 '你是因果验证器' 开头".
-const VERIFY_SYSTEM_PROMPT: &str = r#"你是因果验证器 (Causal Verifier · Yin Agent).
+/// Focuses on MECE completeness, dependency correctness, and decomposition
+/// granularity. Route preference: BACK_TO_META for decomposition issues.
+const VERIFY_ORC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 编排验证 (Causal Verifier · Orchestration).
 
-Your role is to verify whether the task output satisfies all applicable
-constraints and produces correct results.
+You are verifying an **orchestration** task that decomposed a parent task into
+subtasks and synthesized their results.
 
-Instructions:
-1. Review the task output and tool results provided below.
-2. Check each constraint carefully — hard violations must be flagged.
-3. Provide a structured verification report in JSON format:
-   {
-     "route": "Pass" | "BackToTpn" | "BackToMeta",
-     "confidence": 0.0..1.0,
-     "summary": "Brief justification for the decision",
-     "constraint_violations": ["description of each violation"]
-   }
+Your focus:
+1. MECE completeness — did the decomposition cover all required dimensions?
+2. Dependency correctness — are subtask dependencies properly ordered?
+3. Granularity — were subtasks split at the right level (not too coarse, not too fine)?
+4. Synthesis quality — does the integrated result make sense as a whole?
 
-Routing:
-- "Pass":        Output is correct and converges. Proceed to DMN reflection.
-- "BackToTpn":   Output has minor issues — retry probability fitting (yang).
-- "BackToMeta":  Output has fundamental issues — retry weight update (yuan).
+## File Verification
+The task output may reference deliverable files by absolute path.  To verify
+content quality, you MUST use the `read` tool (or equivalent) to open each
+referenced file and inspect its contents.  Do NOT rely solely on the summary
+text — read the actual files to confirm compliance.
 
-Be thorough but fair. False positives (rejecting correct output) waste cycles,
-while false negatives (accepting incorrect output) degrade the knowledge base.
+Provide a structured verification report in JSON format:
+{
+  "route": "Pass" | "BackToTpn" | "BackToMeta",
+  "confidence": 0.0..1.0,
+  "summary": "Brief justification for the decision",
+  "constraint_violations": ["description of each violation"]
+}
+
+Routing guidance:
+- "Pass":        Good decomposition + synthesis. Proceed.
+- "BackToTpn":   Minor issues — retry probability fitting with same strategy.
+- "BackToMeta":  Fundamental decomposition problem — need new reasoning paths.
+  Prefer BACK_TO_META when the decomposition strategy itself is flawed.
+"#;
+
+/// System prompt for the CausalAgent in **verify · Execution** mode.
+///
+/// Focuses on requirement satisfaction, artifact quality, and constraint
+/// adherence. Route preference: BACK_TO_TPN for execution quality issues.
+const VERIFY_EXEC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 执行验证 (Causal Verifier · Execution).
+
+You are verifying an **execution** task that directly produced output using
+available tools.
+
+Your focus:
+1. Requirement satisfaction — does the output meet the task description?
+2. Artifact quality — are deliverables well-formed and usable?
+3. Constraint adherence — are all L4 Truth constraints satisfied?
+4. Completeness — was the task fully addressed?
+
+## File Verification
+The task output may reference deliverable files by absolute path.  You MUST
+use the `read` tool (or equivalent) to open each referenced file and inspect
+its contents.  Do NOT rely solely on the summary text — read the actual files
+to confirm compliance.
+
+Provide a structured verification report in JSON format:
+{
+  "route": "Pass" | "BackToTpn" | "BackToMeta",
+  "confidence": 0.0..1.0,
+  "summary": "Brief justification for the decision",
+  "constraint_violations": ["description of each violation"]
+}
+
+Routing guidance:
+- "Pass":        Output satisfies requirements. Proceed.
+- "BackToTpn":   Minor quality issues — retry execution with improvements.
+  Prefer BACK_TO_TPN when execution quality needs improvement.
+- "BackToMeta":  Fundamental issues — task specification or approach is wrong.
+  Only use BACK_TO_META when the execution strategy itself is invalid.
 "#;
 
 // ---------------------------------------------------------------------------
@@ -373,6 +429,8 @@ impl CausalConvergeAgentBuilder {
     pub async fn converge(
         &self,
         subtask_results: &[DecomposeResult],
+        meta_ctx: &MetaContext,
+        mode: AgentMode,
     ) -> Result<ConvergenceDecision, TaijiError> {
         let total = subtask_results.len();
 
@@ -384,11 +442,20 @@ impl CausalConvergeAgentBuilder {
             });
         }
 
+        // ── Select prompt — prefer MetaAgent-composed, fallback to mode template ──
+        let system_prompt = match &meta_ctx.converge_system_prompt {
+            Some(prompt) => prompt.as_str(),
+            None => match mode {
+                AgentMode::Orchestration => CONVERGE_ORC_SYSTEM_PROMPT,
+                AgentMode::Execution => CONVERGE_EXEC_SYSTEM_PROMPT,
+            },
+        };
+
         // ── Production path: LLM convergence judgment ──
         let client: Arc<deepseek::Client> = self.provider.client("deepseek")?;
         let agent = client
             .agent(&self.model)
-            .preamble(CONVERGE_SYSTEM_PROMPT)
+            .preamble(system_prompt)
             .max_tokens(1024u64)
             .default_max_turns(3usize)
             .build();
@@ -416,6 +483,7 @@ impl CausalConvergeAgentBuilder {
             task_id = %self.engine_ctx.task_id,
             subtasks = total,
             status = ?decision.status,
+            mode = ?mode,
             "CausalConvergeAgent — LLM convergence judgment completed"
         );
 
@@ -423,31 +491,65 @@ impl CausalConvergeAgentBuilder {
     }
 }
 
-/// System prompt for the CausalAgent in **converge** mode.
+/// System prompt for the CausalAgent in **converge · Orchestration** mode.
 ///
-/// Starts with the required Chinese identifier per AGENTS.md §2:
-/// "CausalAgent converge 模式的 system prompt 必须以 '你是收敛判决器' 开头".
-#[allow(dead_code)] // R2 production path reserve — used in converge() production path
-const CONVERGE_SYSTEM_PROMPT: &str = r#"你是收敛判决器 (Convergence Judge · Yin Agent).
+/// Aggregates multi-subtask results — focus on coverage and consistency.
+const CONVERGE_ORC_SYSTEM_PROMPT: &str = r#"你是收敛判决器 — 编排收敛 (Convergence Judge · Orchestration).
 
-Your role is to aggregate results from all subtasks of a recursive
-decomposition and decide whether the overall task has converged.
+You are aggregating results from multiple subtasks of a decomposed task.
+The agent operated in **Orchestration** mode — it split work across subtasks
+and is now integrating their outputs.
 
-Instructions:
-1. Review the results from each subtask.
-2. Consider interdependencies — some subtask failures may be recoverable.
-3. Produce a convergence decision in JSON format:
-   {
-     "status": "Converged" | "Partial" | "Diverged",
-     "task_summary": "Explanation of the decision"
-   }
+Your focus:
+1. Coverage — do the subtask results collectively cover the full task scope?
+2. Consistency — are the results compatible (no contradictions across subtasks)?
+3. Integration — can the partial results be combined into a coherent whole?
 
-- "Converged": All subtasks completed, task objective met.
-- "Partial": Some subtasks incomplete or failed, but partial progress made.
-- "Diverged": Fundamental failure — the decomposition strategy needs revision.
+## Deliverable Verification
+Each subtask result includes a `deliverables` field containing absolute paths
+to produced files.  You MUST use the `read` tool to open each file and verify:
+- Cross-subtask consistency — do files from different subtasks agree?
+- Completeness — are all required artifacts present?
+- Quality — do the files meet the required standards?
 
-Be precise. Premature convergence leads to incomplete knowledge;
-false divergence wastes cycles on unnecessary retries.
+Produce a convergence decision in JSON format:
+{
+  "status": "Converged" | "Partial" | "Diverged",
+  "task_summary": "Explanation of the decision"
+}
+
+- "Converged": All dimensions covered, results consistent.
+- "Partial": Some gaps or inconsistencies remain, but partial progress made.
+- "Diverged": Fundamental incoherence — decomposition strategy needs revision.
+"#;
+
+/// System prompt for the CausalAgent in **converge · Execution** mode.
+///
+/// Judging whether a single execution task met its goal.
+const CONVERGE_EXEC_SYSTEM_PROMPT: &str = r#"你是收敛判决器 — 执行收敛 (Convergence Judge · Execution).
+
+You are evaluating whether a single execution task met its objective.
+The agent operated in **Execution** mode — it directly produced output.
+
+Your focus:
+1. Goal achievement — was the single task objective met?
+2. Self-contained quality — is the output usable on its own?
+3. Finality — does the output represent a complete answer?
+
+## Deliverable Verification
+The subtask result includes a `deliverables` field containing absolute paths
+to produced files.  You MUST use the `read` tool to open each file and verify
+that the contents match the claimed results.
+
+Produce a convergence decision in JSON format:
+{
+  "status": "Converged" | "Partial" | "Diverged",
+  "task_summary": "Explanation of the decision"
+}
+
+- "Converged": Goal met, output is complete.
+- "Partial": Partial progress, some aspects still outstanding.
+- "Diverged": Execution failed to meet the objective.
 "#;
 
 // ---------------------------------------------------------------------------
@@ -504,7 +606,7 @@ mod tests {
             "deepseek-chat",
         );
 
-        let report = builder.verify("CausalAgent executed and verified the task output against all L4 Truth constraints.", &[]).await.expect("verify");
+        let report = builder.verify("CausalAgent executed and verified the task output against all L4 Truth constraints.", &[], &MetaContext::empty(), AgentMode::Orchestration).await.expect("verify");
         assert_eq!(report.route, VerificationRoute::Pass);
     }
 
@@ -523,7 +625,7 @@ mod tests {
 
         // An empty task output violates truth:no-fabrication (hard),
         // which should return BackToMeta.
-        let report = builder.verify("", &[]).await.expect("verify");
+        let report = builder.verify("", &[], &MetaContext::empty(), AgentMode::Execution).await.expect("verify");
         assert_eq!(report.route, VerificationRoute::BackToMeta);
         assert!(!report.constraint_violations.is_empty());
     }
@@ -542,8 +644,7 @@ mod tests {
             "deepseek-chat",
         );
 
-        let report = builder.verify("Adequate summary for audit.", &[]).await.expect("verify");
-        // In degraded mode, soft violations are noted but route is Pass.
+        let report = builder.verify("Adequate summary for audit.", &[], &MetaContext::empty(), AgentMode::Execution).await.expect("verify");
         assert_eq!(report.route, VerificationRoute::Pass);
     }
 
@@ -559,7 +660,7 @@ mod tests {
             "deepseek-chat",
         );
 
-        let decision = builder.converge(&[]).await.expect("converge");
+        let decision = builder.converge(&[], &MetaContext::empty(), AgentMode::Orchestration).await.expect("converge");
         assert_eq!(decision.status, ConvergenceStatus::Converged);
     }
 
@@ -579,15 +680,17 @@ mod tests {
                 summary: "Done".into(),
                 status: ConvergenceStatus::Converged,
                 subtask_count: 0,
+                deliverables: vec![],
             },
             DecomposeResult {
                 summary: "Done too".into(),
                 status: ConvergenceStatus::Converged,
                 subtask_count: 0,
+                deliverables: vec![],
             },
         ];
 
-        let decision = builder.converge(&results).await.expect("converge");
+        let decision = builder.converge(&results, &MetaContext::empty(), AgentMode::Execution).await.expect("converge");
         assert_eq!(decision.status, ConvergenceStatus::Converged);
     }
 
@@ -607,15 +710,17 @@ mod tests {
                 summary: "Done".into(),
                 status: ConvergenceStatus::Converged,
                 subtask_count: 0,
+                deliverables: vec![],
             },
             DecomposeResult {
                 summary: "Partial".into(),
                 status: ConvergenceStatus::Partial,
                 subtask_count: 0,
+                deliverables: vec![],
             },
         ];
 
-        let decision = builder.converge(&results).await.expect("converge");
+        let decision = builder.converge(&results, &MetaContext::empty(), AgentMode::Orchestration).await.expect("converge");
         assert_eq!(decision.status, ConvergenceStatus::Partial);
     }
 
@@ -635,33 +740,56 @@ mod tests {
                 summary: "Failed".into(),
                 status: ConvergenceStatus::Diverged,
                 subtask_count: 0,
+                deliverables: vec![],
             },
             DecomposeResult {
                 summary: "Also failed".into(),
                 status: ConvergenceStatus::Diverged,
                 subtask_count: 0,
+                deliverables: vec![],
             },
         ];
 
-        let decision = builder.converge(&results).await.expect("converge");
+        let decision = builder.converge(&results, &MetaContext::empty(), AgentMode::Execution).await.expect("converge");
         assert_eq!(decision.status, ConvergenceStatus::Diverged);
     }
 
     // ── System prompt tests ─────────────────────────────────────────────
 
     #[test]
-    fn test_verify_system_prompt_starts_with_chinese() {
-        assert!(VERIFY_SYSTEM_PROMPT.starts_with("你是因果验证器"));
-        assert!(VERIFY_SYSTEM_PROMPT.contains("Pass"));
-        assert!(VERIFY_SYSTEM_PROMPT.contains("BackToTpn"));
-        assert!(VERIFY_SYSTEM_PROMPT.contains("BackToMeta"));
+    fn test_verify_orc_system_prompt_starts_with_chinese() {
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.starts_with("你是因果验证器"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("Pass"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToTpn"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToMeta"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("编排"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("Orchestration"));
     }
 
     #[test]
-    fn test_converge_system_prompt_starts_with_chinese() {
-        assert!(CONVERGE_SYSTEM_PROMPT.starts_with("你是收敛判决器"));
-        assert!(CONVERGE_SYSTEM_PROMPT.contains("Converged"));
-        assert!(CONVERGE_SYSTEM_PROMPT.contains("Partial"));
-        assert!(CONVERGE_SYSTEM_PROMPT.contains("Diverged"));
+    fn test_verify_exec_system_prompt_starts_with_chinese() {
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.starts_with("你是因果验证器"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("Pass"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToTpn"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToMeta"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("Execution"));
+    }
+
+    #[test]
+    fn test_converge_orc_system_prompt_starts_with_chinese() {
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.starts_with("你是收敛判决器"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Converged"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Partial"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Diverged"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Orchestration"));
+    }
+
+    #[test]
+    fn test_converge_exec_system_prompt_starts_with_chinese() {
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.starts_with("你是收敛判决器"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Converged"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Partial"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Diverged"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Execution"));
     }
 }

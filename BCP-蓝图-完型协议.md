@@ -1,10 +1,10 @@
 # taiji 架构蓝图 — TPN-DMN-理络 递归引擎（Rust / Rig）
 
-> 蓝图-完型协议 V9（2026-07-14）。
+> 蓝图-完型协议 V11（2026-07-15）。
 >
 > **本文件 = 唯一事实。** 实施约束与避坑规则见 [`AGENTS.md`](./AGENTS.md)（给 AI 自检）。
 >
-> **V9 变更：** 颗粒度调整——移除逐文件路径清单、trace 字段表、风险日志、路线图、演化 changelog。新增 TPN sequence 图、关键架构决策章。设计哲学压缩。
+> **V11 变更：** 多层递归绝对路径传递——DecomposeResult +deliverables、YangPrompt +parent_deliverables、6 份硬编码模板中加入 deliverable 路径指令（阳列出绝对路径、阴读文件验证）、权限单向向下覆盖模型。新增 §8.9。
 
 ---
 
@@ -12,7 +12,11 @@
 
 ### 1.1 异层同构 (Isomorphic Recursion)
 
-递归树的每一层结构完全相同。depth=0 的根节点和 depth=N 的子节点执行相同的 TPN 三阶段循环、拥有相同的文件目录布局、收到相同的 system prompt 模板。唯一变量是 `depth`。由同一结构在不同深度重复应用产生复杂行为——不为不同深度写不同的控制流。
+递归树的每一层结构完全相同。depth=0 的根节点和 depth=N 的子节点执行相同的 TPN 三阶段循环、拥有相同的文件目录布局。**system prompt 的内容因 `AgentMode`（编排或执行）而分化**，但 prompt 的注入点和构建函数相同——同一结构在不同深度和模式下重复应用产生复杂行为，不为不同深度写不同的控制流。
+
+`AgentMode` 决定 prompt 内容偏向：**Orchestration（编排）** 模式强调任务拆解与综合，**Execution（执行）** 模式强调直接产出。mode 不由 depth 推导（根任务固定 Orchestration，叶子强制 Execution），而是由父 LLM 在拆解时显式分配。
+
+**提示词来源：** FittingAgent / CausalAgent 的 system prompt 由 MetaAgent 在每次 TPN 循环的开始阶段动态编排。MetaAgent 首先查询理络 `prompts/` 层的提示词资产（标签匹配 + 置信度排序），若有高置信度匹配则调用 LLM 将资产组合为三份完整的 system prompt（fitting、verify、converge），注入 `MetaContext` 传递到下游 Agent。无理络匹配时降级到 4 个 Base 硬编码模板（FittingAgent 的编排/执行各一、CausalAgent 的 verify/converge 各一），下游 Agent 自动使用内置回退。
 
 ### 1.2 三相互补 (Tri-Phase Complementarity)
 
@@ -40,12 +44,13 @@ LLM 是微观概率性的体现——每次 prompt 调用随机、不可精确�
 
 | 组件 | 角色 | 说明 |
 |------|------|------|
+| **L5 Prompt** | 提示词模板 | 动态编排的 system prompt 资产，标签匹配 + 置信度排序 |
 | **L4 Truth** | 不变约束 | 硬性规约（不编造事实），运行时加载为约束 |
 | **L3 Grid** | 复合推理角色 | 含 role_prompt、workflow，关联 Skills/Models/Truths |
 | **L2 Model** | 概率经验模式 | Bayesian 置信度（Beta 后验），从执行轨迹提取 |
 | **L1 Skill** | 可执行工具 | 包装具体工具调用，带 success_rate 和 use_count |
-| **理络 (Liluo)** | 认知仓库 | 四层 YAML 存储于 `.taiji/knowledge/` |
-| **MetaAgent** | 权重更新·元 | 瞬态 Rig Agent，遍历理络图谱，`max_turns=1` |
+| **理络 (Liluo)** | 认知仓库 | 五层 YAML 存储于 `.taiji/knowledge/` |
+| **MetaAgent** | 权重更新·元 | 瞬态 Rig Agent，查询理络所有五层资产 + LLM 编排提示词 + 输出 MetaContext，`max_turns=1` |
 | **FittingAgent** | 概率拟合·阳 | 瞬态 Rig Agent，L1 Skills + recursive_decompose + causal_verify，`max_turns=30` |
 | **CausalAgent** | 因果验证·阴 | 瞬态 Rig Agent（双模式：verify / converge），`max_turns=3` |
 | **AgentFactory** | 瞬态 Agent 工厂 | 中枢组件，持有基础设施 Arc 引用 |
@@ -189,11 +194,14 @@ flowchart TB
 | # | 契约 | 说明 |
 |---|------|------|
 | 1 | `RecursiveDecomposeTool.execute(subtasks: Vec[SubtaskSpec]) -> DecomposeResult` | 输入 LLM 拆解的子任务 → spawn 子 FittingAgent → join_all → CausalAgent.converge() → 返回收敛结果 |
-| 2 | `AgentFactory.create_fitting_agent(depth, meta_ctx, engine_ctx, cancel) -> FittingAgentBuilder` | 从 MetaContext + EngineContext + CancellationToken + 理络 创建阳 Agent，builder.run() 后销毁 |
-| 3 | `FittingAgentBuilder { depth, meta_ctx, engine_ctx, factory, model, cancel: CancellationToken }` | 阳 Agent 构建器，持有取消令牌用于递归子任务传播 |
+| 2 | `AgentFactory.create_fitting_agent(depth, mode, meta_ctx, engine_ctx, cancel) -> FittingAgentBuilder` | 从 MetaContext + EngineContext + CancellationToken + 理络 创建阳 Agent，builder.run() 后销毁 |
+| 3 | `FittingAgentBuilder { depth, mode, meta_ctx, engine_ctx, factory, model, cancel: CancellationToken }` | 阳 Agent 构建器，mode 决定 prompt 选择（编排/执行） |
 | 4 | `SafetyHook (AgentHook)` | 在 ToolCall 事件上检查路径穿越/命令注入/SSRF，返回 Flow::cont() 或 Flow::skip() |
 | 5 | `ConstraintEngine.check_constraints(output, constraints) -> ConstraintResult` | CausalAgent.verify 前置检查，Hard 违反直接短路返回 BACK_TO_META |
-| 6 | `DMN Consumer (独立 tokio::spawn)` | 指数退避轮询 pending/ 队列，调用 CognitionEvolver，单写者更新理络 |
+| 6 | `MetaAgentBuilder.run(task_description, task_type_tags) -> MetaContext` | 查询理络 prompts/ 标签匹配 → 置信度排序 → LLM 编排三份 system prompt（fitting/verify/converge）→ 注入 MetaContext；无理络资产时降级返回 MetaContext::empty() |
+| 7 | `DMN Consumer (独立 tokio::spawn)` | 指数退避轮询 pending/ 队列，调用 CognitionEvolver，单写者更新理络 |
+| 8 | `CausalVerifyAgentBuilder.verify(output, tool_results, meta_ctx, mode) -> VerificationReport` | 优先使用 meta_ctx.verify_system_prompt，None 时降级到 mode 对应的硬编码模板 |
+| 9 | `CausalConvergeAgentBuilder.converge(subtask_results, meta_ctx, mode) -> ConvergenceDecision` | 优先使用 meta_ctx.converge_system_prompt，None 时降级到 mode 对应的硬编码模板 |
 
 ---
 
@@ -201,6 +209,12 @@ flowchart TB
 
 ```mermaid
 classDiagram
+    class AgentMode {
+        <<enum>>
+        Orchestration
+        Execution
+    }
+
     class Task {
         +id: String
         +description: String
@@ -214,12 +228,14 @@ classDiagram
         +description: String
         +verification_spec: String
         +context: Value
+        +mode: AgentMode
     }
 
     class DecomposeResult {
         +summary: String
         +status: ConvergenceStatus
         +subtask_count: u32
+        +deliverables: Vec[String]
     }
 
     class TPNResult {
@@ -236,6 +252,26 @@ classDiagram
         +constraints: Vec[TruthConstraint]
         +matched_skills: Vec[SkillRef]
         +yang_prompt: YangPrompt
+        +mode: AgentMode
+        +fitting_system_prompt: Option[String]
+        +verify_system_prompt: Option[String]
+        +converge_system_prompt: Option[String]
+    }
+
+    class PromptAsset {
+        +asset_type: String
+        +layer: u32
+        +id: String
+        +name: String
+        +description: String
+        +tags: Vec[String]
+        +confidence: f64
+        +version: u32
+        +content: String
+        +agent_target: String
+        +agent_mode: AgentMode
+        +usage_count: u32
+        +success_rate: f64
     }
 
     class ReasoningPath {
@@ -265,6 +301,7 @@ classDiagram
         +task_description: String
         +reasoning_path_summaries: Vec[String]
         +constraint_summaries: Vec[String]
+        +parent_deliverables: Vec[String]
     }
 
     class VerificationReport {
@@ -341,12 +378,17 @@ sequenceDiagram
     RR->>RR: create task dir + meta.json
     RR->>AF: create_meta_agent(task_id)
     AF-->>RR: MetaAgentBuilder
-    RR->>MA: run()
-    MA->>MA: 标签匹配 Grids + BFS 遍历理络
-    MA-->>RR: MetaContext (reasoning paths + constraints + skills)
+    RR->>MA: run(description, task_type_tags)
+    MA->>MA: 查询理络 prompts/（标签匹配 + 置信度排序）
+    alt 有高置信度提示词资产
+        MA->>MA: LLM 编排三份 system prompt（fitting/verify/converge）
+    else 无匹配资产
+        MA->>MA: 降级 → fitting/verify/converge 全为 None
+    end
+    MA-->>RR: MetaContext (reasoning paths + constraints + skills + prompts)
 
     loop TPN 循环 (max_cycles × max_rounds)
-        RR->>AF: create_fitting_agent(depth=0, meta_ctx, engine_ctx)
+        RR->>AF: create_fitting_agent(depth=0, mode=Orchestration, meta_ctx, engine_ctx)
         AF-->>RR: FittingAgentBuilder
         RR->>FA: run(description)
         Note over FA: LLM loop (max_turns=30) + Skills + recursive_decompose
@@ -354,7 +396,8 @@ sequenceDiagram
 
         RR->>AF: create_causal_verify_agent(engine_ctx)
         AF-->>RR: CausalVerifyAgentBuilder
-        RR->>CA: verify(output, constraints)
+        RR->>CA: verify(output, tool_results, meta_ctx, mode)
+        Note over CA: 优先 meta_ctx.verify_system_prompt → 降级到硬编码模板
         CA-->>RR: VerificationReport
 
         alt route = PASS
@@ -367,7 +410,11 @@ sequenceDiagram
         end
     end
 ```
-
+ 
+```
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+```
+ 
 ### 5.2 递归分解序列
 
 ```mermaid
@@ -379,30 +426,39 @@ sequenceDiagram
     participant CCA as CausalAgent.converge
 
     FA->>RDT: execute(subtasks: Vec[SubtaskSpec])
+    Note over FA, RDT: 每个 SubtaskSpec 携带 mode: Orchestration | Execution
+    RDT->>RDT: 父 TPNResult.deliverables → 注入子 MetaContext.parent_deliverables
+
     RDT->>RDT: guard: depth < max_depth + subtasks ≤ max_subtasks
     RDT->>RDT: check cancel token + create child_token
 
-    par spawn child agents
-        RDT->>RDT: generate child UUID task_id
-        RDT->>AF: create_fitting_agent(depth+1, meta_ctx, child_ctx, child_token)
+    loop for each subtask
+        RDT->>RDT: read subtask.mode
+        RDT->>RDT: if depth+1 >= max_depth → force mode=Execution
+        RDT->>RDT: generate child UUID task_id + child_token
+        RDT->>AF: create_fitting_agent(depth+1, mode, meta_ctx, child_ctx, child_token)
         AF-->>RDT: FittingAgentBuilder
         RDT->>CFA: run(subtask.description)
-        Note over CFA: 完整 TPN: 权重更新 → 概率拟合 → 因果验证
-        CFA-->>RDT: TPNResult
-    and for each subtask in parallel
-        RDT->>RDT: generate child UUID task_id
-        RDT->>AF: create_fitting_agent(depth+1, meta_ctx, child_ctx, child_token)
-        AF-->>RDT: FittingAgentBuilder
-        RDT->>CFA: run(subtask.description)
-        CFA-->>RDT: TPNResult
+        Note over CFA: mode→Orchestration: 编排 prompt (拆解优先)
+        Note over CFA: mode→Execution: 执行 prompt (产出优先)
+        Note over CFA: deliverables 字段列出所有产物绝对路径
+        CFA-->>RDT: TPNResult (含 deliverables: Vec[绝对路径])
     end
 
     RDT->>RDT: join_all → Vec[TPNResult]
+    RDT->>RDT: 聚合子 deliverables → DecomposeResult.deliverables
     RDT->>AF: create_causal_converge_agent(child_ctx)
     AF-->>RDT: CausalConvergeAgentBuilder
-    RDT->>CCA: converge(subtask_results)
+    RDT->>CCA: converge(subtask_results, parent_meta_ctx, parent.mode)
+    Note over CCA: 接收子 deliverables 路径，硬编码要求 read 工具逐文件检查
     CCA-->>RDT: ConvergenceDecision
-    RDT-->>FA: DecomposeResult
+    RDT-->>FA: DecomposeResult (含 deliverables)
+```
+
+```
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 ```
 
 ### 5.3 TPN 路由决策
@@ -419,15 +475,16 @@ sequenceDiagram
 
 ## 6. 理络 (Liluo) 认知仓库
 
-### 6.1 四层资产模型
+### 6.1 五层资产模型
 
 ```
 .taiji/knowledge/
-├── truths/          ← L4 Truth（Hard/Soft 约束）
-├── grids/           ← L3 Grid（推理角色 + relation 边）
-├── models/          ← L2 Model（Bayesian 经验模式）
-├── skills/          ← L1 Skill（可执行工具）
-└── index.yaml       ← tag 反向索引（自动维护）
+├── prompts/          ← L5 Prompt（提示词模板，标签匹配 + 置信度排序）
+├── truths/           ← L4 Truth（Hard/Soft 约束）
+├── grids/            ← L3 Grid（推理角色 + relation 边）
+├── models/           ← L2 Model（Bayesian 经验模式）
+├── skills/           ← L1 Skill（可执行工具）
+└── index.yaml        ← tag 反向索引（自动维护）
 ```
 
 TPN 执行期间只读，DMN Consumer 单写者更新。
@@ -439,7 +496,7 @@ TPN 执行期间只读，DMN Consumer 单写者更新。
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `id` | String | 唯一标识（如 `grid:code-debug`） |
-| `type` | String | truth / grid / model / skill（由目录隐式确定） |
+| `type` | String | truth / grid / model / skill / prompt（由目录隐式确定） |
 | `layer` | u32 | 1 / 2 / 3 / 4 |
 | `name` | String | 名称 |
 | `description` | String | 描述 |
@@ -455,6 +512,7 @@ TPN 执行期间只读，DMN Consumer 单写者更新。
 | L2 Model | `alpha: f64`, `beta: f64` |
 | L3 Grid | `relations: Vec[Relation]`（每条含 target_id, target_type, relation_type, weight, interpretation） |
 | L4 Truth | `severity: String`（"Hard" \| "Soft"） |
+| L5 Prompt | `content: String`（提示词正文）, `agent_target: String`（"FittingAgent" \| "CausalAgent"）, `agent_mode: AgentMode`（Orchestration \| Execution）, `usage_count: u32`, `success_rate: f64` |
 
 ### 6.3 检索与遍历
 
@@ -556,9 +614,13 @@ data/                               ← 默认 data_root
 
 所有 Agent 均为瞬态：`AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → AgentBuilder drop`。状态不跨调用保留，认知更新通过理络 YAML 文件持久化，下轮加载时自动生效。
 
-### 8.2 异层同构
+### 8.2 异层同构与模式分化
 
-`depth` 只改变编号，不改变目录布局、TPN 循环结构、system prompt 模板。根任务和子任务执行同一段代码。递归层间通过 `MetaContext`（推理偏置注入）和 `ConvergenceDecision`（收敛结果上浮）传递信息。
+`depth` 只改变编号，不改变目录布局、TPN 循环结构。根任务和子任务执行同一段代码。**system prompt 的内容因 `AgentMode` 分化**：
+- **Orchestration 模式**：prompt 包含子任务模式选择指南、植物生长原则（默认倾向 Execution），强调先拆解后综合
+- **Execution 模式**：prompt 包含「执行优先」原则（先直接用 L1 skills 完成），recursive_decompose 仅作最后手段
+
+递归层间通过 `MetaContext`（推理偏置注入）和 `ConvergenceDecision`（收敛结果上浮）传递信息。`AgentMode` 不由 `depth` 自动推导，而是由父 LLM 在拆解时显式分配。叶子层（`depth+1 >= max_depth`）由 RecursiveDecomposeTool 强制覆盖为 Execution。
 
 ### 8.3 TPN 只读 / DMN 单写者
 
@@ -578,6 +640,7 @@ SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到 FittingAgent �
 |--------|------|--------|
 | 深度限制 | `RecursiveDecomposeTool` 检查 `depth < max_depth` | 3 |
 | 子任务上限 | `subtasks.len() ≤ max_subtasks` | 4 |
+| 模式约束 | depth=0 → 固定 Orchestration；depth+1 >= max_depth → 工具强制 Execution；中间层由父 LLM 在 SubtaskSpec.mode 中指定 | — |
 | TPN 轮次 | `round_counter ≤ max_rounds` | 3 |
 | TPN 循环 | `cycle_counter ≤ max_cycles` | 3 |
 | 取消传播 | `CancellationToken` 传递到所有递归层（parent→child_token 链接） | — |
@@ -602,3 +665,56 @@ Vendor 策略：
 
 taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]` 指向 vendor。上游 Rig 的非核心可选依赖（companion crates）被剥离。
 重新 vendor 的操作：`cargo package --allow-dirty` 可验证 vendor 目录自恰性。
+
+### 8.8 动态提示词编排
+
+所有 Agent 的 system prompt 不再硬编码在 `src/agents/*.rs` 中，而是由 MetaAgent 在每次 TPN 循环开始时动态编排：
+
+1. **查询理络** — 根据 `task_type_tags` 标签匹配 `prompts/` 层的 PromptAsset，按 `confidence` 降序排列
+2. **置信度过滤** — 仅保留 `confidence >= 0.3` 的高置信度资产
+3. **LLM 编排** — 将匹配的 prompt 资产和任务描述一起传给 LLM，由 LLM 决策 `AgentMode` 并组合三份完整 system prompt（`fitting_system_prompt`、`verify_system_prompt`、`converge_system_prompt`）
+4. **注入 MetaContext** — 三份提示词作为 `Option<String>` 字段注入 MetaContext，传递到下游 Agent
+5. **降级路径** — 无理络资产或 LLM 编排失败时，全部设为 `None`，下游 Agent 自动使用内置硬编码模板
+
+**下游消费规则：**
+
+| Agent | 方法 | 优先级 | 降级 |
+|-------|------|--------|------|
+| FittingAgent | `build_system_prompt()` | `meta_ctx.fitting_system_prompt` → `Some` 时直接返回，不编译模板 | `build_orchestration_prompt()` 或 `build_execution_prompt()` 模板 |
+| CausalAgent.verify | `verify(output, ..., meta_ctx, mode)` | `meta_ctx.verify_system_prompt` → 作为 system prompt | `VERIFY_ORC_SYSTEM_PROMPT` / `VERIFY_EXEC_SYSTEM_PROMPT` 常量 |
+| CausalAgent.converge | `converge(results, ..., meta_ctx, mode)` | `meta_ctx.converge_system_prompt` → 作为 system prompt | `CONVERGE_ORC_SYSTEM_PROMPT` / `CONVERGE_EXEC_SYSTEM_PROMPT` 常量 |
+
+### 8.9 绝对路径单向传递与权限收敛
+
+多层递归中，每层 Agent 产出的文件路径必须在 prompt 中**硬编码传递**（不依赖 LLM 推测），遵循单向向下覆盖原则：
+
+**传递链：**
+
+```
+父 Yang → 产出文件 → TPNResult.deliverables (绝对路径)
+    │
+    │ recursive_decompose 注入子 MetaContext
+    ▼
+子 YangPrompt.parent_deliverables → 子读取(只读) → 产出自己的 deliverables
+    │
+    │ 子 TPNResult.deliverables 向上聚合
+    ▼
+DecomposeResult.deliverables → 父 CausalAgent.converge() 逐文件检查
+```
+
+**权限模型：**
+
+| 方向 | 规则 | 保证方式 |
+|------|------|---------|
+| 父→子 | 父 deliverables 绝对路径注入子 `YangPrompt.parent_deliverables`，**只读参照** | 硬编码模板指令：子只能 read，不能 write 父目录 |
+| 子→父 | 子 deliverables 绝对路径通过 `DecomposeResult.deliverables` 返回父层 | `recursive_decompose` 中硬编码聚合 `tpn_result.deliverables` |
+| 兄弟隔离 | 子节点不可见兄弟目录 | 文件系统布局保证：`children/{0}/` 与 `children/{1}/` 各自独立 |
+
+**硬编码保证（不可被 LLM 绕过）：**
+
+1. **阳 Execution 模板**：必须明确列出所有产物文件的绝对路径
+2. **阳 Orchestration 模板**：产物文件列出绝对路径；子产物在 convergent 阶段可见
+3. **阴 verify 模板**：接收 `deliverables` 路径，调用 `read` 工具逐文件检查
+4. **阴 converge 模板**：接收所有子 `deliverables`，调用 `read` 逐文件检查跨子任务一致性
+
+绝对路径以 `task_dir` 为根——每层递归有独立的 `task_dir`（`data/tasks/{root}/children/{i}/...`），子层不会因为路径冲突覆盖父层文件。

@@ -16,6 +16,7 @@ use crate::agents::factory::AgentFactory;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
 use crate::orchestration::tpn_cycle::TpnCycle;
+use crate::types::agent::AgentMode;
 use crate::types::execution::EngineContext;
 use crate::types::task::{Task, TaskStatus, TPNResult};
 
@@ -91,7 +92,7 @@ impl RecursiveRunner {
         let timeout_secs = self.config.runtime.exec_timeout;
         let result = timeout(
             Duration::from_secs(timeout_secs),
-            tpn_cycle.execute(description, None, &mut engine_ctx),
+            tpn_cycle.execute(description, None, &mut engine_ctx, AgentMode::Orchestration),
         )
         .await
         .map_err(|_| TaijiError::Other("Task execution timed out".into()))??;

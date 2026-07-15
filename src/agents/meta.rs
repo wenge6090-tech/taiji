@@ -19,10 +19,13 @@
 
 use std::sync::Arc;
 
+use rig::client::CompletionClient;
+use rig::completion::Prompt;
+
 use crate::infra::error::TaijiError;
 use crate::infra::knowledge::LiluoClient;
 use crate::infra::provider::ProviderRegistry;
-use crate::types::agent::{MetaContext, YangPrompt};
+use crate::types::agent::{MetaContext, PromptAsset};
 
 /// Builder for the MetaAgent (权重更新·元).
 ///
@@ -59,120 +62,181 @@ impl MetaAgentBuilder {
         }
     }
 
-    /// Run the MetaAgent: traverse the 理络 and produce a [`MetaContext`].
+    /// Run the MetaAgent: query the 理络, LLM-compose prompts, produce [`MetaContext`].
     ///
-    /// # Production path
-    /// In the fully wired implementation, `run()` will:
-    /// 1. Obtain the provider client from `self.provider.client()`.
-    /// 2. Build a Rig agent with `dynamic_context(5, self.liluo)`:
-    ///    ```ignore
-    ///    let client = self.provider.client("deepseek")?;
-    ///    let agent = client
-    ///        .agent(&self.model)
-    ///        .preamble(META_SYSTEM_PROMPT)
-    ///        .max_turns(1)
-    ///        .dynamic_context(5, self.liluo)
-    ///        .build();
-    ///    ```
-    /// 3. Call `agent.prompt(task_description).await` to get structured output.
-    /// 4. Parse the output into `MetaContext`.
+    /// # Flow
+    /// 1. Query 理络 via `search_prompts(task_type_tags)` for matching prompt assets.
+    /// 2. Filter by confidence threshold (`CONFIDENCE_THRESHOLD = 0.3`).
+    /// 3. When matching assets exist → call LLM to compose `MetaContext`.
+    /// 4. When no assets or LLM fails → fallback to `MetaContext::empty()`.
     ///
-    /// # Current behaviour (degraded mode)
-    /// Returns an empty `MetaContext` with no reasoning paths.  This allows the
-    /// system to compile and run without a wired dynamic context index, albeit
-    /// without cognitive bias from prior knowledge.
-    pub async fn run(&self) -> Result<MetaContext, TaijiError> {
-        // ── Production implementation (pinned for Rig API verification) ──
-        //
-        // use rig::providers::deepseek;
-        // use rig_core::agent::AgentBuilder;
-        //
-        // let client = self.provider.client("deepseek")
-        //     .map_err(|e| TaijiError::LLMCallFailed {
-        //         context: format!("failed to get provider client: {e}"),
-        //     })?;
-        //
-        // let agent = client
-        //     .agent(&self.model)
-        //     .preamble(META_SYSTEM_PROMPT)
-        //     .max_turns(1)
-        //     // TODO: dynamic_context(5, self.liluo) once the 理络 index is wired
-        //     .build();
-        //
-        // let response = agent
-        //     .prompt("Traverse the 理络 and extract reasoning paths for task")
-        //     .await
-        //     .map_err(|e| TaijiError::LLMCallFailed {
-        //         context: format!("MetaAgent LLM call failed: {e}"),
-        //     })?;
-        //
-        // let meta_ctx: MetaContext = serde_json::from_str(response.as_ref())
-        //     .map_err(|e| TaijiError::StructuredOutputParseFailed {
-        //         context: format!("failed to parse MetaContext: {e}"),
-        //     })?;
-        //
-        // Ok(meta_ctx)
+    /// # Parameters
+    /// - `task_description` — the task the downstream agents will execute.
+    /// - `task_type_tags` — tags for 理络 prompt search.  Empty tags produce no
+    ///   matches, triggering the fallback path.
+    pub async fn run(
+        &self,
+        task_description: &str,
+        task_type_tags: &[&str],
+    ) -> Result<MetaContext, TaijiError> {
+        // ── 1. Query 理絡 for prompt assets ──
+        let prompt_assets = self.liluo.search_prompts(task_type_tags).await?;
 
-        // ── Degraded mode: return empty defaults ──
+        // ── 2. Confidence filter ──
+        const CONFIDENCE_THRESHOLD: f64 = 0.3;
+        let matched: Vec<&PromptAsset> = prompt_assets
+            .iter()
+            .filter(|p| p.confidence >= CONFIDENCE_THRESHOLD)
+            .collect();
+
+        if matched.is_empty() {
+            tracing::debug!(
+                task_id = %self.task_id,
+                "No high-confidence prompt assets — returning empty MetaContext (fallback)"
+            );
+            return Ok(MetaContext::empty());
+        }
+
+        // ── 3. LLM call to compose MetaContext ──
         tracing::debug!(
             task_id = %self.task_id,
-            "MetaAgent.run() returning empty MetaContext (degraded mode)"
+            matched_count = matched.len(),
+            "Calling LLM to compose MetaContext from 理络 prompt assets"
         );
 
-        Ok(MetaContext {
-            reasoning_paths: vec![],
-            constraints: vec![],
-            matched_skills: vec![],
-            yang_prompt: YangPrompt {
-                task_description: String::new(),
-                reasoning_path_summaries: vec![],
-                constraint_summaries: vec![],
-            },
-        })
+        let llm_prompt = build_llm_input(task_description, &matched);
+
+        let client = self.provider.client("deepseek").map_err(|e| {
+            TaijiError::LLMCallFailed {
+                context: format!("MetaAgent: failed to get provider client: {e}"),
+            }
+        })?;
+
+        let agent = client
+            .agent(&self.model)
+            .preamble(META_COMPOSE_SYSTEM_PROMPT)
+            .default_max_turns(1)
+            .build();
+
+        let response = agent.prompt(&llm_prompt).await.map_err(|e| {
+            TaijiError::LLMCallFailed {
+                context: format!("MetaAgent LLM call failed: {e}"),
+            }
+        })?;
+
+        // ── 4. Parse response into MetaContext ──
+        match serde_json::from_str::<MetaContext>(response.as_ref()) {
+            Ok(ctx) => {
+                tracing::debug!(
+                    task_id = %self.task_id,
+                    mode = ?ctx.mode,
+                    has_fitting = ctx.fitting_system_prompt.is_some(),
+                    has_verify = ctx.verify_system_prompt.is_some(),
+                    has_converge = ctx.converge_system_prompt.is_some(),
+                    "MetaAgent: successfully composed MetaContext"
+                );
+                Ok(ctx)
+            }
+            Err(e) => {
+                tracing::warn!(
+                    task_id = %self.task_id,
+                    "MetaAgent: failed to parse LLM response as MetaContext: {e} — falling back"
+                );
+                Ok(MetaContext::empty())
+            }
+        }
     }
 }
 
-/// System prompt for the MetaAgent.
+/// System prompt for the MetaAgent's LLM composition call.
 ///
-/// Instructs the LLM to traverse the 理络, discover relevant reasoning chains,
-/// and emit a structured [`MetaContext`] JSON object.
-///
-/// The Chinese prefix anchors the agent's role per project convention
-/// (see AGENTS.md §2: "CausalAgent verify mode starts with '你是因果验证器'").
-#[allow(dead_code)] // R2 production path reserve — used in run() production path
-const META_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Update · Meta Agent).
+/// Instructs the LLM to compose system prompts for downstream agents from
+/// 理络 prompt assets.  The Chinese prefix anchors the agent's role per
+/// project convention (see AGENTS.md §2).
+const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Update · Meta Agent)。
 
-Your role is to traverse the 理络 (cognitive network) and extract
-reasoning paths relevant to the current task.
+你的职责是根据任务描述和认知仓库（理络）中的提示词资产，编排下游 Agent
+（FittingAgent 概率拟合·阳 和 CausalAgent 因果验证·阴）的系统提示词。
 
-Instructions:
-1. Use the dynamic context to query the 理络 for relevant knowledge grids.
-2. Follow 1-3 hop BFS relations from matching source grids.
-3. Compile a list of ReasoningPath objects, each showing the chain of evidence.
-4. Identify any L4 Truth constraints that apply to the current task type tags.
-5. Match available L1 skills that are relevant to the task.
+## 输入
+- task_description：当前任务的完整描述
+- prompt_assets：理络中匹配的提示词资产列表（按置信度降序排列）
+  每项包含：id, name, content, agent_target, agent_mode, confidence
 
-Output must be a valid JSON object matching the MetaContext schema:
+## 你需要做的
+1. 分析任务描述，判断任务复杂度：
+   - 复杂/多步骤/需要多 Agent 协作 → Orchestration 模式
+   - 简单/单步骤/可直接执行 → Execution 模式
+2. 从 prompt_assets 中选择置信度最高且与 mode 匹配的资产
+3. 将其 content 字段组合为三份完整的系统提示词
+
+## 输出格式（严格 JSON，无额外注释）
+
 {
-  "reasoning_paths": [{ "source_grid": "...", "chains": [...], "depth": 1, "task_type_tags": [...] }],
-  "constraints": [{ "id": "...", "name": "...", "description": "...", "severity": "Hard|Soft" }],
-  "matched_skills": [{ "id": "...", "name": "...", "tool_name": "...", "match_weight": 0.8 }],
+  "mode": "Orchestration",
+  "fitting_system_prompt": "完整的 FittingAgent 系统提示词，包含角色定义、指令和约束",
+  "verify_system_prompt": "完整的 verify 系统提示词，以'你是因果验证器'开头",
+  "converge_system_prompt": "完整的 converge 系统提示词，以'你是收敛判决器'开头",
+  "reasoning_paths": [],
+  "constraints": [],
+  "matched_skills": [],
   "yang_prompt": {
-    "task_description": "...",
-    "reasoning_path_summaries": ["..."],
-    "constraint_summaries": ["..."]
+    "task_description": "（保持原始 task_description）",
+    "reasoning_path_summaries": [],
+    "constraint_summaries": []
   }
 }
 
-Do not fabricate reasoning paths. Only include chains that are grounded
-in the 理络 data returned by the context index.
+## 降级规则
+当 prompt_assets 为空或不适用时，将所有 system_prompt 字段设为 null。
+下游 Agent 将自动使用内置硬编码模板。
+
+注意：strict JSON，不要包含 markdown 代码块标记或额外解释。
 "#;
+
+/// Build the user message for MetaAgent's LLM composition call.
+///
+/// Formats task description and ranked prompt assets into a structured
+/// prompt that the LLM can process to produce a [`MetaContext`].
+fn build_llm_input(task_description: &str, matched: &[&PromptAsset]) -> String {
+    let mut parts = Vec::new();
+    parts.push(format!(
+        "## Task Description\n\n{}\n\n## Prompt Assets (ranked by confidence)\n",
+        task_description
+    ));
+
+    for (i, asset) in matched.iter().enumerate() {
+        parts.push(format!(
+            "\n### Asset {idx}\n\
+             - id: {id}\n\
+             - name: {name}\n\
+             - agent_target: {target}\n\
+             - agent_mode: {mode:?}\n\
+             - confidence: {conf}\n\
+             - content:\n```\n{content}\n```",
+            idx = i + 1,
+            id = asset.id,
+            name = asset.name,
+            target = asset.agent_target,
+            mode = asset.agent_mode,
+            conf = asset.confidence,
+            content = asset.content,
+        ));
+    }
+
+    parts.push(
+        "\n\nBased on the above, produce the MetaContext JSON as instructed.".into(),
+    );
+
+    parts.join("\n")
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::infra::provider::ProviderRegistry;
     use crate::infra::config::TaijiConfig;
+    use crate::types::agent::AgentMode;
 
     fn make_config() -> TaijiConfig {
         TaijiConfig {
@@ -212,22 +276,48 @@ mod tests {
         );
 
         let builder = MetaAgentBuilder::new("test-task", liluo, provider, "deepseek-chat");
-        let ctx = builder.run().await.expect("MetaAgent run");
+        // Empty tags → fallback path → empty MetaContext.
+        let ctx = builder.run("test task description", &[]).await.expect("MetaAgent run");
 
-        // In degraded mode, all fields are empty.
         assert!(ctx.reasoning_paths.is_empty());
         assert!(ctx.constraints.is_empty());
         assert!(ctx.matched_skills.is_empty());
         assert!(ctx.yang_prompt.task_description.is_empty());
+        assert!(ctx.fitting_system_prompt.is_none());
+        assert!(ctx.verify_system_prompt.is_none());
+        assert!(ctx.converge_system_prompt.is_none());
+        assert_eq!(ctx.mode, AgentMode::Orchestration);
 
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 
     #[test]
-    fn test_meta_system_prompt_is_valid() {
+    fn test_meta_compose_system_prompt_is_valid() {
         // Verify the prompt compiles and contains the required Chinese header.
-        assert!(META_SYSTEM_PROMPT.starts_with("你是权重更新专家"));
-        assert!(META_SYSTEM_PROMPT.contains("reasoning_paths"));
-        assert!(META_SYSTEM_PROMPT.contains("MetaContext"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.starts_with("你是权重更新专家"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("fitting_system_prompt"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("verify_system_prompt"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("converge_system_prompt"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("你是权重更新专家"));
+    }
+
+    #[test]
+    fn test_build_llm_input_includes_task_description() {
+        let assets = vec![
+            PromptAsset::new(
+                "test-prompt",
+                "Test",
+                "",
+                "You are a test agent",
+                "FittingAgent",
+                AgentMode::Orchestration,
+                vec![],
+            ),
+        ];
+        let input = build_llm_input("Do something", &assets.iter().collect::<Vec<_>>());
+        assert!(input.contains("Do something"));
+        assert!(input.contains("test-prompt"));
+        assert!(input.contains("You are a test agent"));
+        assert!(input.contains("Orchestration"));
     }
 }

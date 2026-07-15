@@ -329,7 +329,12 @@ mod tests {
                 task_description: task_description.into(),
                 reasoning_path_summaries: Vec::new(),
                 constraint_summaries: Vec::new(),
+                parent_deliverables: vec![],
             },
+            mode: crate::types::agent::AgentMode::Orchestration,
+            fitting_system_prompt: None,
+            verify_system_prompt: None,
+            converge_system_prompt: None,
         }
     }
 

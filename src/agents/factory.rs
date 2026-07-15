@@ -37,7 +37,7 @@ use crate::infra::provider::ProviderRegistry;
 use crate::orchestration::constraint_engine::ConstraintEngine;
 use crate::orchestration::trigger_engine::SkillTriggerEngine;
 use crate::orchestration::worker_pool::WorkerPool;
-use crate::types::agent::MetaContext;
+use crate::types::agent::{AgentMode, MetaContext};
 use crate::types::execution::EngineContext;
 
 /// Central hub for creating transient Rig agents.
@@ -136,6 +136,7 @@ impl AgentFactory {
     pub fn create_fitting_agent(
         self: &Arc<Self>,
         depth: u32,
+        mode: AgentMode,
         meta_ctx: &MetaContext,
         engine_ctx: &EngineContext,
         cancel: CancellationToken,
@@ -144,11 +145,13 @@ impl AgentFactory {
         tracing::debug!(
             task_id = %engine_ctx.task_id,
             depth,
+            ?mode,
             model = %model,
             "Creating FittingAgent"
         );
         Ok(FittingAgentBuilder::new(
             depth,
+            mode,
             meta_ctx.clone(),
             engine_ctx.clone(),
             self.clone(),
@@ -352,7 +355,7 @@ mod tests {
             .expect("MetaAgentBuilder creation");
         // Verify the builder is properly initialised by checking internal
         // fields through its public API (run returns a MetaContext).
-        let ctx = builder.run().await.expect("MetaAgent run");
+        let ctx = builder.run("test task", &[]).await.expect("MetaAgent run");
         assert_eq!(ctx.reasoning_paths.len(), 0);
         // Cleanup
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;

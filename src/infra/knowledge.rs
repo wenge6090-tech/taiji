@@ -23,6 +23,7 @@
 //!   from the raw YAML files when corruption is detected.
 
 use crate::infra::error::TaijiError;
+use crate::types::agent::PromptAsset;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -153,6 +154,7 @@ impl LiluoClient {
             "grid" => "grids",
             "model" => "models",
             "skill" => "skills",
+            "prompt" => "prompts",
             _ => {
                 // Fallback: treat unknown types as grids
                 tracing::warn!("unknown cognitive asset type: {type_}, defaulting to 'grids'");
@@ -199,6 +201,7 @@ impl LiluoClient {
             self.data_dir.join("grids"),
             self.data_dir.join("models"),
             self.data_dir.join("skills"),
+            self.data_dir.join("prompts"),
         ];
         for dir in &dirs {
             fs::create_dir_all(dir).await.map_err(|e| {
@@ -413,7 +416,7 @@ impl LiluoClient {
     pub async fn build_index(&self) -> Result<(), TaijiError> {
         let mut index = IndexData::empty();
 
-        for type_ in &["truth", "grid", "model", "skill"] {
+        for type_ in &["truth", "grid", "model", "skill", "prompt"] {
             let dir = self.data_dir.join(Self::type_dir_name(type_));
             if !dir.exists() {
                 continue;
@@ -622,6 +625,61 @@ impl LiluoClient {
 
         Ok(paths)
     }
+
+    // ── Prompt asset convenience methods ──────────────────────────────
+
+    /// Save a [`PromptAsset`] to the 理络 `prompts/` directory.
+    ///
+    /// Thin wrapper around [`save_asset`](Self::save_asset).
+    pub async fn save_prompt(&self, prompt: &mut PromptAsset) -> Result<(), TaijiError> {
+        let mut asset = CognitiveAsset::Prompt(prompt.clone());
+        // Reset type override — the enum tag handles serialisation.
+        prompt.asset_type = "prompt".into();
+        self.save_asset(&mut asset).await?;
+        // Sync version back to the caller.
+        prompt.version = asset.version();
+        Ok(())
+    }
+
+    /// Load a [`PromptAsset`] from the 理络 `prompts/` directory by name.
+    ///
+    /// Returns `None` when no asset with that name exists (as opposed to
+    /// returning an error), so callers can gracefully fall back.
+    pub async fn load_prompt(&self, name: &str) -> Result<Option<PromptAsset>, TaijiError> {
+        match self.load_asset("prompt", name).await {
+            Ok(CognitiveAsset::Prompt(p)) => Ok(Some(p)),
+            Ok(_) => {
+                // Corrupted: found asset but wrong type tag.
+                tracing::warn!("asset '{name}' found in prompts/ but has wrong type tag");
+                Ok(None)
+            }
+            Err(e) => {
+                if e.to_string().contains("failed to read asset") {
+                    Ok(None)
+                } else {
+                    Err(e)
+                }
+            }
+        }
+    }
+
+    /// Search for prompt assets by task-type tags.
+    ///
+    /// Calls the generic [`search_by_tags`](Self::search_by_tags) then loads
+    /// only assets whose type is `"prompt"`.
+    pub async fn search_prompts(&self, tags: &[&str]) -> Result<Vec<PromptAsset>, TaijiError> {
+        let refs = self.search_by_tags(tags).await?;
+        let mut prompts = Vec::new();
+        for r in &refs {
+            if r.asset_type != "prompt" {
+                continue;
+            }
+            if let Ok(CognitiveAsset::Prompt(p)) = self.load_asset(&r.asset_type, &r.id).await {
+                prompts.push(p);
+            }
+        }
+        Ok(prompts)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -640,17 +698,20 @@ pub enum CognitiveAsset {
     Model(ModelAsset),
     #[serde(rename = "skill")]
     Skill(SkillAsset),
+    #[serde(rename = "prompt")]
+    Prompt(PromptAsset),
 }
 
 impl CognitiveAsset {
     /// Return the asset type string (`"truth"`, `"grid"`, `"model"`,
-    /// `"skill"`).
+    /// `"skill"`, `"prompt"`).
     pub fn asset_type(&self) -> String {
         match self {
             CognitiveAsset::Truth(_) => "truth".into(),
             CognitiveAsset::Grid(_) => "grid".into(),
             CognitiveAsset::Model(_) => "model".into(),
             CognitiveAsset::Skill(_) => "skill".into(),
+            CognitiveAsset::Prompt(_) => "prompt".into(),
         }
     }
 
@@ -661,6 +722,7 @@ impl CognitiveAsset {
             CognitiveAsset::Grid(a) => &a.header.id,
             CognitiveAsset::Model(a) => &a.header.id,
             CognitiveAsset::Skill(a) => &a.header.id,
+            CognitiveAsset::Prompt(a) => &a.id,
         }
     }
 
@@ -671,6 +733,7 @@ impl CognitiveAsset {
             CognitiveAsset::Grid(a) => a.header.version,
             CognitiveAsset::Model(a) => a.header.version,
             CognitiveAsset::Skill(a) => a.header.version,
+            CognitiveAsset::Prompt(a) => a.version,
         }
     }
 
@@ -681,6 +744,7 @@ impl CognitiveAsset {
             CognitiveAsset::Grid(a) => a.header.version = v,
             CognitiveAsset::Model(a) => a.header.version = v,
             CognitiveAsset::Skill(a) => a.header.version = v,
+            CognitiveAsset::Prompt(a) => a.version = v,
         }
     }
 }
@@ -1076,6 +1140,89 @@ mod tests {
 
         let result = client.load_asset("truth", "nonexistent").await;
         assert!(result.is_err());
+
+        cleanup(&dir).await;
+    }
+
+    // ── Prompt asset tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_save_and_load_prompt() {
+        let dir = test_dir("save_load_prompt").await;
+        let client = LiluoClient::new(&dir).await.unwrap();
+
+        let mut prompt = crate::types::agent::PromptAsset::new(
+            "orch-fitting",
+            "编排拟合提示词",
+            "Orchestration mode FittingAgent system prompt",
+            "你是概率拟合专家（编排模式）...",
+            "FittingAgent",
+            crate::types::agent::AgentMode::Orchestration,
+            vec!["fitting".into(), "orchestration".into()],
+        );
+
+        client.save_prompt(&mut prompt).await.unwrap();
+        assert_eq!(prompt.version, 1);
+
+        // Load back via convenience method.
+        let loaded = client.load_prompt("orch-fitting").await.unwrap();
+        assert!(loaded.is_some());
+        let p = loaded.unwrap();
+        assert_eq!(p.name, "编排拟合提示词");
+        assert_eq!(p.agent_target, "FittingAgent");
+        assert_eq!(p.agent_mode, crate::types::agent::AgentMode::Orchestration);
+        assert!(p.tags.contains(&"fitting".to_string()));
+
+        // Load nonexistent prompt returns None (not error).
+        let missing = client.load_prompt("nonexistent").await.unwrap();
+        assert!(missing.is_none());
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_search_prompts() {
+        let dir = test_dir("search_prompts").await;
+        let client = LiluoClient::new(&dir).await.unwrap();
+
+        // Save two prompts with overlapping tags.
+        let mut p1 = crate::types::agent::PromptAsset::new(
+            "exec-fitting",
+            "执行拟合提示词",
+            "Execution mode FittingAgent prompt",
+            "你是执行专家...",
+            "FittingAgent",
+            crate::types::agent::AgentMode::Execution,
+            vec!["fitting".into(), "execution".into()],
+        );
+        client.save_prompt(&mut p1).await.unwrap();
+
+        let mut p2 = crate::types::agent::PromptAsset::new(
+            "exec-verify",
+            "执行验证提示词",
+            "Execution mode CausalAgent verify prompt",
+            "你是因果验证器（执行模式）...",
+            "CausalAgent",
+            crate::types::agent::AgentMode::Execution,
+            vec!["verify".into(), "execution".into()],
+        );
+        client.save_prompt(&mut p2).await.unwrap();
+
+        // Search by "fitting" — should find only p1.
+        let results = client.search_prompts(&["fitting"]).await.unwrap();
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].id, "exec-fitting");
+
+        // Search by "execution" — should find both.
+        let results = client.search_prompts(&["execution"]).await.unwrap();
+        assert_eq!(results.len(), 2);
+
+        // Search by nonexistent tag — empty.
+        let results = client
+            .search_prompts(&["nonexistent"])
+            .await
+            .unwrap();
+        assert!(results.is_empty());
 
         cleanup(&dir).await;
     }

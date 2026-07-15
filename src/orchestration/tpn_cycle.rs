@@ -24,7 +24,7 @@ use tokio_util::sync::CancellationToken;
 use crate::agents::factory::AgentFactory;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
-use crate::types::agent::MetaContext;
+use crate::types::agent::{AgentMode, MetaContext};
 use crate::types::execution::EngineContext;
 use crate::types::task::TPNResult;
 use crate::types::verification::VerificationRoute;
@@ -77,6 +77,7 @@ impl TpnCycle {
         description: &str,
         initial_meta_ctx: Option<MetaContext>,
         engine_ctx: &mut EngineContext,
+        mode: AgentMode,
     ) -> Result<TPNResult, TaijiError> {
         // ── Phase 1: MetaAgent (权重更新·元) ──────────────────────────
         let mut meta_ctx = match initial_meta_ctx {
@@ -93,7 +94,7 @@ impl TpnCycle {
                     "Running MetaAgent for initial reasoning-path extraction"
                 );
                 let meta_agent = self.factory.create_meta_agent(&engine_ctx.task_id)?;
-                meta_agent.run().await?
+                meta_agent.run(description, &[]).await?
             }
         };
 
@@ -109,12 +110,12 @@ impl TpnCycle {
             // Phase 2: FittingAgent (概率拟合·阳)
             let fitting_agent = self
                 .factory
-                .create_fitting_agent(engine_ctx.depth, &meta_ctx, engine_ctx, self.cancel.clone())?;
+                .create_fitting_agent(engine_ctx.depth, mode, &meta_ctx, engine_ctx, self.cancel.clone())?;
             let result = fitting_agent.run(description).await?;
 
             // Phase 3: CausalVerify (因果验证·阴)
             let verify_agent = self.factory.create_causal_verify_agent(engine_ctx)?;
-            let report = verify_agent.verify(&result.content, &[]).await?;
+            let report = verify_agent.verify(&result.content, &[], &meta_ctx, mode).await?;
 
             // Phase 4: Route decision
             match report.route {
@@ -157,7 +158,7 @@ impl TpnCycle {
                     );
                     // Re-run MetaAgent to obtain a new reasoning bias.
                     let meta_agent = self.factory.create_meta_agent(&engine_ctx.task_id)?;
-                    meta_ctx = meta_agent.run().await?;
+                    meta_ctx = meta_agent.run(description, &[]).await?;
                     continue;
                 }
             }

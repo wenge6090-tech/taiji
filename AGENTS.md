@@ -152,3 +152,29 @@
 - [ ] 子任务内部也必须在实际执行前再次检查 cancellation
 - [ ] 父 token 通过 `cancel.child_token()` 创建链接子 token，传递给子 `TpnCycle`；父 token 取消时所有子 token 自动传播取消信号
 - [ ] `CancellationToken` 与 `WorkerPool` 的 `Semaphore` 配合使用：先 acquire permit 再 spawn，确保取消时 permit 正确释放
+
+## 16. AgentMode 模式约束规则
+
+- [ ] `AgentMode` 为枚举 `Orchestration`（编排）和 `Execution`（执行），不由 `depth` 自动推导，必须由父 LLM 在 `SubtaskSpec.mode` 中显式分配（BCP §1.1、§5.2）
+- [ ] `depth=0` 的根任务固定为 `Orchestration` 模式，无法被覆盖（BCP §8.6）
+- [ ] 当 `depth+1 >= max_depth` 时，`RecursiveDecomposeTool` 必须将 mode 强制覆盖为 `Execution`，忽略父 LLM 的指定（BCP §5.2、§8.2）
+- [ ] **Orchestration 模式**的 system prompt 必须侧重拆解与综合：包含子任务模式选择指南、「植物生长原则」（默认倾向 Execution），强调先拆解、后综合（BCP §8.2）
+- [ ] **Execution 模式**的 system prompt 必须侧重直接产出：包含「执行优先」原则（先用 L1 Skills 直接完成），`recursive_decompose` 仅作为最后手段（BCP §8.2）
+- [ ] 中间层（`0 < depth < max_depth - 1`）的模式由父 LLM 在 `SubtaskSpec.mode` 中裁决，`RecursiveDecomposeTool` 必须读取 `subtask.mode` 并传递给子 `FittingAgent`（BCP §5.2、§8.6）
+- [ ] `FittingAgentBuilder` 构造时接收 `mode: AgentMode` 参数，据此选择对应的 system prompt 模板——不允许在运行时动态切换模式（BCP §8.2）
+- [ ] **`TpnCycle.execute()` 必须接收 `mode: AgentMode` 参数**，在 FittingAgent 阶段传递给 `create_fitting_agent(depth, mode, ...)`，在 CausalVerify 阶段传递给 `verify_agent.verify(content, results, mode)`——mode 在整个 TPN 周期中逐层向下传播（`tpn_cycle.rs:80`、`tpn_cycle.rs:118`）
+- [ ] **`RecursiveDecomposeTool` 必须接收 `mode: AgentMode` 参数**，在构造时存储为 `self.mode`；子任务 mode 由深度守卫确定后通过 `tpn_cycle.execute(..., child_mode)` 传递，所有子任务完成后通过 `converge_agent.converge(results, self.mode)` 调用收敛判决——mode 在递归分解链中双向传播（`recursive_decompose.rs:54`、`recursive_decompose.rs:228`）
+- [ ] **`CausalVerifyAgent.verify()` 和 `CausalConvergeAgent.converge()` 均接收 mode 参数**，根据 `AgentMode::Orchestration` 或 `AgentMode::Execution` 选择对应的 system prompt：
+  - Verify: `VERIFY_ORC_SYSTEM_PROMPT`（编排验证·MECE 完整性）或 `VERIFY_EXEC_SYSTEM_PROMPT`（执行验证·需求满足度），均以「你是因果验证器」开头
+  - Converge: `CONVERGE_ORC_SYSTEM_PROMPT`（编排收敛·覆盖一致性）或 `CONVERGE_EXEC_SYSTEM_PROMPT`（执行收敛·目标达成度），均以「你是收敛判决器」开头
+  （`causal.rs:217-220`、`causal.rs:429-432`）
+- [ ] mode 在 verify 和 converge 中的语义：**执行→verify**（重点验证产出质量）和 **编排→converge**（重点综合子任务结果）；但两个函数对两种 mode 都有效，只是 LLM 的关注点不同——verify 关注产品质量/分解正确性，converge 关注子任务综合/目标达成
+
+## 17. 绝对路径产物与递归收敛规则（单向传递）
+
+- [ ] **产出目录必须使用绝对路径**：`build_system_prompt` 的 Orchestration 和 Execution 模板都必须包含 `## 产出目录` 小节，显式写明绝对路径写法（如 `` `{deliverables_dir}/report.md` ``），禁止使用相对路径
+- [ ] **父层产物参照必须注入**：`build_system_prompt` 的两个模式模板都必须包含 `## 父层产物参照 (Parent Deliverables - Read Only)` 小节，当 `parent_deliverables` 非空时逐条列出绝对路径，并说明「只读不可修改」
+- [ ] **`RecursiveDecomposeTool.execute()` 必须在子任务 spawn 前扫描父层 `deliverables/` 目录**：将扫描结果（绝对路径列表）存为 `parent_deliverables`，通过 `child_meta_ctx.yang_prompt.parent_deliverables = child_deliverables` 注入给子任务（`recursive_decompose.rs:127-141, :202`）
+- [ ] **子任务 deliverables 必须向上聚合**：子 `TPNResult.deliverables` 必须映射到 `DecomposeResult.deliverables`（`recursive_decompose.rs:247-251`），并在最终返回值中通过 `flat_map` 聚合 `Vec<String>`（`recursive_decompose.rs:267-270`）
+- [ ] **Causal 验证模板必须要求 read 工具验证文件**：`VERIFY_ORC_SYSTEM_PROMPT`、`VERIFY_EXEC_SYSTEM_PROMPT` 必须包含 `## File Verification` 小节；`CONVERGE_ORC_SYSTEM_PROMPT`、`CONVERGE_EXEC_SYSTEM_PROMPT` 必须包含 `## Deliverable Verification` 小节——均要求 LLM 使用 `read` 工具打开绝对路径文件验证内容，而非仅依赖摘要文本（`causal.rs:297-301, :333-337, :508-513, :539-542`）
+- [ ] **`DecomposeResult.deliverables` 和 `TPNResult.deliverables` 均为 `Vec<String>`，类型必须对齐**：在 `DecomposeResult` 映射和聚合时直接 `clone()` 即可，不需要类型转换
