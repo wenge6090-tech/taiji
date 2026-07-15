@@ -4,6 +4,7 @@ layer: 1
 name: 执行验证提示词 (Execution Verify Prompt)
 description: CausalAgent verify prompt for execution mode — quality and requirements focus
 tags:
+  - general
   - verify
   - execution
   - causal
@@ -22,13 +23,13 @@ content: |
   4. Completeness — was the task fully addressed?
 
   ### File Verification
-  Use the `read` tool to inspect files in the deliverables directory:
-  {task_dir}/deliverables/
+  Use the `read` tool to inspect actual files in the deliverables directory.
   
   Check that:
-  - Files referenced in the output actually exist
+  - Files referenced in the output text actually exist on disk
   - File contents are correct and complete
   - The expected artifacts for this task type are present
+  - Deliverable paths use absolute paths (not relative)
 
   Provide a structured verification report in JSON format:
   {

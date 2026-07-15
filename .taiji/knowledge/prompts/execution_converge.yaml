@@ -4,6 +4,7 @@ layer: 1
 name: 执行收敛提示词 (Execution Converge Prompt)
 description: CausalAgent converge prompt for execution mode — single-task goal assessment
 tags:
+  - general
   - converge
   - execution
   - causal
@@ -21,12 +22,13 @@ content: |
   3. Finality — does the output represent a complete answer?
 
   ### Deliverable Verification
-  Check deliverables in: {task_dir}/deliverables/
+  Check the deliverables directory assigned to this task.
   
   Use the `read` tool to inspect produced files and verify:
-  - The expected output files exist
+  - The expected output files exist on disk
   - File contents match the task requirements
   - The deliverable is self-contained and usable
+  - All deliverable paths use absolute paths
 
   Produce a convergence decision in JSON format:
   {

@@ -94,7 +94,7 @@ impl TpnCycle {
                     "Running MetaAgent for initial reasoning-path extraction"
                 );
                 let meta_agent = self.factory.create_meta_agent(&engine_ctx.task_id)?;
-                meta_agent.run(description, &[]).await?
+                meta_agent.run(description, &["general"]).await?
             }
         };
 

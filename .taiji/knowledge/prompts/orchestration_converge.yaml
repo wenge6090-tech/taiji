@@ -4,6 +4,7 @@ layer: 1
 name: 编排收敛提示词 (Orchestration Converge Prompt)
 description: CausalAgent converge prompt for orchestration mode — multi-subtask aggregation
 tags:
+  - general
   - converge
   - orchestration
   - causal
@@ -22,13 +23,14 @@ content: |
   3. Integration — can the partial results be combined into a coherent whole?
 
   ### Deliverable Verification
-  Each subtask may have produced files in its own deliverables directory:
-  {task_dir}/children/{i}/deliverables/
+  Each subtask may have produced files in its own deliverables directory
+  (usually under children/{i}/deliverables/).
   
   Use the `read` tool to inspect child deliverables and verify:
-  - Each subtask produced the expected files
+  - Each subtask produced the expected files on disk
   - File contents are consistent with the subtask summary
   - No cross-subtask contradictions in file contents
+  - All deliverable paths use absolute paths
 
   Produce a convergence decision in JSON format:
   {
