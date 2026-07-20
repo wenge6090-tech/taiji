@@ -1,10 +1,10 @@
-# taiji 架构蓝图 — TPN-DMN-理络 递归引擎（Rust / Rig）
+# taiji 架构蓝图 — TPN-DMN-归藏 递归引擎（Rust / Rig）
 
-> 蓝图-完型协议 V11（2026-07-15）。
+> 蓝图-完型协议 V13（2026-07-21）。
 >
 > **本文件 = 唯一事实。** 实施约束与避坑规则见 [`AGENTS.md`](./AGENTS.md)（给 AI 自检）。
 >
-> **V11 变更：** 多层递归绝对路径传递——DecomposeResult +deliverables、YangPrompt +parent_deliverables、6 份硬编码模板中加入 deliverable 路径指令（阳列出绝对路径、阴读文件验证）、权限单向向下覆盖模型。新增 §8.9。
+> **V13 变更：** L1 Skills 从 FittingAgent 内置工具集中剥离；新增 ExternalContext / ExternalFile / ExternalToolResult 类型供前端 agent（pi_agent_rust）通过 MCP 注入上下文；taiji_run MCP schema 扩展 context 参数；EngineContext +context_dir 字段；FittingAgent 系统模板中新增 External Context 节，引用前端上下文文件。
 
 ---
 
@@ -16,13 +16,13 @@
 
 `AgentMode` 决定 prompt 内容偏向：**Orchestration（编排）** 模式强调任务拆解与综合，**Execution（执行）** 模式强调直接产出。mode 不由 depth 推导（根任务固定 Orchestration，叶子强制 Execution），而是由父 LLM 在拆解时显式分配。
 
-**提示词来源：** FittingAgent / CausalAgent 的 system prompt 由 MetaAgent 在每次 TPN 循环的开始阶段动态编排。MetaAgent 首先查询理络 `prompts/` 层的提示词资产（标签匹配 + 置信度排序），若有高置信度匹配则调用 LLM 将资产组合为三份完整的 system prompt（fitting、verify、converge），注入 `MetaContext` 传递到下游 Agent。无理络匹配时降级到 4 个 Base 硬编码模板（FittingAgent 的编排/执行各一、CausalAgent 的 verify/converge 各一），下游 Agent 自动使用内置回退。
+**提示词来源：** FittingAgent / CausalAgent 的 system prompt 由 MetaAgent 在每次 TPN 循环的开始阶段动态编排。MetaAgent 首先查询归藏 `prompts/` 层的提示词资产（标签匹配 + 置信度排序），若有高置信度匹配则调用 LLM 将资产组合为三份完整的 system prompt（fitting、verify、converge），注入 `MetaContext` 传递到下游 Agent。无归藏匹配时降级到 4 个 Base 硬编码模板（FittingAgent 的编排/执行各一、CausalAgent 的 verify/converge 各一），下游 Agent 自动使用内置回退。
 
 ### 1.2 三相互补 (Tri-Phase Complementarity)
 
 | Agent | 相位 | 易经 | 职责 |
 |-------|------|------|------|
-| **MetaAgent** | 权重更新·元 | 无极生太极 | 遍历理络图谱提取推理路径，注入认知偏置 |
+| **MetaAgent** | 权重更新·元 | 无极生太极 | 遍历归藏图谱提取推理路径，注入认知偏置 |
 | **FittingAgent** | 概率拟合·阳 | 阳 | 沿路径发散探索，LLM 做微观概率采样，可递归拆解 |
 | **CausalAgent** | 因果验证·阴 | 阴 | 将结果收敛回符号约束，验证宏观因果性 |
 
@@ -30,7 +30,7 @@ TPN 循环 = 阳生（概率采样）→ 阴克（验证驳回）→ 元调（�
 
 ### 1.3 神经与符号统一 (Neural-Symbolic Integration)
 
-LLM 是微观概率性的体现——每次 prompt 调用随机、不可精确重现。理络是宏观因果性的体现——reasoning paths、Truth 约束形成可追溯的符号推理网络。TPN 循环就是这两层表象的交替：概率采样 → 符号验证 → 权重调整 → 再采样。
+LLM 是微观概率性的体现——每次 prompt 调用随机、不可精确重现。归藏是宏观因果性的体现——reasoning paths、Truth 约束形成可追溯的符号推理网络。TPN 循环就是这两层表象的交替：概率采样 → 符号验证 → 权重调整 → 再采样。
 
 ### 1.4 第一性原理 (First Principles)
 
@@ -49,9 +49,9 @@ LLM 是微观概率性的体现——每次 prompt 调用随机、不可精确�
 | **L3 Grid** | 复合推理角色 | 含 role_prompt、workflow，关联 Skills/Models/Truths |
 | **L2 Model** | 概率经验模式 | Bayesian 置信度（Beta 后验），从执行轨迹提取 |
 | **L1 Skill** | 可执行工具 | 包装具体工具调用，带 success_rate 和 use_count |
-| **理络 (Liluo)** | 认知仓库 | 五层 YAML 存储于 `.taiji/knowledge/` |
-| **MetaAgent** | 权重更新·元 | 瞬态 Rig Agent，查询理络所有五层资产 + LLM 编排提示词 + 输出 MetaContext，`max_turns=1` |
-| **FittingAgent** | 概率拟合·阳 | 瞬态 Rig Agent，L1 Skills + recursive_decompose + causal_verify，`max_turns=30` |
+| **归藏 (Guizang)** | 认知仓库 | 五层 YAML 存储于 `.taiji/knowledge/` |
+| **MetaAgent** | 权重更新·元 | 瞬态 Rig Agent，查询归藏所有五层资产 + LLM 编排提示词 + 输出 MetaContext，`max_turns=1` |
+| **FittingAgent** | 概率拟合·阳 | 瞬态 Rig Agent，无内置 L1 Skills（L1 Skills 由前端 agent 通过 MCP 注入 ExternalContext），内置 `recursive_decompose` + `causal_verify`，`max_turns=30` |
 | **CausalAgent** | 因果验证·阴 | 瞬态 Rig Agent（双模式：verify / converge），`max_turns=3` |
 | **AgentFactory** | 瞬态 Agent 工厂 | 中枢组件，持有基础设施 Arc 引用 |
 | **DMN Consumer** | 反向传播 | 独立后台任务，轮询 pending 队列执行 δ₀-δ₃ 演化 |
@@ -75,15 +75,15 @@ LLM 是微观概率性的体现——每次 prompt 调用随机、不可精确�
 flowchart TD
     USER["taiji run <description>"] --> CONFIG["TaijiConfig::load()"]
     CONFIG --> PVR["ProviderRegistry::init(config)"]
-    PVR --> LILUO["LiluoClient::new(.taiji/knowledge/)"]
-    LILUO --> FACTORY["AgentFactory::new(config, liluo, providers)"]
+    PVR --> GUIZANG["GuizangClient::new(.taiji/knowledge/)"]
+    GUIZANG --> FACTORY["AgentFactory::new(config, liluo, providers)"]
     FACTORY --> RUNNER["RecursiveRunner::new(factory)"]
     RUNNER --> EXECUTE["runner.execute(task_id, desc)"]
     EXECUTE --> INIT["init task dir (data/tasks/{task_id}/)"]
 
     subgraph "TPN 循环"
         INIT --> META["① 权重更新 (元·MetaAgent, max_turns=1)\n标签匹配 → 加载 Grids + BFS 遍历 → MetaContext"]
-        META --> FIT["② 概率拟合 (阳·FittingAgent) LLM loop (max_turns=30)\nSkills / recursive_decompose / causal_verify"]
+        META -->         FIT["② 概率拟合 (阳·FittingAgent) LLM loop (max_turns=30)\nrecursive_decompose / causal_verify\n无内置 L1 Skills — 上下文由前端 agent 注入"]
         FIT --> VERIFY["③ 因果验证 (阴)\nverify() → VerificationReport"]
     end
 
@@ -124,7 +124,7 @@ flowchart TB
         META_B["meta — MetaAgent 构建器"]
         FIT_B["fitting — FittingAgent 构建器"]
         CAUSAL_B["causal — CausalAgent 构建器"]
-        TOOLS["tools/ — recursive_decompose, causal_verify, L1 Skills"]
+        TOOLS["tools/ — recursive_decompose, causal_verify"]
     end
 
     subgraph "L2 Hook"
@@ -134,7 +134,7 @@ flowchart TB
 
     subgraph "L1 基础设施"
         PROVIDER["provider — ProviderRegistry"]
-        LILUO["knowledge — LiluoClient (文件系统读写)"]
+        GUIZANG["knowledge — GuizangClient (文件系统读写)"]
         REL["relation_engine — RelationEngine (BFS→Chain)"]
         CONFIG["config — TaijiConfig"]
         ERR["error — TaijiError"]
@@ -149,13 +149,13 @@ flowchart TB
 
     MAIN --> CONFIG & RUNNER
     RUNNER --> FACTORY
-    FACTORY --> PROVIDER & LILUO & TRIG & REL & TYPES
+    FACTORY --> PROVIDER & GUIZANG & TRIG & REL & TYPES
     FACTORY --> META_B & FIT_B & CAUSAL_B
     FIT_B --> TOOLS & SAFETY & TRACE_H
     TOOLS --> FACTORY
-    META_B --> LILUO
+    META_B --> GUIZANG
     CAUSAL_B --> CONST
-    EVOLVER --> LILUO & TRACE_W
+    EVOLVER --> GUIZANG & TRACE_W
     DMN --> EVOLVER
     MCP_SRV --> FACTORY
     MCP_CLI --> FIT_B
@@ -169,24 +169,24 @@ flowchart TB
 | L1 | infra/config | TaijiConfig 加载与验证 |
 | L1 | infra/error | TaijiError 枚举（含 context 字段） |
 | L1 | infra/provider | ProviderRegistry：Rig client 管理（创建/复用/fallback） |
-| L1 | infra/knowledge | LiluoClient：理络 文件系统读写 + 标签搜索 + BFS 遍历 |
+| L1 | infra/knowledge | GuizangClient：归藏 文件系统读写 + 标签搜索 + BFS 遍历 |
 | L1 | infra/relation_engine | BFS 遍历关系边，生成 ReasoningPath |
 | L1 | infra/trace | TraceWriter：JSONL 写入 + 10MB 轮转 + read_tree 合并 |
 | L1 | infra/rate_limiter | 全局 token bucket 限流 |
 | L2 | hooks/safety | ToolSafetyGuard：路径穿越 / 命令注入 / SSRF 拦截 |
 | L2 | hooks/trace | TraceHook：自动捕获 StepEvent 写入 trace.jsonl |
 | L3 | agents/factory | AgentFactory：持有所有 Arc 引用，创建三种瞬态 Agent |
-| L3 | agents/meta | MetaAgentBuilder：动态上下文注入，BFS 遍历理络 |
-| L3 | agents/fitting | FittingAgentBuilder：Skills + recursive_decompose + causal_verify |
+| L3 | agents/meta | MetaAgentBuilder：动态上下文注入，BFS 遍历归藏 |
+| L3 | agents/fitting | FittingAgentBuilder：recursive_decompose + causal_verify，无内置 L1 Skills（由前端 agent 通过 MCP ExternalContext 注入） |
 | L3 | agents/causal | CausalAgentBuilder：verify 模式 + converge 模式 |
-| L3 | agents/tools | recursive_decompose / causal_verify / L1 Skills |
+| L3 | agents/tools | recursive_decompose / causal_verify（L1 Skills 不再内置于此模块） |
 | L4 | orchestration/runner | RecursiveRunner：创建根任务 + TPN 循环 |
 | L4 | orchestration/constraint_engine | 加载 L4 Truth 约束 + 前置检查 |
 | L4 | orchestration/trigger_engine | 正则 + 标签匹配 L1 Skills |
 | L4 | orchestration/worker_pool | Semaphore 限并发 + RateLimiter |
 | L4 | orchestration/cognition_evolver | δ₀-δ₃ 四步认知演化 |
 | L4 | orchestration/dmn_consumer | 后台轮询 pending 队列 |
-| L5 | mcp/server | MCP Server：暴露 TPN/DMN/理络 操作 |
+| L5 | mcp/server | MCP Server：暴露 TPN/DMN/归藏 操作 |
 | L5 | mcp/client | MCP Client Manager：连接外部服务器 |
 
 ### 关键接口契约
@@ -194,14 +194,15 @@ flowchart TB
 | # | 契约 | 说明 |
 |---|------|------|
 | 1 | `RecursiveDecomposeTool.execute(subtasks: Vec[SubtaskSpec]) -> DecomposeResult` | 输入 LLM 拆解的子任务 → spawn 子 FittingAgent → join_all → CausalAgent.converge() → 返回收敛结果 |
-| 2 | `AgentFactory.create_fitting_agent(depth, mode, meta_ctx, engine_ctx, cancel) -> FittingAgentBuilder` | 从 MetaContext + EngineContext + CancellationToken + 理络 创建阳 Agent，builder.run() 后销毁 |
+| 2 | `AgentFactory.create_fitting_agent(depth, mode, meta_ctx, engine_ctx, cancel) -> FittingAgentBuilder` | 从 MetaContext + EngineContext + CancellationToken + 归藏 创建阳 Agent，builder.run() 后销毁 |
 | 3 | `FittingAgentBuilder { depth, mode, meta_ctx, engine_ctx, factory, model, cancel: CancellationToken }` | 阳 Agent 构建器，mode 决定 prompt 选择（编排/执行） |
 | 4 | `SafetyHook (AgentHook)` | 在 ToolCall 事件上检查路径穿越/命令注入/SSRF，返回 Flow::cont() 或 Flow::skip() |
 | 5 | `ConstraintEngine.check_constraints(output, constraints) -> ConstraintResult` | CausalAgent.verify 前置检查，Hard 违反直接短路返回 BACK_TO_META |
-| 6 | `MetaAgentBuilder.run(task_description, task_type_tags) -> MetaContext` | 查询理络 prompts/ 标签匹配 → 置信度排序 → LLM 编排三份 system prompt（fitting/verify/converge）→ 注入 MetaContext；无理络资产时降级返回 MetaContext::empty() |
-| 7 | `DMN Consumer (独立 tokio::spawn)` | 指数退避轮询 pending/ 队列，调用 CognitionEvolver，单写者更新理络 |
+| 6 | `MetaAgentBuilder.run(task_description, task_type_tags) -> MetaContext` | 查询归藏 prompts/ 标签匹配 → 置信度排序 → LLM 编排三份 system prompt（fitting/verify/converge）→ 注入 MetaContext；无归藏资产时降级返回 MetaContext::empty() |
+| 7 | `DMN Consumer (独立 tokio::spawn)` | 指数退避轮询 pending/ 队列，调用 CognitionEvolver，单写者更新归藏 |
 | 8 | `CausalVerifyAgentBuilder.verify(output, tool_results, meta_ctx, mode) -> VerificationReport` | 优先使用 meta_ctx.verify_system_prompt，None 时降级到 mode 对应的硬编码模板 |
 | 9 | `CausalConvergeAgentBuilder.converge(subtask_results, meta_ctx, mode) -> ConvergenceDecision` | 优先使用 meta_ctx.converge_system_prompt，None 时降级到 mode 对应的硬编码模板 |
+| 10 | `RecursiveRunner.execute_with_context(description, external_ctx) -> TPNResult` | runner.execute() 的增强版本，接受来自前端 agent 的 ExternalContext（文件、工具结果、对话总结），将文件物化到 `task_dir/context/files/` 并写入 `context/meta.json`，设置 `engine_ctx.context_dir` → FittingAgent 模板注入 External Context 节 |
 
 ---
 
@@ -253,6 +254,7 @@ classDiagram
         +matched_skills: Vec[SkillRef]
         +yang_prompt: YangPrompt
         +mode: AgentMode
+        +temperature: Option[f32]
         +fitting_system_prompt: Option[String]
         +verify_system_prompt: Option[String]
         +converge_system_prompt: Option[String]
@@ -270,6 +272,7 @@ classDiagram
         +content: String
         +agent_target: String
         +agent_mode: AgentMode
+        +temperature: Option[f32]
         +usage_count: u32
         +success_rate: f64
     }
@@ -316,12 +319,29 @@ classDiagram
         +task_summary: String
     }
 
+    class ExternalContext {
+        +files: Vec[ExternalFile]
+        +tool_results: Vec[ExternalToolResult]
+        +session_summary: Option[String]
+    }
+
+    class ExternalFile {
+        +path: String
+        +content: String
+    }
+
+    class ExternalToolResult {
+        +tool: String
+        +output: String
+    }
+
     class EngineContext {
         +task_id: String
         +depth: u32
         +task_dir: PathBuf
         +cycle: u32
         +round: u32
+        +context_dir: Option[PathBuf]
     }
 
     class VerificationRoute {
@@ -379,7 +399,7 @@ sequenceDiagram
     RR->>AF: create_meta_agent(task_id)
     AF-->>RR: MetaAgentBuilder
     RR->>MA: run(description, task_type_tags)
-    MA->>MA: 查询理络 prompts/（标签匹配 + 置信度排序）
+    MA->>MA: 查询归藏 prompts/（标签匹配 + 置信度排序）
     alt 有高置信度提示词资产
         MA->>MA: LLM 编排三份 system prompt（fitting/verify/converge）
     else 无匹配资产
@@ -391,7 +411,7 @@ sequenceDiagram
         RR->>AF: create_fitting_agent(depth=0, mode=Orchestration, meta_ctx, engine_ctx)
         AF-->>RR: FittingAgentBuilder
         RR->>FA: run(description)
-        Note over FA: LLM loop (max_turns=30) + Skills + recursive_decompose
+        Note over FA: LLM loop (max_turns=30) + recursive_decompose + causal_verify\nNo built-in L1 Skills — context from frontend agent via MCP
         FA-->>RR: TPNResult
 
         RR->>AF: create_causal_verify_agent(engine_ctx)
@@ -467,13 +487,13 @@ sequenceDiagram
 |------|---------|------|--------|
 | **PASS** | 交付件通过 L4 Truth 约束检查 + LLM 判定收敛 | 输出 TPNResult → 入队 DMN | — |
 | **BACK_TO_TPN** | 执行偏差（交付件不满足验证规格） | 重试概率拟合（阳），LLM 调整执行策略 | `round++`，达 max_rounds → FAIL |
-| **BACK_TO_META** | 认知偏差（推理路径错误、缺少必要约束） | 重新权重更新（元），重新遍历理络 | `cycle++` / `round=0`，达 max_cycles → FAIL |
+| **BACK_TO_META** | 认知偏差（推理路径错误、缺少必要约束） | 重新权重更新（元），重新遍历归藏 | `cycle++` / `round=0`，达 max_cycles → FAIL |
 
 路由由 CausalAgent 的 LLM 裁决，不硬编码于 RecursiveRunner。约束检查（ConstraintEngine.check_constraints）在 LLM 调用之前执行：Hard 违反直接返回 BACK_TO_META，Soft 违反注入 LLM prompt 由 LLM 裁定。
 
 ---
 
-## 6. 理络 (Liluo) 认知仓库
+## 6. 归藏 (Guizang) 认知仓库
 
 ### 6.1 五层资产模型
 
@@ -512,13 +532,13 @@ TPN 执行期间只读，DMN Consumer 单写者更新。
 | L2 Model | `alpha: f64`, `beta: f64` |
 | L3 Grid | `relations: Vec[Relation]`（每条含 target_id, target_type, relation_type, weight, interpretation） |
 | L4 Truth | `severity: String`（"Hard" \| "Soft"） |
-| L5 Prompt | `content: String`（提示词正文）, `agent_target: String`（"FittingAgent" \| "CausalAgent"）, `agent_mode: AgentMode`（Orchestration \| Execution）, `usage_count: u32`, `success_rate: f64` |
+| L5 Prompt | `content: String`（提示词正文）, `agent_target: String`（"FittingAgent" \| "CausalAgent"）, `agent_mode: AgentMode`（Orchestration \| Execution）, `temperature: Option<f32>`（可选温度覆盖，None 时使用 Base 模板默认值）， `usage_count: u32`, `success_rate: f64` |
 
 ### 6.3 检索与遍历
 
 ```mermaid
 flowchart LR
-    subgraph "MetaAgent 加载理络"
+    subgraph "MetaAgent 加载归藏"
         QUERY["task_type_tags → 标签匹配 Grids"]
         QUERY --> LOAD["加载匹配的 Grids + 关联的 Skills/Truths"]
         LOAD --> BFS["RelationEngine.traverse() — BFS 1-3 跳 → Vec[Chain]"]
@@ -562,7 +582,7 @@ flowchart LR
         D2 --> D3["δ₃ L3 网格重连: 调整 relation weight ±0.1"]
     end
 
-    D3 --> WRITE["write YAML → 理络 (version++, 单写者)"]
+    D3 --> WRITE["write YAML → 归藏 (version++, 单写者)"]
     WRITE --> NEXT["下轮权重更新自动读取最新图谱"]
 ```
 
@@ -578,7 +598,7 @@ data/                               ← 默认 data_root
 │   ├── config.json                 ← TaijiConfig
 │   ├── pending/                    ← DMN 任务队列
 │   │   └── dead/                   ← 死信队列
-│   ├── knowledge/                  ← 理络 认知仓库 (§6)
+│   ├── knowledge/                  ← 归藏 认知仓库 (§6)
 │   └── tasks/
 │       └── {root_uuid}/            ← 根任务
 │           ├── meta.json           ← Task { id, depth:0, status }
@@ -612,19 +632,19 @@ data/                               ← 默认 data_root
 
 ### 8.1 瞬态 Agent 生命周期
 
-所有 Agent 均为瞬态：`AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → AgentBuilder drop`。状态不跨调用保留，认知更新通过理络 YAML 文件持久化，下轮加载时自动生效。
+所有 Agent 均为瞬态：`AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → AgentBuilder drop`。状态不跨调用保留，认知更新通过归藏 YAML 文件持久化，下轮加载时自动生效。
 
 ### 8.2 异层同构与模式分化
 
 `depth` 只改变编号，不改变目录布局、TPN 循环结构。根任务和子任务执行同一段代码。**system prompt 的内容因 `AgentMode` 分化**：
 - **Orchestration 模式**：prompt 包含子任务模式选择指南、植物生长原则（默认倾向 Execution），强调先拆解后综合
-- **Execution 模式**：prompt 包含「执行优先」原则（先直接用 L1 skills 完成），recursive_decompose 仅作最后手段
+- **Execution 模式**：prompt 包含「执行优先」原则（优先使用可用工具直接产出；前端注入的上下文指向预读取的文件），recursive_decompose 仅作最后手段
 
 递归层间通过 `MetaContext`（推理偏置注入）和 `ConvergenceDecision`（收敛结果上浮）传递信息。`AgentMode` 不由 `depth` 自动推导，而是由父 LLM 在拆解时显式分配。叶子层（`depth+1 >= max_depth`）由 RecursiveDecomposeTool 强制覆盖为 Execution。
 
 ### 8.3 TPN 只读 / DMN 单写者
 
-TPN 执行期间只读理络，DMN Consumer 是唯一的写者（单线程后台任务）。无需并发锁，避免读写竞争。
+TPN 执行期间只读归藏，DMN Consumer 是唯一的写者（单线程后台任务）。无需并发锁，避免读写竞争。
 
 ### 8.4 LLM 路由内部化
 
@@ -670,17 +690,18 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 
 所有 Agent 的 system prompt 不再硬编码在 `src/agents/*.rs` 中，而是由 MetaAgent 在每次 TPN 循环开始时动态编排：
 
-1. **查询理络** — 根据 `task_type_tags` 标签匹配 `prompts/` 层的 PromptAsset，按 `confidence` 降序排列
+1. **查询归藏** — 根据 `task_type_tags` 标签匹配 `prompts/` 层的 PromptAsset，按 `confidence` 降序排列
 2. **置信度过滤** — 仅保留 `confidence >= 0.3` 的高置信度资产
 3. **LLM 编排** — 将匹配的 prompt 资产和任务描述一起传给 LLM，由 LLM 决策 `AgentMode` 并组合三份完整 system prompt（`fitting_system_prompt`、`verify_system_prompt`、`converge_system_prompt`）
-4. **注入 MetaContext** — 三份提示词作为 `Option<String>` 字段注入 MetaContext，传递到下游 Agent
-5. **降级路径** — 无理络资产或 LLM 编排失败时，全部设为 `None`，下游 Agent 自动使用内置硬编码模板
+3. **温度提取** — 从最高置信度的匹配 PromptAsset 提取 `temperature` 字段；若未设置，回退到该 `agent_mode` 的 Base 模板默认温度（见 §8.10）；注入 `MetaContext.temperature`
+4. **注入 MetaContext** — 三份提示词作为 `Option<String>` 字段注入 MetaContext，同时注入 `temperature`，传递到下游 Agent
+5. **降级路径** — 无归藏资产或 LLM 编排失败时，全部设为 `None`，下游 Agent 自动使用内置硬编码模板
 
 **下游消费规则：**
 
 | Agent | 方法 | 优先级 | 降级 |
 |-------|------|--------|------|
-| FittingAgent | `build_system_prompt()` | `meta_ctx.fitting_system_prompt` → `Some` 时直接返回，不编译模板 | `build_orchestration_prompt()` 或 `build_execution_prompt()` 模板 |
+| FittingAgent | `build_system_prompt()` | `meta_ctx.fitting_system_prompt` → `Some` 时直接返回，不编译模板；`meta_ctx.temperature` → `Some` 时覆盖默认温度 | `build_orchestration_prompt()` 或 `build_execution_prompt()` 模板 + 对应 Base 温度默认值 |
 | CausalAgent.verify | `verify(output, ..., meta_ctx, mode)` | `meta_ctx.verify_system_prompt` → 作为 system prompt | `VERIFY_ORC_SYSTEM_PROMPT` / `VERIFY_EXEC_SYSTEM_PROMPT` 常量 |
 | CausalAgent.converge | `converge(results, ..., meta_ctx, mode)` | `meta_ctx.converge_system_prompt` → 作为 system prompt | `CONVERGE_ORC_SYSTEM_PROMPT` / `CONVERGE_EXEC_SYSTEM_PROMPT` 常量 |
 
@@ -718,3 +739,16 @@ DecomposeResult.deliverables → 父 CausalAgent.converge() 逐文件检查
 4. **阴 converge 模板**：接收所有子 `deliverables`，调用 `read` 逐文件检查跨子任务一致性
 
 绝对路径以 `task_dir` 为根——每层递归有独立的 `task_dir`（`data/tasks/{root}/children/{i}/...`），子层不会因为路径冲突覆盖父层文件。
+
+### 8.10 四象温度（L5 Base 模板默认温度）
+
+四个 Base 硬编码模板根据各自职责设置不同温度，引导 LLM 行为偏向：
+
+| Base 模板 | AgentMode | 默认 temperature | 设计依据 |
+|-----------|-----------|:---:|------|
+| FittingAgent 编排 | Orchestration | `0.8` | 高温度鼓励发散拆解，探索更多子任务划分 |
+| FittingAgent 执行 | Execution | `0.5` | 中等温度平衡创造力与确定性，适合直接产出 |
+| CausalAgent 验证 | — | `0.2` | 低温度严格控制，严格对照约束逐条检查 |
+| CausalAgent 收敛 | — | `0.2` | 低温度严格判决，不引入额外噪声 |
+
+温度优先级：`PromptAsset.temperature`（最高）→ Base 模板默认值 → `TaijiConfig` 全局默认值（`0.7`）。

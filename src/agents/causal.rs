@@ -589,6 +589,7 @@ mod tests {
             task_dir: std::path::PathBuf::from(format!("./test_data/tasks/{task_id}")),
             cycle: 1,
             round: 0,
+            context_dir: None,
         }
     }
 

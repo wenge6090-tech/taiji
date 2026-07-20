@@ -28,6 +28,7 @@ use tracing::{error, info, warn};
 use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
 use crate::orchestration::runner::RecursiveRunner;
+use crate::types::agent::{ExternalContext, ExternalFile, ExternalToolResult};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -121,11 +122,43 @@ impl ServerHandler for TaijiMcpServer {
         let tools = vec![
             Tool::new(
                 "taiji_run",
-                "Execute a task via the TPN engine (MetaAgent → FittingAgent → CausalAgent).",
+                "Execute a task via the TPN cognitive engine (MetaAgent → FittingAgent → CausalAgent).",
                 Arc::new(object_schema(serde_json::json!({
                     "description": {
                         "type": "string",
                         "description": "Natural-language task description"
+                    },
+                    "context": {
+                        "type": "object",
+                        "description": "Optional external context from the calling agent (e.g. files, tool results)",
+                        "properties": {
+                            "files": {
+                                "type": "array",
+                                "description": "Files the calling agent has already read",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {"type": "string", "description": "Original file path"},
+                                        "content": {"type": "string", "description": "Full text content"}
+                                    }
+                                }
+                            },
+                            "tool_results": {
+                                "type": "array",
+                                "description": "Results of tool calls the calling agent has executed",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "tool": {"type": "string", "description": "Tool name"},
+                                        "output": {"type": "string", "description": "Tool output"}
+                                    }
+                                }
+                            },
+                            "session_summary": {
+                                "type": "string",
+                                "description": "Summary of the conversation or session history"
+                            }
+                        }
                     }
                 }))),
             ),
@@ -207,12 +240,26 @@ impl TaijiMcpServer {
 
         info!(description = %description, "MCP taiji_run called");
 
+        // Parse optional external context from frontend agent
+        let external_ctx = args
+            .get("context")
+            .and_then(|v| serde_json::from_value::<ExternalContext>(v.clone()).ok());
+
+        if let Some(ref ctx) = external_ctx {
+            info!(
+                files = ctx.files.len(),
+                tool_results = ctx.tool_results.len(),
+                has_session_summary = ctx.session_summary.is_some(),
+                "External context provided"
+            );
+        }
+
         let runner = RecursiveRunner::new(
             self.factory.clone(),
             self.factory.config.clone(),
         );
 
-        match runner.execute(&description).await {
+        match runner.execute_with_context(&description, external_ctx).await {
             Ok(result) => {
                 let payload = serde_json::json!({
                     "task_id": result.task_id,

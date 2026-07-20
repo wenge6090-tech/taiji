@@ -391,6 +391,7 @@ mod tests {
             task_dir: dir.clone(),
             cycle: 1,
             round: 0,
+            context_dir: None,
         };
 
         let hook = TraceHook::new(&context, "test-provider/test-model");
@@ -431,6 +432,7 @@ mod tests {
             task_dir: dir.clone(),
             cycle: 0,
             round: 0,
+            context_dir: None,
         };
 
         let hook = TraceHook::new(&context, "test-model");

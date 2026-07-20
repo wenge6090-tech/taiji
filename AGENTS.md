@@ -1,180 +1,112 @@
 # AI 行为约束（自动加载）
 
-> taiji Rust 重构规则清单。本文件由 IDE/Agent 自动预加载，不在蓝图文档中展示。
->
-> **BCP-蓝图-完型协议.md 是项目唯一事实（唯一事实）。** AGENTS.md 是其实施约束补充（AI 自检清单），与 BCP 冲突时以 BCP 为准。
+> taiji Rust 重构规则清单。BCP-蓝图-完型协议.md 是唯一事实，本文件是实施避坑补充。
 
 ---
 
-## 0. BCP 首要规则（先更新，后执行）
+## 0. BCP 首要规则
 
-- [ ] **BCP-蓝图-完型协议.md 是项目架构的唯一事实来源（唯一事实）**，AGENTS.md 是 BCP 的实施约束和避坑清单。两者冲突时以 BCP 为准。
-- [ ] **先更新 BCP，后执行修改**：任何涉及项目架构、模块结构、类型设计、接口契约、数据流、执行流程、文件系统布局的变更，必须先更新 `BCP-蓝图-完型协议.md`，然后才能进行代码修改。不允许跳过 BCP 直接编码。
-- [ ] BCP 更新后，根据 BCP 变更同步更新 AGENTS.md 中的实施约束条目，确保两者一致。
-- [ ] 纯内部实现细节（如 bug 修复、测试补全、重构不改变接口）无需更新 BCP，但若涉及模块职责、外部接口或架构层面的变化，必须走 BCP 先行流程。
+- **先更新 BCP，后执行修改**：任何涉及模块结构、类型设计、接口契约、数据流的变更必须先更新 `BCP-蓝图-完型协议.md`。
+- 纯内部实现细节（bug 修复、测试补全、重构不改变接口）无需更新 BCP。
+- BCP 与代码冲突时 BCP 优先；实现层命名不一致时以代码为准，不修改蓝图。
 
-## 1. TPN 循环规则
+## 1. 项目结构与关键约定
 
-- [ ] `BACK_TO_TPN` 跳转必须递增 `round_counter`，达到 `max_rounds` 时只能返回 `PASS`/`FAIL`，禁止再跳转
-- [ ] `BACK_TO_META` 跳转必须递增 `cycle_counter`，达到 `max_cycles` 时只能返回 `PASS`/`FAIL`
-- [ ] `recursive_decompose` tool 创建子 Agent 前必须检查 `depth < max_depth`（默认 2），超限直接返回错误
-- [ ] 子任务数量上限 `max_subtasks`（默认 4），LLM 拆解超出时截断或拒绝
-- [ ] `CancellationToken` 必须传递到所有递归层级的子 Agent，取消信号必须立即终止所有子任务
-- [ ] 单层递归与多层递归结构同构：每层都是 权重更新→概率拟合→因果验证，唯一变量是 depth
+### Rust 项目
+- **语言**: Rust 2024 edition，单 crate 项目 `taiji`。
+- **构建**: `cargo build`（预期 19+ 个 vendor cfg 警告，忽略即可）。
+- **测试**: `cargo test`（124 pass, 6 ignored, 5 doc-test ignored）。单个测试: `cargo test <test_name>`。
+- **格式化**: 未配置 cargo fmt / clippy。
+- **Vendor**: Rig v0.39 本地化在 `vendor/`，通过 `Cargo.toml` 的 `[patch.crates-io]` 重定向。`cargo package --allow-dirty` 可验证 vendor 自恰性。**不要直接修改 vendor 目录，除非明确需要修补 Rig 源码。**
 
-## 2. LLM 调用规则
+### 配置文件
+- 配置来源**仅配置文件**（不读环境变量），搜索顺序: `.taiji/config.json` → `taiji.config.json`。
+- `api_key` 为空是硬错误。
+- CLI: `taiji run <desc...>` / `taiji init` / `taiji trace <id>` / `taiji list` / `taiji status` / `taiji mcp`。
 
-- [ ] `provider.chat()` / Rig Agent prompt 输入必须为 `Vec<Message>` 结构，严禁拼接裸字符串
-- [ ] 每次 LLM 调用前必须 `rate_limiter.acquire().await`（全局 token bucket）
-- [ ] DeepSeek 结构化输出失败时：重试最多 3 次 → fallback 到 verbatim 提取 → regex JSON 修复 → 返回 `TaijiError::StructuredOutputParseFailed`
-- [ ] MetaAgent 的 `dynamic_context` 必须设置 `top_k=5`，防止上下文过长（暂保留；待 理络 文件系统实现后改为 LiluoClient 标签搜索）
-- [ ] FittingAgent 的 system prompt 必须包含 MetaContext（reasoning_paths + constraints）
-- [ ] CausalAgent verify 模式的 system prompt 必须以 "你是因果验证器" 开头，converge 模式以 "你是收敛判决器" 开头
-- [ ] 所有 Agent 的 `max_turns` 硬限制：MetaAgent=1, FittingAgent=30, CausalAgent=3
+### 命名不一致（已知）
+- 蓝图 V12 已统一命名为 **归藏 (Guizang)**，但代码中仍大量使用旧名 **理络 (Liluo)**：`LiluoClient`、`liluo` 变量名、注释中的"理络"。
+- **写入新代码时必须使用 `GuizangClient` / `guizang` / "归藏"**。只在修改已有旧代码时保留旧命名。
 
-## 3. 工具安全规则（SafetyHook）
+## 2. TPN 循环防护
 
-- [ ] `check_file_path(args)`: 拦截 `../`、`~`、`/etc/passwd`、`C:\Windows` 等路径穿越
-- [ ] `check_exec_command(args)`: 拦截 `rm -rf`、`curl | sh`、`eval`、`sudo` 等危险命令
-- [ ] `check_web_url(args)`: 拦截 `localhost`、`127.0.0.1`、`169.254.x.x`、`10.x.x.x` 等内网地址（SSRF）
-- [ ] config.safety.trusted_mcp_servers 列表中的 MCP 工具默认放行，不扫描参数
-- [ ] 非白名单 MCP 工具必须强制执行上述三项安全检查
-- [ ] 拦截时返回 `Flow::skip("denied by safety: {reason}")`，不执行工具
+- `BACK_TO_TPN` 递增 `round_counter`，达 `max_rounds` 时只能返回 PASS/FAIL，禁止再跳转。
+- `BACK_TO_META` 递增 `cycle_counter`，达 `max_cycles` 时只能返回 PASS/FAIL。
+- `recursive_decompose` 创建子 Agent 前必须检查 `depth < max_depth`（默认 2），超限返回错误。
+- 子任务数量上限 `max_subtasks`（默认 4），超出截断。
+- `CancellationToken` 必须通过 `child_token()` 传递到所有递归层级，子任务 spawn 前和内部执行前都需检查取消信号。
+- 每层递归结构同构：权重更新→概率拟合→因果验证，唯一变量是 depth。
 
-## 4. 约束检查规则（ConstraintEngine）
+## 3. Agent 关键约束
 
-- [ ] MetaAgent 加载阶段：`load_truths(task_type_tags)` → 注入 `MetaContext.constraints`
-- [ ] CausalAgent.verify 前置：`check_constraints(output, constraints)` 必须在校验 LLM 调用之前执行
-- [ ] 任一硬约束（severity=Hard）违反 → 直接返回 `VerificationReport { route: BACK_TO_META }`，不进入 LLM
-- [ ] 软约束（severity=Soft）违反 → 作为额外上下文注入 CausalAgent 的 system prompt，由 LLM 裁决
+### AgentMode（重要）
+- `AgentMode` 是 `Orchestration` | `Execution`，**不由 depth 自动推导**，由父 LLM 在 `SubtaskSpec.mode` 中显式分配。
+- depth=0 固定 Orchestration；depth+1 >= max_depth 时 `RecursiveDecomposeTool` 强制覆盖为 Execution。
+- `TpnCycle.execute()` 必须接收 `mode: AgentMode`，并逐层向下传播到 FittingAgent 和 CausalAgent。
+- FittingAgentBuilder 构造时接收 mode，据此选择 system prompt 模板——不允许运行时动态切换。
 
-## 5. 工具选择规则（SkillTriggerEngine）
+### System Prompt 动态编排
+- MetaAgent 查询归藏 `prompts/` 层，标签匹配 + 置信度排序，LLM 编排三份 prompt（fitting/verify/converge）。
+- 无归藏资产或编排失败时降级为 Base 硬编码模板。
 
-- [ ] 在 FittingAgent 创建时（非运行时）执行匹配：`match_skills(task_description, tags) → Vec<SkillRef>`
-- [ ] 正则匹配优先：skill.trigger.pattern 匹配 task_description
-- [ ] 标签匹配次之：skill.task_type_tags ∩ task.tags
-- [ ] 权重排序降序，top_k=10
-- [ ] 匹配结果作为 FittingAgent 的 static tools 注册（`.tool(matched_skills)`）
-- [ ] Rig `dynamic_tools` 仅作为 fallback：当显式匹配结果为空时启用
+### 四象温度默认值
+| 模板 | 默认 temperature |
+|------|:---:|
+| FittingAgent Orchestration | 0.8 |
+| FittingAgent Execution | 0.5 |
+| CausalAgent verify | 0.2 |
+| CausalAgent converge | 0.2 |
 
-## 6. DMN 演化规则（CognitionEvolver）
+## 4. 工具注册与安全
 
-- [ ] DMN Consumer 是独立 `tokio::spawn` 后台任务，与 TPN 执行完全解耦
-- [ ] 指数退避轮询 pending/ 队列：1s → 2s → 4s → 8s → 16s → 32s → 60s（上限）
-- [ ] δ₀ 修剪：移除 `confidence < 0.1` 的低信度资产（不可恢复）
-- [ ] δ₁ L1 技能调优：`success_rate = success_count / (success_count + fail_count)`，`use_count++`
-- [ ] δ₂ L2 贝叶斯更新：`alpha += success_count, beta += fail_count`，`confidence = alpha / (alpha + beta)`
-- [ ] δ₃ L3 网格重连：调整 relation.weight ±0.1，范围 [0, 1]
-- [ ] 所有演化结果写入 理络 时必须 `version++`（乐观并发控制）
+### FittingAgent 工具接线顺序
+严格顺序：`hook()` → `.tool(static_tool)` → `.tools(dyn_tools)` → `.build()`
 
-## 7. 理络 文件系统一致性规则
+- 静态工具（`RecursiveDecomposeTool`、`CausalVerifyTool`）通过 `.tool()` 注册。
+- 动态工具（L1 Skills）通过 `.tools(Vec<Box<dyn ToolDyn>>)` 注册。
+- Rig 有 `impl<T: Tool> ToolDyn for T` blanket impl，实现 `Tool` 后自动获得 `ToolDyn`，无需重复实现。
 
-- [ ] `.taiji/knowledge/` 目录按层分层：`truths/` `grids/` `models/` `skills/`，type + layer 区分四层认知资产
-- [ ] `save_asset()` 之前先 `load_asset()` 读取当前版本，确认版本不冲突再覆写
-- [ ] `search_by_tags()` 查 `index.yaml` 的 tag_index 反向索引；索引缺失时全量扫描目录重建
-- [ ] `traverse_relations()` BFS 必须 dedup visited set，防止回环
-- [ ] `build_reasoning_paths()` 的 `max_hops` 默认 3
-- [ ] `index.yaml` 是衍生数据——每次启动时校验完整性，数据不一致时从原始 YAML 文件重建
+### 内置 L1 Skills（占位实现）
+`read`、`write`、`bash`、`search`、`webfetch` 均为占位实现（返回模拟结果），位于 `src/agents/tools/skills/mod.rs`。
 
-## 8. Trace 写入规则
+### SafetyHook 拦截
+- `check_file_path`: 拦截 `../`、`~`、`/etc/passwd` 等路径穿越
+- `check_exec_command`: 拦截 `rm -rf`、`eval`、`sudo` 等
+- `check_web_url`: 拦截 localhost / 127.0.0.1 / 内网地址（SSRF）
+- 白名单 MCP 服务器工具放行，非白名单强制执行安全检查
 
-- [ ] 概率拟合（阳）的执行 trace：通过 Rig `TraceHook` 自动捕获所有 StepEvent
-- [ ] 权重更新（元）和因果验证（阴）的 trace：手动 `TraceWriter::write()` 写入单条记录
-- [ ] trace.jsonl 轮转：单文件超过 10MB → 归档为 trace.{N}.jsonl，保留最近 5 代
-- [ ] 敏感信息（API Key、token）必须在写入前脱敏
-- [ ] `read_tree()` 递归合并所有 `**/trace.jsonl`，按 `ts` 时间戳排序
-- [ ] 嵌套子任务的 trace 写入各自子目录 `tasks/{parent}/{n}/trace.jsonl`
+## 5. 归藏 (Guizang) 文件系统
 
-## 9. 并发与限流规则
+### 目录布局
+```
+.taiji/knowledge/
+├── prompts/     ← L5 提示词
+├── truths/      ← L4 约束
+├── grids/       ← L3 推理角色
+├── models/      ← L2 贝叶斯经验
+├── skills/      ← L1 可执行工具
+└── index.yaml   ← tag 反向索引（衍生数据，自动维护）
+```
 
-- [ ] WorkerPool 使用 `tokio::sync::Semaphore(max_concurrent)` 限制并发 Agent 数
-- [ ] RateLimiter 使用 token bucket 算法：全局共享 `Arc<RateLimiter>`
-- [ ] `requests_per_minute` 和 `tokens_per_minute` 分别限流，超限时 `.acquire().await` 阻塞等待
-- [ ] `recursive_decompose` 内的子任务并发使用 `tokio::join_all`，受 Semaphore 限制
+- TPN 执行期间**只读**，DMN Consumer 是唯一写者。
+- `save_asset()` 前必须 `load_asset()` 确认版本不冲突，写入时 `version++`。
+- `index.yaml` 损坏时从原始 YAML 重建。`traverse_relations()` BFS 必须 dedup visited set。
 
-## 10. MCP 规则
+### 深层递归产物传递
+- 产出目录必须使用绝对路径。父层 deliverables 注入子 `YangPrompt.parent_deliverables`（只读）。
+- 子 deliverables 向上聚合到 `DecomposeResult.deliverables`。
+- Causal 验证模板必须要求 LLM 用 read 工具逐文件验证。
 
-- [ ] MCP Server 使用 rmcp crate 实现 stdio 传输，暴露 TPN/DMN/认知资产 操作工具
-- [ ] MCP Client 连接外部服务器时：stdio 子进程管理 + SSE 重连（3 次，指数退避）
-- [ ] 外部 MCP 工具注入 FittingAgent 时：非白名单服务器的工具强制 SafetyHook 检查
-- [ ] MCP 工具与 L1 Skills 并列注册，LLM 自行选择调用
+## 6. 错误处理与测试
 
-## 11. 错误处理规则
+### 错误处理
+- `TaijiError` 变体必须携带 `context: String`。
+- LLM 调用失败重试 3 次 → 降级 → `TaijiError::LLMCallFailed`。
+- 归藏 I/O 失败重试 3 次 → `TaijiError::KnowledgeStoreUnavailable`。
+- 文件系统 I/O 错误直接返回，不重试。
+- async 上下文中禁止 `panic!` / `unwrap()`，全部用 `Result`。
 
-- [ ] 所有 `TaijiError` 变体必须携带 `context: String` 字段（可追溯到调用链）
-- [ ] LLM 调用失败（网络/超时/限流）→ 重试最多 3 次 → 降级标记 `degraded=true` → 返回 `TaijiError::LLMCallFailed`
-- [ ] 理络 文件 I/O 失败 → 重试最多 3 次 → 返回 `TaijiError::KnowledgeStoreUnavailable`
-- [ ] 文件系统 I/O 错误 → 直接返回 `TaijiError::IO(io::Error)`，不重试
-- [ ] 死信队列：不可恢复的任务写入 `pending/dead/`，附带完整 error 上下文
-- [ ] `panic!` 和 `unwrap()` 禁止在 async 上下文中使用 → 全部改为 `Result<T, TaijiError>`
-
-## 12. 测试映射
-
-以下规则对应内嵌单元测试（`#[cfg(test)]` 模块，非独立 `tests/` 目录文件）。
-标有 ⚠ 的测试依赖文件系统 I/O，默认 `#[ignore]`（需隔离的工作目录或 mock）。
-
-| 规则 | 实际位置（`src/` 内嵌） | 状态 |
-|------|------------------------|------|
-| TPN 循环死循环防护 | `src/orchestration/runner.rs`（循环境辑）+ `src/agents/fitting.rs`（depth check） | ⚠ runner 无独立 UT；fitting depth check 可用 |
-| LLM 结构化输出回退 | 无独立单元测试（需 mock LLM） | — |
-| 工具安全拦截 | `src/hooks/safety.rs`（23 项测试：文件路径/命令/URL/路由） | ✅ 完整 |
-| 约束检查前置 | `src/orchestration/constraint_engine.rs`（13 项测试） | ✅ 完整 |
-| 理络 文件系统读写 | `src/infra/knowledge.rs`（10 项测试：创建目录/读写真理/读写网格/标签搜索/BFS 遍历/推理路径/健康检查/索引重建） | ✅ 完整 |
-| Trace 轮转与脱敏 | `src/hooks/trace.rs`（7 项测试：脱敏 + 写入） | ✅ 脱敏覆盖；轮转未覆盖 |
-| RateLimiter token bucket | `src/infra/rate_limiter.rs` 无内嵌测试 | — |
-| DMN 演化正确性 | `src/orchestration/cognition_evolver.rs`（7 项测试） | ⚠ 需文件系统 I/O |
-| 递归深度限制 | `src/agents/fitting.rs` `test_fitting_agent_depth_check` | ✅ |
-| 工具选择（SkillTriggerEngine） | `src/orchestration/trigger_engine.rs`（14 项测试：正则/标签/排序/去重/上限） | ✅ 完整 |
-| FittingAgent 工具接线 | `src/agents/fitting.rs`（4 项测试：builder/系统提示/深度检查/集成） | ✅ builder、prompt、depth check 覆盖 |
-| CancellationToken 传播 | `src/orchestration/dmn_consumer.rs`（2 项含 cancellation 测试）+ `recursive_decompose.rs` 内嵌 | ✅ 取消/超时/死信覆盖 |
-| WorkerPool 并发限流 | `src/orchestration/worker_pool.rs`（5 项测试：并发/信号量/panic） | ✅ 完整 |
-| TaskSpec 解析 | `src/infra/task_spec.rs`（7 项测试：frontmatter/验证） | ✅ 完整 |
-| DMN Consumer 流程 | `src/orchestration/dmn_consumer.rs`（4 项测试：启动/取消/有效/死信） | ⚠ 需文件系统 I/O |
-
-## 13. 测试隔离与清理规则
-
-- [ ] 所有在测试中创建的临时目录（`tmp_dir` / `temp_dir`）必须在测试末尾通过 `tokio::fs::remove_dir_all` 清理，变量名用 `tmp_dir` 而**非** `_tmp_dir`（下划线前缀会绕过 `unused` 警告同时也不在测试末尾清理）
-- [ ] L1 Skill 工具注册时必须同时实现 Rig `Tool` trait 和 `ToolDyn` trait（动态名称工具通过 `.tools(Vec<Box<dyn ToolDyn>>)` 注册），缺一不可
-- [ ] **Rig 提供 blanket impl `impl<T: Tool> ToolDyn for T`**，因此实现 `Tool` 后自动获得 `ToolDyn`，无需重复实现
-
-## 14. FittingAgent 工具接线规则
-
-- [ ] 工具注册顺序必须是：`hook()` → `.tool(static_tool)` → `.tools(dyn_tools)` → `.build()`，先注册 SafetyHook/TraceHook，再注册静态单例工具，最后注册动态名称工具列表
-- [ ] 静态名称工具（`RecursiveDecomposeTool`、`CausalVerifyTool`）通过 `.tool()` 注册，它们的 `NAME` 关联常量在编译期确定
-- [ ] 动态名称工具（L1 Skills，如 `SkillTool`）通过 `.tools(Vec<Box<dyn ToolDyn>>)` 注册，名称在运行时由 `skill.tool_name` 动态决定
-- [ ] `SkillTool` 必须实现 Rig `Tool` trait 的 `fn name(&self) -> String` 方法以返回动态名称，而不是依赖 `const NAME`
-- [ ] 所有工具在 FittingAgent 构造阶段（`build_agent_runner`）预先注册完毕，运行阶段不再增减
-
-## 15. CancellationToken 传播规则
-
-- [ ] `CancellationToken` 必须从 FittingAgent 构造参数传入，存储在 `RecursiveDecomposeTool` 等可分解工具的字段中
-- [ ] 子任务 spawn 前必须检查 `cancel.is_cancelled()`，返回 `TaijiError::Other("Task cancelled")`
-- [ ] 子任务内部也必须在实际执行前再次检查 cancellation
-- [ ] 父 token 通过 `cancel.child_token()` 创建链接子 token，传递给子 `TpnCycle`；父 token 取消时所有子 token 自动传播取消信号
-- [ ] `CancellationToken` 与 `WorkerPool` 的 `Semaphore` 配合使用：先 acquire permit 再 spawn，确保取消时 permit 正确释放
-
-## 16. AgentMode 模式约束规则
-
-- [ ] `AgentMode` 为枚举 `Orchestration`（编排）和 `Execution`（执行），不由 `depth` 自动推导，必须由父 LLM 在 `SubtaskSpec.mode` 中显式分配（BCP §1.1、§5.2）
-- [ ] `depth=0` 的根任务固定为 `Orchestration` 模式，无法被覆盖（BCP §8.6）
-- [ ] 当 `depth+1 >= max_depth` 时，`RecursiveDecomposeTool` 必须将 mode 强制覆盖为 `Execution`，忽略父 LLM 的指定（BCP §5.2、§8.2）
-- [ ] **Orchestration 模式**的 system prompt 必须侧重拆解与综合：包含子任务模式选择指南、「植物生长原则」（默认倾向 Execution），强调先拆解、后综合（BCP §8.2）
-- [ ] **Execution 模式**的 system prompt 必须侧重直接产出：包含「执行优先」原则（先用 L1 Skills 直接完成），`recursive_decompose` 仅作为最后手段（BCP §8.2）
-- [ ] 中间层（`0 < depth < max_depth - 1`）的模式由父 LLM 在 `SubtaskSpec.mode` 中裁决，`RecursiveDecomposeTool` 必须读取 `subtask.mode` 并传递给子 `FittingAgent`（BCP §5.2、§8.6）
-- [ ] `FittingAgentBuilder` 构造时接收 `mode: AgentMode` 参数，据此选择对应的 system prompt 模板——不允许在运行时动态切换模式（BCP §8.2）
-- [ ] **`TpnCycle.execute()` 必须接收 `mode: AgentMode` 参数**，在 FittingAgent 阶段传递给 `create_fitting_agent(depth, mode, ...)`，在 CausalVerify 阶段传递给 `verify_agent.verify(content, results, mode)`——mode 在整个 TPN 周期中逐层向下传播（`tpn_cycle.rs:80`、`tpn_cycle.rs:118`）
-- [ ] **`RecursiveDecomposeTool` 必须接收 `mode: AgentMode` 参数**，在构造时存储为 `self.mode`；子任务 mode 由深度守卫确定后通过 `tpn_cycle.execute(..., child_mode)` 传递，所有子任务完成后通过 `converge_agent.converge(results, self.mode)` 调用收敛判决——mode 在递归分解链中双向传播（`recursive_decompose.rs:54`、`recursive_decompose.rs:228`）
-- [ ] **`CausalVerifyAgent.verify()` 和 `CausalConvergeAgent.converge()` 均接收 mode 参数**，根据 `AgentMode::Orchestration` 或 `AgentMode::Execution` 选择对应的 system prompt：
-  - Verify: `VERIFY_ORC_SYSTEM_PROMPT`（编排验证·MECE 完整性）或 `VERIFY_EXEC_SYSTEM_PROMPT`（执行验证·需求满足度），均以「你是因果验证器」开头
-  - Converge: `CONVERGE_ORC_SYSTEM_PROMPT`（编排收敛·覆盖一致性）或 `CONVERGE_EXEC_SYSTEM_PROMPT`（执行收敛·目标达成度），均以「你是收敛判决器」开头
-  （`causal.rs:217-220`、`causal.rs:429-432`）
-- [ ] mode 在 verify 和 converge 中的语义：**执行→verify**（重点验证产出质量）和 **编排→converge**（重点综合子任务结果）；但两个函数对两种 mode 都有效，只是 LLM 的关注点不同——verify 关注产品质量/分解正确性，converge 关注子任务综合/目标达成
-
-## 17. 绝对路径产物与递归收敛规则（单向传递）
-
-- [ ] **产出目录必须使用绝对路径**：`build_system_prompt` 的 Orchestration 和 Execution 模板都必须包含 `## 产出目录` 小节，显式写明绝对路径写法（如 `` `{deliverables_dir}/report.md` ``），禁止使用相对路径
-- [ ] **父层产物参照必须注入**：`build_system_prompt` 的两个模式模板都必须包含 `## 父层产物参照 (Parent Deliverables - Read Only)` 小节，当 `parent_deliverables` 非空时逐条列出绝对路径，并说明「只读不可修改」
-- [ ] **`RecursiveDecomposeTool.execute()` 必须在子任务 spawn 前扫描父层 `deliverables/` 目录**：将扫描结果（绝对路径列表）存为 `parent_deliverables`，通过 `child_meta_ctx.yang_prompt.parent_deliverables = child_deliverables` 注入给子任务（`recursive_decompose.rs:127-141, :202`）
-- [ ] **子任务 deliverables 必须向上聚合**：子 `TPNResult.deliverables` 必须映射到 `DecomposeResult.deliverables`（`recursive_decompose.rs:247-251`），并在最终返回值中通过 `flat_map` 聚合 `Vec<String>`（`recursive_decompose.rs:267-270`）
-- [ ] **Causal 验证模板必须要求 read 工具验证文件**：`VERIFY_ORC_SYSTEM_PROMPT`、`VERIFY_EXEC_SYSTEM_PROMPT` 必须包含 `## File Verification` 小节；`CONVERGE_ORC_SYSTEM_PROMPT`、`CONVERGE_EXEC_SYSTEM_PROMPT` 必须包含 `## Deliverable Verification` 小节——均要求 LLM 使用 `read` 工具打开绝对路径文件验证内容，而非仅依赖摘要文本（`causal.rs:297-301, :333-337, :508-513, :539-542`）
-- [ ] **`DecomposeResult.deliverables` 和 `TPNResult.deliverables` 均为 `Vec<String>`，类型必须对齐**：在 `DecomposeResult` 映射和聚合时直接 `clone()` 即可，不需要类型转换
+### 测试注意事项
+- 测试中创建的临时目录用 `tmp_dir`（非 `_tmp_dir`），测试末尾必须 `remove_dir_all` 清理。
+- 依赖文件系统 I/O 的测试标有 `#[ignore]`。
+- 通用运行所有测试: `cargo test`；运行特定模块: `cargo test --lib <module>`。

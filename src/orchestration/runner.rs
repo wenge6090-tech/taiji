@@ -16,7 +16,7 @@ use crate::agents::factory::AgentFactory;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
 use crate::orchestration::tpn_cycle::TpnCycle;
-use crate::types::agent::AgentMode;
+use crate::types::agent::{AgentMode, ExternalContext};
 use crate::types::execution::EngineContext;
 use crate::types::task::{Task, TaskStatus, TPNResult};
 
@@ -42,19 +42,19 @@ impl RecursiveRunner {
         Self { factory, config }
     }
 
-    /// Execute a task description end-to-end.
+    /// Execute a task description end-to-end with optional external context
+    /// from a frontend agent (e.g. pi_agent_rust via MCP).
     ///
-    /// 1. Allocate a UUID v4 task ID
-    /// 2. Create `{data_root}/tasks/{id}/` with a `deliverables/` subdirectory
-    /// 3. Persist initial `meta.json` (status = `Running`)
-    /// 4. Build an [`EngineContext`] at depth 0, cycle 0, round 0
-    /// 5. Delegate to [`TpnCycle::execute`] with `initial_meta_ctx = None`
-    ///    (the cycle runs MetaAgent internally to obtain reasoning paths)
-    /// 6. Mark task as `Completed` in `meta.json`
-    /// 7. Return the [`TPNResult`]
-    pub async fn execute(&self, description: &str) -> Result<TPNResult, TaijiError> {
+    /// Same as [`execute`](Self::execute) but also materialises the external
+    /// context (files, tool results, session summary) into `task_dir/context/`
+    /// and sets `engine_ctx.context_dir` so FittingAgent can reference it.
+    pub async fn execute_with_context(
+        &self,
+        description: &str,
+        external_ctx: Option<ExternalContext>,
+    ) -> Result<TPNResult, TaijiError> {
         let task_id = uuid::Uuid::new_v4().to_string();
-        tracing::info!(task_id, "Starting task execution");
+        tracing::info!(task_id, "Starting task execution with context");
 
         let task_dir = self.factory.task_dir(&task_id);
 
@@ -62,7 +62,29 @@ impl RecursiveRunner {
         std::fs::create_dir_all(&task_dir).map_err(TaijiError::IO)?;
         std::fs::create_dir_all(task_dir.join("deliverables")).map_err(TaijiError::IO)?;
 
-        // ── 2. Write initial task metadata ─────────────────────────────
+        // ── 2. Materialise external context (if provided) ──────────────
+        let context_dir = if let Some(ref ctx) = external_ctx {
+            let ctx_dir = task_dir.join("context");
+            let files_dir = ctx_dir.join("files");
+            std::fs::create_dir_all(&files_dir).map_err(TaijiError::IO)?;
+
+            // Write each external file as an indexed blob
+            for (i, file) in ctx.files.iter().enumerate() {
+                let file_path = files_dir.join(i.to_string());
+                std::fs::write(&file_path, &file.content).map_err(TaijiError::IO)?;
+            }
+
+            // Write context metadata
+            let meta_path = ctx_dir.join("meta.json");
+            std::fs::write(&meta_path, serde_json::to_string_pretty(ctx)?)
+                .map_err(TaijiError::IO)?;
+
+            Some(ctx_dir)
+        } else {
+            None
+        };
+
+        // ── 3. Write initial task metadata ─────────────────────────────
         let mut task = Task {
             id: task_id.clone(),
             description: description.to_string(),
@@ -75,19 +97,20 @@ impl RecursiveRunner {
         std::fs::write(&meta_path, serde_json::to_string_pretty(&task)?)
             .map_err(TaijiError::IO)?;
 
-        // ── 3. EngineContext at root ───────────────────────────────────
+        // ── 4. EngineContext at root ───────────────────────────────────
         let mut engine_ctx = EngineContext {
             task_id: task_id.clone(),
             depth: 0,
             task_dir: task_dir.clone(),
             cycle: 0,
             round: 0,
+            context_dir,
         };
 
-        // ── 4. CancellationToken for the entire execution tree ────────
+        // ── 5. CancellationToken for the entire execution tree ────────
         let cancel = CancellationToken::new();
 
-        // ── 5. TPN cycle via TpnCycle ─────────────────────────────────
+        // ── 6. TPN cycle via TpnCycle ─────────────────────────────────
         let tpn_cycle = TpnCycle::new(self.factory.clone(), self.config.clone(), cancel);
         let timeout_secs = self.config.runtime.exec_timeout;
         let result = timeout(
@@ -97,12 +120,20 @@ impl RecursiveRunner {
         .await
         .map_err(|_| TaijiError::Other("Task execution timed out".into()))??;
 
-        // ── 5. Mark completed ──────────────────────────────────────────
+        // ── 7. Mark completed ──────────────────────────────────────────
         task.status = TaskStatus::Completed;
         std::fs::write(&meta_path, serde_json::to_string_pretty(&task)?)
             .map_err(TaijiError::IO)?;
 
         tracing::info!(task_id, "Task completed successfully");
         Ok(result)
+    }
+
+    /// Execute a task description end-to-end (no external context).
+    ///
+    /// Delegates to [`execute_with_context`](Self::execute_with_context) with
+    /// `external_ctx = None`.
+    pub async fn execute(&self, description: &str) -> Result<TPNResult, TaijiError> {
+        self.execute_with_context(description, None).await
     }
 }

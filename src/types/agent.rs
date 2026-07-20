@@ -125,6 +125,49 @@ pub struct YangPrompt {
 }
 
 // ---------------------------------------------------------------------------
+// ExternalContext — context from the calling frontend agent (e.g. pi_agent_rust)
+// ---------------------------------------------------------------------------
+
+/// Context passed from the calling frontend agent through MCP.
+///
+/// When `pi_agent_rust` (or any MCP client) calls `taiji_run`, it can provide
+/// files it has read, tools it has executed, and a summary of the conversation.
+/// This context is injected into the TPN cycle so FittingAgent can reason over
+/// data that the frontend already collected — avoiding redundant tool calls.
+///
+/// All fields are optional.  When `None`/empty, the TPN cycle runs normally
+/// with no external context.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalContext {
+    /// Files the frontend agent has already read.
+    #[serde(default)]
+    pub files: Vec<ExternalFile>,
+    /// Tool results the frontend agent has already collected.
+    #[serde(default)]
+    pub tool_results: Vec<ExternalToolResult>,
+    /// Summary of the conversation or session history.
+    pub session_summary: Option<String>,
+}
+
+/// A file that the frontend agent read using its `read` tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalFile {
+    /// Absolute or relative path as seen by the frontend agent.
+    pub path: String,
+    /// Full text content of the file.
+    pub content: String,
+}
+
+/// The result of a tool call made by the frontend agent.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExternalToolResult {
+    /// Name of the tool that was executed (e.g. "bash", "grep", "find").
+    pub tool: String,
+    /// Human-readable output or summary of the result.
+    pub output: String,
+}
+
+// ---------------------------------------------------------------------------
 // PromptAsset — 理络 prompt template asset
 // ---------------------------------------------------------------------------
 

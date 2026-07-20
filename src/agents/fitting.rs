@@ -7,11 +7,13 @@
 //!
 //! # Toolset
 //! The FittingAgent's transient Rig agent is wired with:
-//! - **L1 Skills**: tools matched by [`SkillTriggerEngine`] (e.g. `read`,
-//!   `write`, `bash`, `webfetch`, `search`).
 //! - **`recursive_decompose`**: spawns child FittingAgents for subtasks.
 //! - **`causal_verify`**: invokes CausalAgent.verify() on intermediate outputs.
 //! - **`SafetyHook`** and **`TraceHook`**: registered as Rig `PromptHook`s.
+//!
+//! L1 Skills (read/write/bash/etc.) are provided by the calling frontend agent
+//! (e.g. pi_agent_rust via MCP) and injected as external context.  The TPN
+//! engine does not carry built-in tool implementations.
 //!
 //! # Constraints (AGENTS.md §2)
 //! - `max_turns = config.runtime.max_rounds` (default 30).
@@ -28,7 +30,6 @@ use std::sync::Arc;
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::providers::deepseek;
-use rig::tool::ToolDyn;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::factory::AgentFactory;
@@ -165,7 +166,12 @@ impl FittingAgentBuilder {
         }
 
         // ── Build system prompt from MetaContext (mode-aware) ──
-        let system_prompt = build_system_prompt(&self.meta_ctx, &self.engine_ctx.task_dir, self.mode);
+        let system_prompt = build_system_prompt(
+            &self.meta_ctx,
+            &self.engine_ctx.task_dir,
+            self.engine_ctx.context_dir.as_deref(),
+            self.mode,
+        );
 
         // ── Obtain LLM client ──
         let client: Arc<deepseek::Client> = self.factory.providers.client("deepseek")?;
@@ -202,17 +208,6 @@ impl FittingAgentBuilder {
         let safety_hook = self.factory.safety_hook.as_ref().clone();
         let agent_builder = agent_builder.hook(safety_hook).hook(trace_hook);
 
-        // ── Register L1 skill tools (dynamic names → ToolDyn) ──
-        let skill_tools: Vec<Box<dyn ToolDyn>> = self
-            .meta_ctx
-            .matched_skills
-            .iter()
-            .map(|skill| {
-                Box::new(crate::agents::tools::skills::SkillTool::new(skill.clone()))
-                    as Box<dyn ToolDyn>
-            })
-            .collect();
-
         // ── Register built-in composite tools ──
         let recursive_decompose = RecursiveDecomposeTool::new(
             self.factory.clone(),
@@ -232,7 +227,6 @@ impl FittingAgentBuilder {
         let agent = agent_builder
             .tool(recursive_decompose)
             .tool(causal_verify)
-            .tools(skill_tools)
             .build();
 
         // ── Execute the prompt ──
@@ -246,14 +240,10 @@ impl FittingAgentBuilder {
         // ── Extract tool call info from response (basic parsing) ──
         // The LLM response may mention which tools were used; we capture
         // available tool names from the registered set as a best-effort summary.
-        let registered_tool_names: Vec<String> = self
-            .meta_ctx
-            .matched_skills
-            .iter()
-            .map(|s| s.tool_name.clone())
-            .chain(std::iter::once("recursive_decompose".to_string()))
-            .chain(std::iter::once("causal_verify".to_string()))
-            .collect();
+        let registered_tool_names: Vec<String> = vec![
+            "recursive_decompose".to_string(),
+            "causal_verify".to_string(),
+        ];
 
         // Check which tools appear in the response text
         let tools_used: Vec<String> = registered_tool_names
@@ -313,7 +303,7 @@ impl FittingAgentBuilder {
 /// - Focus on direct output via L1 skills
 /// - `recursive_decompose` only as a last resort
 /// - Emphasizes producing complete, verifiable artifacts
-fn build_system_prompt(meta_ctx: &MetaContext, task_dir: &std::path::Path, mode: AgentMode) -> String {
+fn build_system_prompt(meta_ctx: &MetaContext, task_dir: &std::path::Path, context_dir: Option<&std::path::Path>, mode: AgentMode) -> String {
     // Prefer MetaAgent-composed prompt if available.
     if let Some(ref composed) = meta_ctx.fitting_system_prompt {
         return composed.clone();
@@ -323,8 +313,8 @@ fn build_system_prompt(meta_ctx: &MetaContext, task_dir: &std::path::Path, mode:
     let mut prompt = String::with_capacity(1024);
 
     match mode {
-        AgentMode::Orchestration => build_orchestration_prompt(&mut prompt, meta_ctx, task_dir),
-        AgentMode::Execution => build_execution_prompt(&mut prompt, meta_ctx, task_dir),
+        AgentMode::Orchestration => build_orchestration_prompt(&mut prompt, meta_ctx, task_dir, context_dir),
+        AgentMode::Execution => build_execution_prompt(&mut prompt, meta_ctx, task_dir, context_dir),
     }
 
     prompt
@@ -337,6 +327,7 @@ fn build_orchestration_prompt(
     prompt: &mut String,
     meta_ctx: &MetaContext,
     task_dir: &std::path::Path,
+    context_dir: Option<&std::path::Path>,
 ) {
     prompt.push_str("你是概率拟合专家 · 编排模式 (Probability Fitting · Orchestration).\n\n");
 
@@ -386,6 +377,22 @@ fn build_orchestration_prompt(
             prompt.push_str(&format!("{}. {}\n", i + 1, path));
         }
         prompt.push_str("\n");
+    }
+
+    // External context (from frontend agent via MCP)
+    if let Some(ctx_dir) = context_dir {
+        let files_dir = ctx_dir.join("files");
+        if files_dir.exists() {
+            prompt.push_str("## External Context (from Frontend Agent)\n");
+            prompt.push_str("以下文件由前端 agent（如 pi_agent_rust）已读取并传递给此任务：\n");
+            if let Ok(entries) = std::fs::read_dir(&files_dir) {
+                for entry in entries.flatten() {
+                    let index = entry.file_name().to_string_lossy().to_string();
+                    prompt.push_str(&format!("- `{}/{}`\n", files_dir.display(), index));
+                }
+            }
+            prompt.push_str("\n使用 `read` 工具检查这些文件的内容——它们包含了你推理所需的前端上下文。\n\n");
+        }
     }
 
     // Available tools
@@ -446,6 +453,7 @@ fn build_execution_prompt(
     prompt: &mut String,
     meta_ctx: &MetaContext,
     task_dir: &std::path::Path,
+    context_dir: Option<&std::path::Path>,
 ) {
     prompt.push_str("你是概率拟合专家 · 执行模式 (Probability Fitting · Execution).\n\n");
 
@@ -494,6 +502,22 @@ fn build_execution_prompt(
             prompt.push_str(&format!("{}. {}\n", i + 1, path));
         }
         prompt.push_str("\n");
+    }
+
+    // External context (from frontend agent via MCP)
+    if let Some(ctx_dir) = context_dir {
+        let files_dir = ctx_dir.join("files");
+        if files_dir.exists() {
+            prompt.push_str("## External Context (from Frontend Agent)\n");
+            prompt.push_str("以下文件由前端 agent（如 pi_agent_rust）已读取并传递给此任务：\n");
+            if let Ok(entries) = std::fs::read_dir(&files_dir) {
+                for entry in entries.flatten() {
+                    let index = entry.file_name().to_string_lossy().to_string();
+                    prompt.push_str(&format!("- `{}/{}`\n", files_dir.display(), index));
+                }
+            }
+            prompt.push_str("\n使用 `read` 工具检查这些文件的内容——它们包含了你推理所需的前端上下文。\n\n");
+        }
     }
 
     // Available tools
@@ -647,6 +671,7 @@ mod tests {
         let prompt = build_system_prompt(
             &ctx,
             &std::path::PathBuf::from("./test_data/tasks/prompt-test"),
+            None,
             AgentMode::Orchestration,
         );
         assert!(prompt.contains("你是概率拟合专家"));
@@ -665,6 +690,7 @@ mod tests {
         let prompt = build_system_prompt(
             &ctx,
             &std::path::PathBuf::from("./test_data/tasks/prompt-test"),
+            None,
             AgentMode::Execution,
         );
         assert!(prompt.contains("你是概率拟合专家"));
@@ -680,7 +706,7 @@ mod tests {
     #[test]
     fn test_build_system_prompt_empty_context() {
         let ctx = MetaContext::empty();
-        let prompt = build_system_prompt(&ctx, &std::path::PathBuf::from("./test_data/tasks/empty-test"), AgentMode::Execution);
+        let prompt = build_system_prompt(&ctx, &std::path::PathBuf::from("./test_data/tasks/empty-test"), None, AgentMode::Execution);
         // Should still have the role header and instructions.
         assert!(prompt.contains("你是概率拟合专家"));
         assert!(prompt.contains("Instructions"));
@@ -698,6 +724,7 @@ mod tests {
             task_dir: std::path::PathBuf::from("./test_data/tasks/test-task-1"),
             cycle: 1,
             round: 0,
+            context_dir: None,
         };
 
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -724,6 +751,7 @@ mod tests {
             task_dir: std::path::PathBuf::from("./test_data/tasks/test-task-2"),
             cycle: 1,
             round: 0,
+            context_dir: None,
         };
 
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -767,6 +795,7 @@ mod tests {
             task_dir: std::path::PathBuf::from("./test_data/tasks/depth-test"),
             cycle: 1,
             round: 0,
+            context_dir: None,
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         let builder = factory

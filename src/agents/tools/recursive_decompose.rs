@@ -193,6 +193,7 @@ impl RecursiveDecomposeTool {
                     round: 0,
                     cycle: 0,
                     depth: engine_ctx.depth + 1,
+                    context_dir: None,
                 };
 
                 // ── Inject parent deliverables into child MetaContext ──

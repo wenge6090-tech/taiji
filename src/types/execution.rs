@@ -17,6 +17,18 @@ pub struct EngineContext {
     pub task_dir: PathBuf,
     pub cycle: u32,
     pub round: u32,
+    /// Optional directory containing context materialized from the calling
+    /// frontend agent (e.g. pi_agent_rust via MCP).
+    ///
+    /// Layout:
+    ///   `{context_dir}/files/` — one file per ExternalFile
+    ///   `{context_dir}/meta.json` — ExternalContext (session_summary, tool_results)
+    ///
+    /// When `Some`, FittingAgent's system prompt references this directory so
+    /// the LLM can use the `read` tool to inspect pre-collected context.
+    /// Children inherit this reference as read-only; they do not overwrite it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_dir: Option<PathBuf>,
 }
 
 /// Record of a single tool call during execution.
