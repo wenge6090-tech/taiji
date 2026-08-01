@@ -1,281 +1,78 @@
-# 实现计划：pi_agent_rust（前端）+ taiji（认知引擎）MCP 桥接
+# 实现计划 — 生产就绪安全整改（三项阻断风险）
 
 ## 目标
+消除 taiji 仓库生产就绪的三项 🔴 阻断风险：① API key 泄露进 git 历史；② 敏感路径未被 .gitignore 覆盖；③ 无安全的本地密钥存放位。**范围仅限安全项**，不动业务代码、不启动 DMN、不补 CI（均属后续工程化阶段）。
 
-taiji 不直接做 agent CLI——改为通过 MCP 协议向 pi_agent_rust 暴露认知推理能力。pi 拥有所有对外能力（界面/工具/会话/扩展），taiji 只做一件事：接收上下文 → TPN 循环 → 返回收敛结论。
+## 背景事实（已审计确认）
+- `taiji.config.json` 含真实 key `sk-REVOKED-3d9f…(脱敏)`，已被 git 跟踪（`HEAD:taiji.config.json` 可检出），历史 7 个 commit 中均存在。
+- 根 `.gitignore` 仅 1 行 `/target`；`taiji-web/.gitignore` 已正确忽略 node_modules/dist。
+- `.taiji/knowledge/prompts/*.yaml` 6 个 seed 资产**有意跟踪**（勿误删）；`.taiji/chat/`、`.taiji/tasks/`、`.taiji/knowledge/index.yaml` 当前未跟踪（防误提交需忽略）。
+- 无 git remote（本地仓库），历史清洗无推送冲突，但仍需备份防数据丢失。
+- 配置搜索顺序（main.rs `load_config`）：`.taiji/config.json` → `taiji.config.json`；api_key 为空时跳过该路径继续找下一个。
 
-## 通讯模型
+## 任务清单
 
-```
-pi_agent_rust (前端 Agent CLI)
-  │
-  │  MCP stdio (pi 作为 MCP client, taiji 作为 MCP server)
-  │
-  ├─ taiji_run:    深度推理任务
-  ├─ taiji_trace:  查询推理轨迹
-  ├─ taiji_list:   列出历史任务
-  └─ taiji_status: 引擎健康检查
-         │
-         ▼
-taiji (认知引擎 —— 只做推理，不碰工具/界面)
-  ┌─────────────────────────────────┐
-  │ TPN 循环 (MCP 每次调用为一次)   │
-  │  MetaAgent → FittingAgent →     │
-  │  CausalAgent → PASS/BACK        │
-  └─────────────────────────────────┘
-```
+### 阶段 1：备份（不可跳过）
+- [ ] 镜像备份仓库：`git clone --mirror . /tmp/taiji-backup-<date>.git`（或 `cp -r .git`），确认备份存在后再进行任何历史重写。
 
-## 现状
+### 阶段 2：密钥迁移与模板化
+- [ ] 创建 `.taiji/config.json`（新文件，将被忽略）：从 `taiji.config.json` 复制完整内容，**保留真实 api_key**，作为本地运行配置。
+- [ ] 将 `taiji.config.json` 改造为**仓库内模板**：
+  - `api_key` → 占位符 `"sk-REPLACE_WITH_REAL_KEY"`（非空，避免硬错误语义混乱；运行时会走 `.taiji/config.json` 优先路径）
+  - `workspace` → 占位符说明（机器特定路径不适合提交）
+  - `mcp_servers[].args` 中 `/home/vingo/mimo-mcp` → 说明为机器特定路径（保留示例，注明按环境调整）
+  - 文件头注释说明"这是模板，真实配置放 .taiji/config.json"
+- [ ] 验证：`load_config` 逻辑确认 `.taiji/config.json` 存在时优先于模板（读 main.rs 确认逻辑不变）。
 
-| 组件 | 状态 |
-|------|------|
-| `src/mcp/server.rs` | ✅ 已实现 4 个工具（`rmcp`） |
-| `src/mcp/client.rs` | ✅ 已实现 MCP client manager |
-| `taiji mcp` CLI | ✅ stdio transport，阻塞等待连接 |
-| L1 占位 Skills | ⚠️ 仍注册在 FittingAgent 中 |
-| `taiji_run` context | ⚠️ 只接受 `description` 字符串 |
+### 阶段 3：.gitignore 补充（根目录）
+- [ ] 追加到根 `.gitignore`：
+  ```
+  # 敏感配置（含 API key）
+  /taiji.config.json
+  /.taiji/config.json
+  # 运行时数据
+  /.taiji/chat/
+  /.taiji/tasks/
+  /.taiji/knowledge/index.yaml
+  ```
+- [ ] **不得**忽略 `.taiji/knowledge/prompts/`（seed 资产有意跟踪）。
 
-## Phase 1：taiji_run 增强 — 接收 pi 上下文
+### 阶段 4：git 停止跟踪 + 收尾提交
+- [ ] `git rm --cached taiji.config.json`（保留工作区文件，仅解除跟踪）。
+- [ ] 提交当前全部工作区改动（40+ 文件，V24 遗留）：`git add -A && git commit -m "chore: 生产安全整改 — 密钥移出版本控制 + .gitignore 补全"`。
+  - ⚠️ 此步是 filter-repo 的前提（工作区必须干净），同时也解决"重构半途未提交"风险。
 
-### 1.1 类型扩展
+### 阶段 5：git 历史清洗（破坏性操作，备份完成后执行）
+- [ ] 安装工具：`pip install git-filter-repo`（如不可用则备选 `git filter-branch --index-filter 'git rm --cached --ignore-unmatch taiji.config.json' -- --all`）。
+- [ ] 执行：`git filter-repo --path taiji.config.json --invert-paths --force`，从全部历史 commit 中移除该文件。
+- [ ] 彻底清除残留对象：`git reflog expire --expire=now --all && git gc --prune=now --aggressive`。
+- [ ] 验证历史已清洗：`git log --all --oneline -- taiji.config.json` 无输出；`git rev-list --all | xargs git grep -l 'sk-xxxx'` 无匹配。
 
-```rust
-// src/types/agent.rs — 新增
-/// pi_agent_rust 通过 MCP 传递的上下文
-pub struct ExternalContext {
-    /// 文件列表（pi 的 read 工具读取的文件内容）
-    pub files: Vec<ExternalFile>,
-    /// pi 执行工具的结果
-    pub tool_results: Vec<ExternalToolResult>,
-    /// 会话摘要（pi 的对话历史简要）
-    pub session_summary: Option<String>,
-}
+### 阶段 6：密钥轮换（人工步骤，需要用户操作）
+- [ ] 用户登录 DeepSeek 平台，**吊销**旧 key `sk-REVOKED-3d9f…(脱敏)`（已泄露进过 git 历史，轮换不可省）。
+- [ ] 生成新 key，写入 `.taiji/config.json` 的 `llm.api_key`（该文件已被 git 忽略，安全）。
+- [ ] 旧 key 即使历史已清洗，也因"可能曾被他人接触"必须轮换——清洗是防扩散，轮换是根治。
 
-pub struct ExternalFile {
-    pub path: String,
-    pub content: String,
-}
-
-pub struct ExternalToolResult {
-    pub tool: String,
-    pub output: String,
-}
-```
-
-### 1.2 MCP tool schema 更新
-
-```rust
-// src/mcp/server.rs — list_tools() 中 taiji_run 的参数 schema
-Tool::new(
-    "taiji_run",
-    "Execute a task via the TPN cognitive engine.",
-    Arc::new(object_schema(serde_json::json!({
-        "description": {
-            "type": "string",
-            "description": "Natural-language task description"
-        },
-        "context": {
-            "type": "object",
-            "description": "Optional external context from the calling agent",
-            "properties": {
-                "files": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "path": {"type": "string"},
-                            "content": {"type": "string"}
-                        }
-                    }
-                },
-                "tool_results": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "tool": {"type": "string"},
-                            "output": {"type": "string"}
-                        }
-                    }
-                },
-                "session_summary": {"type": "string"}
-            }
-        }
-    }))),
-)
-```
-
-### 1.3 上下文注入到 TPN 循环
-
-在 `handle_run()` 中解析 context 参数：
-1. 将 `context.files` 写入 `task_dir/context/files/`（FittingAgent 的 read skill 可读）
-2. 将 `context.tool_results` 序列化为 context JSON 文件
-3. 将 `context.session_summary` 注入 FittingAgent 的 system prompt（作为任务背景）
-
-### 1.4 FittingAgent 模板更新
-
-Execution 模板新增段落：
-```
-## External Context (provided by parent agent)
-
-The following context was collected by the agent that delegated to you:
-- {session_summary}
-- {tool_results_summary}
-
-Files are available at: <task_dir>/context/files/
-Use the `read` tool to inspect them if needed.
-```
-
-### 1.5 文件位置
-
-| 改动 | 文件 |
-|------|------|
-| `ExternalContext` / `ExternalFile` / `ExternalToolResult` | `src/types/agent.rs` |
-| `taiji_run` schema 扩展 | `src/mcp/server.rs` |
-| context 物化到 task_dir | `src/mcp/server.rs::handle_run()` |
-| context 注入 FittingAgent prompt | `src/agents/fitting.rs` |
-
----
-
-## Phase 2：剥离 L1 占位 Skills
-
-### 2.1 移除占位实现
-
-当前 FittingAgent 注册的 5 个 L1 Skills 从代码中移除：
-
-```
-移除: src/agents/tools/skills/mod.rs 中 FittingAgent 的 skills 注册代码
-保留: SafetyHook 拦截逻辑（pi 的工具执行在 pi 侧，不影响 taiji 的安全模型）
-```
-
-### 2.2 FittingAgent 剩余工具
-
-移除 Skills 后，FittingAgent 仅保留：
-- `RecursiveDecomposeTool`（任务拆解）
-- `CausalVerifyTool`（因果验证）
-
-这两个是 TPN 循环的内建能力，不依赖外部。
-
-### 2.3 硬编码模板调整
-
-FittingAgent 模板中移除"你可以使用以下工具: read/write/bash/search/webfetch"段落。
-Execution 模板改为指引 LLM 使用 `context/files/` 中的已有文件进行推理。
-
-### 2.4 文件位置
-
-| 改动 | 文件 |
-|------|------|
-| 移除 Skills 注册 | `src/agents/tools/skills/mod.rs` |
-| 模板去 Skills 引用 | `src/agents/fitting.rs` |
-
----
-
-## Phase 3：BCP 更新 V12→V13
-
-### 3.1 变更要点
-
-1. **系统概览新增**：taiji 作为 MCP 认知引擎角色（不再独立做 agent CLI）
-2. **L1 Skill 定义调整**：L1 Skills 由前端 agent（pi）提供，taiji 不内置
-3. **技术栈更新**：新增 `rmcp`（MCP 协议实现）
-4. **架构总纲图更新**：入口从 `taiji run <description>` 改为 `taiji mcp`（pid/trace 来自 pi）
-5. **§8 流程调整**：新增"pi 上下文注入"步骤在 MetaAgent 之前
-
-### 3.2 不变的部分
-
-- TPN 三元循环结构
-- 归藏 5 层仓库
-- 异层同构递归
-- AgentMode 规则
-- DMN Consumer
-- 动态提示词注入
-
----
-
-## Phase 4：pi_agent_rust 侧集成指南（非 taiji 代码）
-
-> 此章节为 pi 侧实现的规格说明，不在此仓库实现。
-
-### 4.1 MCP 连接配置
-
-pi 需添加 MCP server 配置（`.pi/config.toml` 或类似）：
-
-```toml
-[mcp_servers.taiji]
-command = "taiji"
-args = ["mcp"]
-# taiji mcp 命令在 pi 的工作目录下启动
-# 自动发现 .taiji/knowledge/ 归藏仓库
-```
-
-### 4.2 路由策略
-
-pi 的 LLM system prompt 中增加：
-```
-When the task requires deep analysis, multi-step reasoning, causal verification,
-or architectural assessment, use the `taiji_run` tool.
-
-Provide:
-- description: a clear statement of what to analyze
-- context: relevant files and tool results you've already collected
-```
-
-### 4.3 调用示例
-
-```json
-// pi → taiji MCP request
-{
-  "tool": "taiji_run",
-  "arguments": {
-    "description": "Analyze the concurrency safety of this Rust project's async code",
-    "context": {
-      "files": [
-        {"path": "src/orchestration/tpn_cycle.rs", "content": "..."},
-        {"path": "src/agents/fitting.rs", "content": "..."}
-      ],
-      "tool_results": [
-        {"tool": "bash", "output": "cargo build: 19 warnings"},
-        {"tool": "grep", "output": "Found 12 uses of tokio::spawn"}
-      ],
-      "session_summary": "User asked about Rust async best practices. We found several tokio::spawn calls..."
-    }
-  }
-}
-
-// taiji → pi response
-{
-  "task_id": "abc123",
-  "content": "Converged: The project's concurrency model is sound...",
-  "deliverables": ["/data/tasks/abc123/deliverables/analysis.md"],
-  "depth": 1,
-  "rounds": 3
-}
-```
-
----
+### 阶段 7：验证（verify agent 执行）
+- [ ] `git ls-files | grep -E 'taiji\.config|\.taiji/(chat|tasks)'` 输出为空。
+- [ ] `git status --short` 干净（除被忽略文件）。
+- [ ] `git log --all --oneline -- taiji.config.json` 无输出。
+- [ ] `git grep` 全历史无 `sk-xxxx` 匹配。
+- [ ] `cargo test --lib` 仍 142 passed / 0 failed / 9 ignored（无回归）。
+- [ ] 新 key 配置可被 `load_config` 正常加载（`.taiji/config.json` 优先）。
 
 ## 依赖顺序
+1. 阶段 1 备份 → 2. 阶段 2 密钥迁移（依赖 .gitignore 规划，先做无妨）→ 3. 阶段 3 .gitignore → 4. 阶段 4 git rm --cached + 收尾 commit（**filter-repo 前置**）→ 5. 阶段 5 历史清洗（依赖阶段 1 备份 + 阶段 4 干净工作区）→ 6. 阶段 6 用户人工轮换 key（可与阶段 5 并行）→ 7. 阶段 7 验证（全部完成后）。
 
-```
-1. types/agent.rs          ← ExternalContext 类型定义
-2. mcp/server.rs           ← taiji_run schema 扩展 + context 解析
-3. agents/fitting.rs       ← 模板加 context 注入段落
-4. agents/tools/skills/    ← 移除 L1 Skills 注册
-5. agents/fitting.rs       ← 模板去 Skills 引用
-6. BCP V13 更新           ← 架构蓝图归档
-```
-
-**Phase 1+2 可以并行**（类型定义 → 两路独立改动）。
-
----
+## 明确不做（本次范围外）
+- 不补 CI / Dockerfile / README / LICENSE（后续工程化阶段）
+- 不动 3 条编译警告、不改 AGENTS.md 基线数字（非安全项）
+- 不启动 DMN Consumer、不触碰业务代码
 
 ## 验收标准
-
-- [ ] `cargo build` 零错误
-- [ ] `cargo test` 124 passed, 0 failed
-- [ ] `taiji_run` MCP tool 接受 `context` 可选参数
-- [ ] context.files 物化到 `task_dir/context/files/`
-- [ ] context.session_summary 注入 FittingAgent system prompt
-- [ ] 无 context 参数时行为不变（向后兼容）
-- [ ] L1 占位 Skills 不再注册到 FittingAgent
-- [ ] FittingAgent 保留 recursive_decompose + causal_verify
-- [ ] BCP V13 反映新角色定位
+- [ ] 真实 API key 不再存在于 git 跟踪文件与全部历史 commit 中
+- [ ] `.gitignore` 覆盖 `taiji.config.json` / `.taiji/config.json` / `.taiji/chat/` / `.taiji/tasks/`，且 prompts seed 资产仍被跟踪
+- [ ] 本地运行配置（`.taiji/config.json`）含新轮换后的 key，`taiji` 可正常加载
+- [ ] `taiji.config.json` 成为无敏感信息的仓库模板
+- [ ] 历史清洗后所有 commit 可正常 checkout、无 dangling 大对象残留
+- [ ] `cargo test --lib` 基线无回归（142/0/9）

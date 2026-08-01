@@ -21,46 +21,25 @@ pub enum AgentMode {
     Execution,
 }
 
-/// A single relation edge traversed during NSKG BFS.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Chain {
-    pub source: String,
-    pub target: String,
-    pub target_type: String,
-    pub relation_type: String,
-    pub weight: f64,
-    pub interpretation: String,
-}
-
-/// A reasoning path: 1-3 hop BFS from a source grid.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReasoningPath {
-    pub source_grid: String,
-    pub chains: Vec<Chain>,
-    pub depth: u32,
-    pub task_type_tags: Vec<String>,
-}
-
 /// Context produced by MetaAgent (权重更新·元), injected as reasoning bias
 /// into FittingAgent and CausalAgent.
 ///
-/// MetaAgent queries the 理络 (cognitive warehouse) and LLM-decides:
-/// - Cognitive context (reasoning paths, constraints, skills)
+/// MetaAgent queries the 归藏 (cognitive warehouse) and LLM-decides:
+/// - Cognitive context (constraints, skills)
 /// - The optimal [`AgentMode`] for the task
 /// - Composed system prompts for downstream agents
 ///
 /// # Fallback
-/// When 理络 has no matching prompt assets, `fitting_system_prompt`,
+/// When 归藏 has no matching prompt assets, `fitting_system_prompt`,
 /// `verify_system_prompt`, and `converge_system_prompt` are `None`, and
 /// downstream agents fall back to their built-in hardcoded templates.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaContext {
-    pub reasoning_paths: Vec<ReasoningPath>,
     pub constraints: Vec<crate::types::verification::TruthConstraint>,
     pub matched_skills: Vec<SkillRef>,
     pub yang_prompt: YangPrompt,
 
-    /// AgentMode decided by MetaAgent based on task type + 理络 assets.
+    /// AgentMode decided by MetaAgent based on task type + 归藏 assets.
     /// Defaults to [`AgentMode::Orchestration`] when unset (root task).
     pub mode: AgentMode,
 
@@ -85,12 +64,10 @@ impl MetaContext {
     /// [`AgentMode::Orchestration`] (safe for root task).
     pub fn empty() -> Self {
         Self {
-            reasoning_paths: vec![],
             constraints: vec![],
             matched_skills: vec![],
             yang_prompt: YangPrompt {
                 task_description: String::new(),
-                reasoning_path_summaries: vec![],
                 constraint_summaries: vec![],
                 parent_deliverables: vec![],
             },
@@ -115,7 +92,6 @@ pub struct SkillRef {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YangPrompt {
     pub task_description: String,
-    pub reasoning_path_summaries: Vec<String>,
     pub constraint_summaries: Vec<String>,
     /// Absolute paths of parent deliverables, injected by `recursive_decompose`.
     /// Read-only reference for the child FittingAgent — the child can read but
@@ -125,12 +101,12 @@ pub struct YangPrompt {
 }
 
 // ---------------------------------------------------------------------------
-// ExternalContext — context from the calling frontend agent (e.g. pi_agent_rust)
+// ExternalContext — context from the calling frontend agent
 // ---------------------------------------------------------------------------
 
 /// Context passed from the calling frontend agent through MCP.
 ///
-/// When `pi_agent_rust` (or any MCP client) calls `taiji_run`, it can provide
+/// When a frontend agent (any MCP client) calls `taiji_run`, it can provide
 /// files it has read, tools it has executed, and a summary of the conversation.
 /// This context is injected into the TPN cycle so FittingAgent can reason over
 /// data that the frontend already collected — avoiding redundant tool calls.
@@ -171,7 +147,7 @@ pub struct ExternalToolResult {
 // PromptAsset — 理络 prompt template asset
 // ---------------------------------------------------------------------------
 
-/// A prompt template asset stored in the 理络 cognitive warehouse under
+/// A prompt template asset stored in the 归藏 cognitive warehouse under
 /// `prompts/`.  MetaAgent searches these by task-type tags, ranks by
 /// confidence, and LLM-composes them into the final system prompts carried
 /// in [`MetaContext`].

@@ -33,7 +33,7 @@ use std::time::Instant;
 /// - `completion_start`: tracks `Instant` of the most recent completion call.
 /// - `last_completion_input`: cached input for pairing with the response hook.
 /// - `tool_starts`: maps `internal_call_id → (Instant, input_string)` for
-///    pairing tool-call hooks with their result hooks.
+///   pairing tool-call hooks with their result hooks.
 #[derive(Clone)]
 pub struct TraceHook {
     writer: Arc<TraceWriter>,
@@ -78,7 +78,6 @@ impl TraceHook {
             input: Self::redact_sensitive(&input),
             output: Self::redact_sensitive(&output),
             degraded: false,
-            reasoning_path_ids: None,
             constraint_violations: None,
         };
 
@@ -170,7 +169,6 @@ impl TraceHook {
             input: Self::redact_sensitive(&input),
             output: Self::redact_sensitive(&output),
             degraded: false,
-            reasoning_path_ids: None,
             constraint_violations: None,
         };
 
@@ -292,7 +290,7 @@ where
             match guard.remove(internal_call_id) {
                 Some((start, input_str)) => {
                     let dur = start.elapsed().as_millis() as u64;
-                    let inp = serde_json::from_str(&input_str).unwrap_or_else(|_| {
+                    let inp = serde_json::from_str(&input_str).unwrap_or({
                         Value::String(input_str)
                     });
                     (dur, inp)

@@ -5,9 +5,10 @@
 //!
 //! See AGENTS.md §4 for detailed rules.
 
+use crate::infra::knowledge::LiluoClient;
 use crate::types::agent::MetaContext;
 use crate::types::verification::{
-    ConstraintResult, ConstraintSeverity, ConstraintViolation, TruthConstraint,
+    ConstraintResult, ConstraintSeverity, ConstraintViolation, TruthConstraint, TruthStatus,
 };
 
 /// Engine for loading and enforcing L4 Truth constraints.
@@ -36,34 +37,30 @@ impl ConstraintEngine {
     pub fn load_truths(task_type_tags: &[String]) -> Vec<TruthConstraint> {
         let mut truths = Vec::with_capacity(4);
 
-        truths.push(TruthConstraint {
-            id: "truth:no-fabrication".into(),
-            name: "不编造事实".into(),
-            description: "Don't fabricate facts or make unsubstantiated claims".into(),
-            severity: ConstraintSeverity::Hard,
-        });
+        truths.push(TruthConstraint::hard(
+            "truth:no-fabrication",
+            "不编造事实",
+            "Don't fabricate facts or make unsubstantiated claims",
+        ));
 
-        truths.push(TruthConstraint {
-            id: "truth:evidence-based".into(),
-            name: "有依据推理".into(),
-            description: "All reasoning must be grounded in evidence".into(),
-            severity: ConstraintSeverity::Hard,
-        });
+        truths.push(TruthConstraint::hard(
+            "truth:evidence-based",
+            "有依据推理",
+            "All reasoning must be grounded in evidence",
+        ));
 
-        truths.push(TruthConstraint {
-            id: "truth:auditable".into(),
-            name: "透明可审计".into(),
-            description: "Process should be transparent and auditable".into(),
-            severity: ConstraintSeverity::Soft,
-        });
+        truths.push(TruthConstraint::soft(
+            "truth:auditable",
+            "透明可审计",
+            "Process should be transparent and auditable",
+        ));
 
         if task_type_tags.iter().any(|t| t.eq_ignore_ascii_case("code")) {
-            truths.push(TruthConstraint {
-                id: "truth:code-safety".into(),
-                name: "代码安全".into(),
-                description: "Code changes must not introduce security vulnerabilities".into(),
-                severity: ConstraintSeverity::Hard,
-            });
+            truths.push(TruthConstraint::hard(
+                "truth:code-safety",
+                "代码安全",
+                "Code changes must not introduce security vulnerabilities",
+            ));
         }
 
         tracing::debug!(
@@ -75,11 +72,66 @@ impl ConstraintEngine {
         truths
     }
 
+    /// Load L4 Truths from 归藏 Guizang, filtering by `TruthStatus::Active`.
+    ///
+    /// Returns only truths whose `status == Active`. Retracted or stale truths
+    /// are excluded from runtime enforcement.
+    ///
+    /// **Fallback:** When Guizang has no active truths for the given tags,
+    /// returns an empty Vec — the system runs with no active constraints.
+    /// Callers that always need baseline constraints should chain with
+    /// [`load_truths`] as a fallback layer.
+    pub async fn load_truths_from_guizang(guizang: &LiluoClient) -> Vec<TruthConstraint> {
+        let assets = match guizang.load_active_truths().await {
+            Ok(assets) => assets,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    "Failed to load active truths from Guizang — running without L4 constraints"
+                );
+                return Vec::new();
+            }
+        };
+
+        if assets.is_empty() {
+            tracing::debug!(
+                "No active truths found in Guizang — running without L4 constraints"
+            );
+            return Vec::new();
+        }
+
+        let truths: Vec<TruthConstraint> = assets
+            .iter()
+            .map(|a| TruthConstraint {
+                id: a.header.id.clone(),
+                name: a.header.name.clone(),
+                description: a.header.description.clone(),
+                severity: match a.severity.as_str() {
+                    "Hard" => ConstraintSeverity::Hard,
+                    _ => ConstraintSeverity::Soft,
+                },
+                justification: a.justification.clone(),
+                status: match a.status.as_str() {
+                    "active" => TruthStatus::Active,
+                    "retracted" => TruthStatus::Retracted,
+                    _ => TruthStatus::Stale,
+                },
+            })
+            .collect();
+
+        tracing::debug!(
+            count = truths.len(),
+            "Loaded active L4 Truths from Guizang"
+        );
+
+        truths
+    }
+
     /// Check `MetaContext` output against a set of constraints.
     ///
     /// For each constraint a domain-specific check is applied:
-    ///   - `truth:no-fabrication`  → reasoning_paths must be non-empty
-    ///   - `truth:evidence-based`  → at least one of reasoning_paths / constraints present
+    ///   - `truth:no-fabrication`  → constraints + skills must not both be empty
+    ///   - `truth:evidence-based`  → at least one L4 constraint present
     ///   - `truth:auditable`       → task description should be non-empty (soft)
     ///   - `truth:code-safety`     → dangerous tools require constraint guardrails
     ///
@@ -243,11 +295,11 @@ impl ConstraintEngine {
     ) -> Option<ConstraintViolation> {
         match constraint.id.as_str() {
             "truth:no-fabrication" => {
-                if output.reasoning_paths.is_empty() {
+                if output.constraints.is_empty() && output.matched_skills.is_empty() {
                     Some(ConstraintViolation {
                         truth_id: constraint.id.clone(),
                         truth_name: constraint.name.clone(),
-                        reason: "No reasoning paths in MetaContext — possible fabrication risk"
+                        reason: "No constraints or skills in MetaContext — possible fabrication risk"
                             .into(),
                         severity: constraint.severity.clone(),
                     })
@@ -256,11 +308,11 @@ impl ConstraintEngine {
                 }
             }
             "truth:evidence-based" => {
-                if output.reasoning_paths.is_empty() && output.constraints.is_empty() {
+                if output.constraints.is_empty() {
                     Some(ConstraintViolation {
                         truth_id: constraint.id.clone(),
                         truth_name: constraint.name.clone(),
-                        reason: "No reasoning paths or constraints in MetaContext — missing evidence"
+                        reason: "No L4 constraints in MetaContext — missing evidence"
                             .into(),
                         severity: constraint.severity.clone(),
                     })
@@ -269,9 +321,7 @@ impl ConstraintEngine {
                 }
             }
             "truth:auditable" => {
-                if output.reasoning_paths.is_empty()
-                    && output.yang_prompt.task_description.trim().is_empty()
-                {
+                if output.yang_prompt.task_description.trim().is_empty() {
                     Some(ConstraintViolation {
                         truth_id: constraint.id.clone(),
                         truth_name: constraint.name.clone(),
@@ -312,22 +362,19 @@ impl Default for ConstraintEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::agent::{ReasoningPath, SkillRef, YangPrompt};
+    use crate::types::agent::{SkillRef, YangPrompt};
     use crate::types::verification::ConstraintSeverity;
 
     fn make_meta_context(
-        reasoning_paths: Vec<ReasoningPath>,
         constraints: Vec<TruthConstraint>,
         matched_skills: Vec<SkillRef>,
         task_description: &str,
     ) -> MetaContext {
         MetaContext {
-            reasoning_paths,
             constraints,
             matched_skills,
             yang_prompt: YangPrompt {
                 task_description: task_description.into(),
-                reasoning_path_summaries: Vec::new(),
                 constraint_summaries: Vec::new(),
                 parent_deliverables: vec![],
             },
@@ -339,21 +386,11 @@ mod tests {
     }
 
     fn hard_truth(id: &str, name: &str, desc: &str) -> TruthConstraint {
-        TruthConstraint {
-            id: id.into(),
-            name: name.into(),
-            description: desc.into(),
-            severity: ConstraintSeverity::Hard,
-        }
+        TruthConstraint::hard(id, name, desc)
     }
 
     fn soft_truth(id: &str, name: &str, desc: &str) -> TruthConstraint {
-        TruthConstraint {
-            id: id.into(),
-            name: name.into(),
-            description: desc.into(),
-            severity: ConstraintSeverity::Soft,
-        }
+        TruthConstraint::soft(id, name, desc)
     }
 
     #[test]
@@ -383,7 +420,7 @@ mod tests {
 
     #[test]
     fn test_check_constraints_empty_list_passes() {
-        let ctx = make_meta_context(Vec::new(), Vec::new(), Vec::new(), "");
+        let ctx = make_meta_context(Vec::new(), Vec::new(), "");
         let result = ConstraintEngine::check_constraints(&ctx, &[]);
         assert!(result.passed);
         assert!(result.violations.is_empty());
@@ -392,13 +429,7 @@ mod tests {
     #[test]
     fn test_check_constraints_no_fabrication_pass() {
         let ctx = make_meta_context(
-            vec![ReasoningPath {
-                source_grid: "g1".into(),
-                chains: Vec::new(),
-                depth: 1,
-                task_type_tags: vec!["test".into()],
-            }],
-            Vec::new(),
+            vec![hard_truth("truth:evidence-based", "有依据推理", "evidence")],
             Vec::new(),
             "test task",
         );
@@ -413,7 +444,7 @@ mod tests {
 
     #[test]
     fn test_check_constraints_no_fabrication_fail_hard() {
-        let ctx = make_meta_context(Vec::new(), Vec::new(), Vec::new(), "test task");
+        let ctx = make_meta_context(Vec::new(), Vec::new(), "test task");
         let constraints = vec![hard_truth(
             "truth:no-fabrication",
             "不编造事实",
@@ -428,7 +459,7 @@ mod tests {
 
     #[test]
     fn test_check_constraints_soft_does_not_short_circuit() {
-        let ctx = make_meta_context(Vec::new(), Vec::new(), Vec::new(), "");
+        let ctx = make_meta_context(Vec::new(), Vec::new(), "");
         let constraints = vec![soft_truth("truth:auditable", "透明可审计", "auditability")];
         let result = ConstraintEngine::check_constraints(&ctx, &constraints);
         // Soft violations are still reported, but passed = false when any exists
@@ -440,7 +471,7 @@ mod tests {
     #[test]
     fn test_check_constraints_hard_short_circuits_before_soft() {
         // Hard constraint comes first, so soft is never checked
-        let ctx = make_meta_context(Vec::new(), Vec::new(), Vec::new(), "");
+        let ctx = make_meta_context(Vec::new(), Vec::new(), "");
         let constraints = vec![
             hard_truth("truth:no-fabrication", "不编造事实", ""),
             soft_truth("truth:auditable", "透明可审计", ""),
@@ -454,13 +485,7 @@ mod tests {
     #[test]
     fn test_check_constraints_evidence_based_pass() {
         let ctx = make_meta_context(
-            vec![ReasoningPath {
-                source_grid: "g1".into(),
-                chains: Vec::new(),
-                depth: 1,
-                task_type_tags: vec!["test".into()],
-            }],
-            Vec::new(),
+            vec![hard_truth("truth:evidence-based", "有依据推理", "evidence")],
             Vec::new(),
             "test",
         );
@@ -475,7 +500,7 @@ mod tests {
 
     #[test]
     fn test_check_constraints_evidence_based_fail() {
-        let ctx = make_meta_context(Vec::new(), Vec::new(), Vec::new(), "test");
+        let ctx = make_meta_context(Vec::new(), Vec::new(), "test");
         let constraints = vec![hard_truth(
             "truth:evidence-based",
             "有依据推理",

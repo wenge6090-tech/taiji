@@ -28,6 +28,10 @@ pub struct LlmConfig {
     pub api_key: String,
     pub base_url: Option<String>,
     pub agent_overrides: std::collections::HashMap<String, AgentLlmConfig>,
+    /// Additional named providers (OpenAI-compatible or DeepSeek) available
+    /// to the ChatAgent. Empty list means only the default provider is used.
+    #[serde(default)]
+    pub providers: Vec<ProviderEntry>,
 }
 
 impl Default for LlmConfig {
@@ -38,8 +42,23 @@ impl Default for LlmConfig {
             api_key: String::new(),
             base_url: None,
             agent_overrides: std::collections::HashMap::new(),
+            providers: Vec::new(),
         }
     }
+}
+
+/// A named extra LLM provider entry (OpenAI-compatible or DeepSeek).
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ProviderEntry {
+    /// Provider name used to reference this entry (e.g. "openai", "local").
+    pub name: String,
+    /// Base URL of the OpenAI-compatible / DeepSeek endpoint.
+    pub base_url: String,
+    /// API key for this provider (may be empty for local endpoints).
+    pub api_key: String,
+    /// Model identifier used by default for this provider.
+    pub model: String,
 }
 
 impl LlmConfig {
@@ -53,6 +72,7 @@ impl LlmConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
+#[derive(Default)]
 pub struct AgentLlmConfig {
     pub provider: Option<String>,
     pub model: Option<String>,
@@ -61,17 +81,6 @@ pub struct AgentLlmConfig {
     pub temperature: Option<f64>,
 }
 
-impl Default for AgentLlmConfig {
-    fn default() -> Self {
-        Self {
-            provider: None,
-            model: None,
-            max_turns: None,
-            max_tokens: None,
-            temperature: None,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeConfig {

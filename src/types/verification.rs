@@ -35,6 +35,23 @@ pub struct ConvergenceDecision {
     pub task_summary: String,
 }
 
+/// L4 Truth 的状态（TMS 真值维护）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum TruthStatus {
+    /// 活跃中，ConstraintEngine 正常加载。
+    Active,
+    /// 被 RETRACT，不再参与约束检查。
+    Retracted,
+    /// 上游依赖断裂，等待重新验证或移除。
+    Stale,
+}
+
+impl Default for TruthStatus {
+    fn default() -> Self {
+        Self::Active
+    }
+}
+
 /// An L4 Truth constraint (runtime enforcement).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TruthConstraint {
@@ -42,6 +59,40 @@ pub struct TruthConstraint {
     pub name: String,
     pub description: String,
     pub severity: ConstraintSeverity,
+    // ── TMS 字段（V18 新增） ──
+    /// 为什么这个约束成立？（TMS justification 审计）
+    /// None = 未初始化（旧资产兼容）
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justification: Option<String>,
+    /// 真值状态。默认 Active。
+    #[serde(default)]
+    pub status: TruthStatus,
+}
+
+impl TruthConstraint {
+    /// Shorthand for constructing a Hard truth (backward-compatible helper).
+    pub fn hard(id: &str, name: &str, description: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            severity: ConstraintSeverity::Hard,
+            justification: None,
+            status: TruthStatus::Active,
+        }
+    }
+
+    /// Shorthand for constructing a Soft truth.
+    pub fn soft(id: &str, name: &str, description: &str) -> Self {
+        Self {
+            id: id.to_string(),
+            name: name.to_string(),
+            description: description.to_string(),
+            severity: ConstraintSeverity::Soft,
+            justification: None,
+            status: TruthStatus::Active,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

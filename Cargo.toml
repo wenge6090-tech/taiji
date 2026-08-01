@@ -43,6 +43,21 @@ rmcp = { version = "0.8", features = ["server", "client", "transport-child-proce
 tokio-util = "0.7"
 governor = "0.6"
 
+# L1 Skills
+memchr = "2"
+reqwest = { version = "0.11", features = ["rustls-tls"], default-features = false }
+tempfile = "3"
+url = "2"
+
+# WebSocket event server (taiji-web frontend bridge)
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+# HTTP static hosting + WebSocket upgrade (pure-Web `taiji serve` mode)
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs"] }
+tower = "0.5"
+
 [patch.crates-io]
 rig = { path = "vendor/rig" }
 rig-core = { path = "vendor/rig-core" }

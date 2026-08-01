@@ -1,0 +1,109 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* 太极背景层:固定全屏、位于内容之下、不拦截鼠标事件。
+   具体太极图案由 TaijiBg 组件的 SVG 负责,此处仅提供定位与背景渐变。 */
+.taiji-bg {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  overflow: hidden;
+  background:
+    radial-gradient(ellipse at 50% 42%, rgba(30, 41, 59, 0.6) 0%, rgba(2, 6, 23, 0) 68%),
+    radial-gradient(ellipse at 50% 50%, rgba(2, 6, 23, 0) 0%, rgba(2, 6, 23, 0.55) 100%);
+}
+
+/* 太极 SVG 匀速旋转:60s 一圈 */
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.taiji-spin {
+  transform-origin: 50% 50%;
+  animation: spin-slow 60s linear infinite;
+}
+
+/* 金色呼吸光晕:Running 节点 */
+@keyframes glow-gold {
+  0%,
+  100% {
+    box-shadow: 0 0 6px 2px rgba(251, 191, 36, 0.35);
+  }
+  50% {
+    box-shadow: 0 0 20px 8px rgba(251, 191, 36, 0.7);
+  }
+}
+
+.pulse-glow {
+  animation: glow-gold 1.6s ease-in-out infinite;
+}
+
+/* 红色光晕:Diverged / Failed 节点 */
+@keyframes glow-red {
+  0%,
+  100% {
+    box-shadow: 0 0 6px 2px rgba(248, 113, 113, 0.3);
+  }
+  50% {
+    box-shadow: 0 0 18px 7px rgba(248, 113, 113, 0.6);
+  }
+}
+
+.pulse-glow-red {
+  animation: glow-red 1.6s ease-in-out infinite;
+}
+
+/* 橙色光晕 + 闪烁:AwaitingHumanReview 节点 */
+@keyframes glow-orange {
+  0%,
+  100% {
+    box-shadow: 0 0 6px 2px rgba(251, 146, 60, 0.35);
+    opacity: 1;
+  }
+  50% {
+    box-shadow: 0 0 18px 8px rgba(251, 146, 60, 0.65);
+    opacity: 0.7;
+  }
+}
+
+.pulse-glow-orange {
+  animation: glow-orange 1.6s ease-in-out infinite;
+}
+
+/* 金色文字发光 */
+.text-glow {
+  text-shadow:
+    0 0 8px rgba(251, 191, 36, 0.55),
+    0 0 20px rgba(251, 191, 36, 0.25);
+}
+
+/* 深色主题滚动条 */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #334155 #020617;
+}
+
+*::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+*::-webkit-scrollbar-track {
+  background: #020617;
+}
+
+*::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+
+*::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}

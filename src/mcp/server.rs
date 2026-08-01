@@ -4,12 +4,14 @@
 //! Uses `rmcp::ServerHandler` (no macros) for broad API compatibility.
 //!
 //! ## Exposed tools
-//! | Tool           | Description                                      |
-//! |----------------|--------------------------------------------------|
-//! | `taiji_run`    | Execute a task description via `RecursiveRunner`. |
-//! | `taiji_trace`  | Read trace records for a task.                    |
-//! | `taiji_list`   | List tasks present in the workspace.              |
-//! | `taiji_status` | Engine version, workspace path & task count.      |
+//! | Tool             | Description                                                          |
+//! |------------------|----------------------------------------------------------------------|
+//! | `taiji_plan`     | Pre-execution plan: MetaAgent + LLM plan summary, no TPN loop.       |
+//! | `taiji_run`      | Execute a task description via `RecursiveRunner`.                    |
+//! | `taiji_explain`  | Post-execution report: reasoning tree summary from trace data.       |
+//! | `taiji_trace`    | Read trace records for a task.                                       |
+//! | `taiji_list`     | List tasks present in the workspace.                                 |
+//! | `taiji_status`   | Engine version, workspace path & task count.                         |
 
 use std::sync::Arc;
 
@@ -27,8 +29,10 @@ use tracing::{error, info, warn};
 
 use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
+use crate::infra::trace::TraceWriter;
 use crate::orchestration::runner::RecursiveRunner;
-use crate::types::agent::{ExternalContext, ExternalFile, ExternalToolResult};
+use crate::types::agent::ExternalContext;
+use crate::types::execution::{DecisionSummary, ExplainReport, PhaseSummary};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -113,7 +117,7 @@ impl ServerHandler for TaijiMcpServer {
         }
     }
 
-    /// Advertise the four taiji tools.
+    /// Advertise the six taiji tools.
     async fn list_tools(
         &self,
         request: Option<PaginatedRequestParam>,
@@ -121,12 +125,26 @@ impl ServerHandler for TaijiMcpServer {
     ) -> Result<ListToolsResult, McpError> {
         let tools = vec![
             Tool::new(
+                "taiji_plan",
+                "Pre-execution plan: run MetaAgent (权重更新) and LLM-compose a structured execution plan (PlanSummary). Does NOT enter the TPN loop.",
+                Arc::new(object_schema(serde_json::json!({
+                    "description": {
+                        "type": "string",
+                        "description": "Natural-language task description to plan for"
+                    }
+                }))),
+            ),
+            Tool::new(
                 "taiji_run",
                 "Execute a task via the TPN cognitive engine (MetaAgent → FittingAgent → CausalAgent).",
                 Arc::new(object_schema(serde_json::json!({
                     "description": {
                         "type": "string",
                         "description": "Natural-language task description"
+                    },
+                    "max_depth": {
+                        "type": "integer",
+                        "description": "Optional override for max recursion depth (default: from config, currently 2)"
                     },
                     "context": {
                         "type": "object",
@@ -159,6 +177,16 @@ impl ServerHandler for TaijiMcpServer {
                                 "description": "Summary of the conversation or session history"
                             }
                         }
+                    }
+                }))),
+            ),
+            Tool::new(
+                "taiji_explain",
+                "Post-execution report: read trace.jsonl + meta.json + deliverables/ to produce a human-readable reasoning-tree summary (ExplainReport).",
+                Arc::new(object_schema(serde_json::json!({
+                    "task_id": {
+                        "type": "string",
+                        "description": "Task ID to explain"
                     }
                 }))),
             ),
@@ -207,7 +235,9 @@ impl ServerHandler for TaijiMcpServer {
         let args = request.arguments.unwrap_or_default();
 
         match name {
+            "taiji_plan" => self.handle_plan(args).await,
             "taiji_run" => self.handle_run(args).await,
+            "taiji_explain" => self.handle_explain(args).await,
             "taiji_trace" => self.handle_trace(args).await,
             "taiji_list" => self.handle_list().await,
             "taiji_status" => self.handle_status().await,
@@ -224,6 +254,49 @@ impl ServerHandler for TaijiMcpServer {
 // ---------------------------------------------------------------------------
 
 impl TaijiMcpServer {
+    /// `taiji_plan` — pre-execution plan via MetaAgent + LLM plan composition.
+    async fn handle_plan(
+        &self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let description = match args.get("description").and_then(|v| v.as_str()) {
+            Some(d) => d.to_owned(),
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Missing required argument: description",
+                )]));
+            }
+        };
+
+        info!(description = %description, "MCP taiji_plan called");
+
+        let task_id = uuid::Uuid::new_v4().to_string();
+        let plan_agent = match self.factory.create_plan_agent(&task_id) {
+            Ok(agent) => agent,
+            Err(e) => {
+                error!(error = %e, "taiji_plan: failed to create PlanBuilder");
+                return Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Failed to create plan agent: {e}"
+                ))]));
+            }
+        };
+
+        match plan_agent.plan(&description, &["general"]).await {
+            Ok(summary) => {
+                let payload = serde_json::to_value(&summary).unwrap_or_else(|e| {
+                    serde_json::json!({"error": format!("Serialization failed: {e}")})
+                });
+                Ok(CallToolResult::structured(payload))
+            }
+            Err(e) => {
+                error!(error = %e, "taiji_plan failed");
+                Ok(CallToolResult::error(vec![Content::text(format!(
+                    "Planning failed: {e}"
+                ))]))
+            }
+        }
+    }
+
     /// `taiji_run` —  execute a task via RecursiveRunner and return the result.
     async fn handle_run(
         &self,
@@ -239,6 +312,19 @@ impl TaijiMcpServer {
         };
 
         info!(description = %description, "MCP taiji_run called");
+
+        // Optional max_depth override from caller
+        let max_depth_override: Option<u32> = args
+            .get("max_depth")
+            .and_then(|v| v.as_u64())
+            .map(|v| v as u32);
+
+        // Clone config and apply override if provided
+        let mut config = self.factory.config.clone();
+        if let Some(depth) = max_depth_override {
+            info!(max_depth = depth, "Overriding max_depth from MCP call");
+            config.runtime.max_depth = depth;
+        }
 
         // Parse optional external context from frontend agent
         let external_ctx = args
@@ -256,7 +342,7 @@ impl TaijiMcpServer {
 
         let runner = RecursiveRunner::new(
             self.factory.clone(),
-            self.factory.config.clone(),
+            config,
         );
 
         match runner.execute_with_context(&description, external_ctx).await {
@@ -348,8 +434,8 @@ impl TaijiMcpServer {
         let tasks_dir = self.factory.data_root.join("tasks");
         let mut tasks: Vec<serde_json::Value> = Vec::new();
 
-        if tasks_dir.exists() {
-            if let Ok(mut entries) = tokio::fs::read_dir(&tasks_dir).await {
+        if tasks_dir.exists()
+            && let Ok(mut entries) = tokio::fs::read_dir(&tasks_dir).await {
                 loop {
                     match entries.next_entry().await {
                         Ok(Some(entry)) => {
@@ -373,7 +459,6 @@ impl TaijiMcpServer {
                     }
                 }
             }
-        }
 
         Ok(CallToolResult::structured(serde_json::json!({
             "count": tasks.len(),
@@ -408,5 +493,288 @@ impl TaijiMcpServer {
         });
 
         Ok(CallToolResult::structured(payload))
+    }
+
+    /// `taiji_explain` — post-execution reasoning tree summary.
+    async fn handle_explain(
+        &self,
+        args: serde_json::Map<String, serde_json::Value>,
+    ) -> Result<CallToolResult, McpError> {
+        let task_id = match args.get("task_id").and_then(|v| v.as_str()) {
+            Some(id) => id.to_owned(),
+            None => {
+                return Ok(CallToolResult::error(vec![Content::text(
+                    "Missing required argument: task_id",
+                )]));
+            }
+        };
+
+        info!(task_id = %task_id, "MCP taiji_explain called");
+
+        let task_dir = self.factory.task_dir(&task_id);
+        if !task_dir.exists() {
+            return Ok(CallToolResult::error(vec![Content::text(format!(
+                "Task not found: {task_id}"
+            ))]));
+        }
+
+        // Read meta.json for description + status
+        let (description, status) = read_task_meta(&task_dir).await;
+
+        // Read trace records recursively
+        let trace_records = TraceWriter::read_tree(&task_dir).ok();
+
+        // Collect deliverables recursively
+        let deliverables = collect_deliverables(&task_dir).await;
+
+        // Build ExplainReport
+        let report = build_explain_report(&task_id, &description, &status, trace_records, deliverables);
+
+        let payload = serde_json::to_value(&report).unwrap_or_else(|e| {
+            serde_json::json!({"error": format!("Serialization failed: {e}")})
+        });
+
+        Ok(CallToolResult::structured(payload))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Explain helpers
+// ---------------------------------------------------------------------------
+
+/// Read task meta.json for description and status.
+async fn read_task_meta(task_dir: &std::path::Path) -> (String, String) {
+    let meta_path = task_dir.join("meta.json");
+    match tokio::fs::read_to_string(&meta_path).await {
+        Ok(content) => {
+            let v: serde_json::Value = serde_json::from_str(&content).unwrap_or_default();
+            let description = v
+                .get("description")
+                .and_then(|d| d.as_str())
+                .unwrap_or_default()
+                .to_string();
+            let status = v
+                .get("status")
+                .and_then(|s| s.as_str())
+                .unwrap_or("unknown")
+                .to_string();
+            (description, status)
+        }
+        Err(_) => (String::new(), "unknown".to_string()),
+    }
+}
+
+/// Recursively collect deliverable file paths from a task directory.
+/// Uses an iterative worklist (Vec stack) to avoid async recursion.
+async fn collect_deliverables(task_dir: &std::path::Path) -> Vec<String> {
+    let mut paths = Vec::new();
+    let mut stack = vec![task_dir.to_path_buf()];
+
+    while let Some(dir) = stack.pop() {
+        // Collect from deliverables/ at this level
+        let deliverables_dir = dir.join("deliverables");
+        if deliverables_dir.exists() {
+            collect_files(&deliverables_dir, &mut paths).await;
+        }
+
+        // Push children/ subdirectories onto the stack.
+        // Note: not checking children_dir.exists() first — tokio::fs::read_dir
+        // handles non-existent directories gracefully (returns Err), and
+        // removing the redundant exists() check avoids a clippy collapsible_if
+        // lint and a TOCTOU race condition.
+        let children_dir = dir.join("children");
+        if let Ok(mut entries) = tokio::fs::read_dir(&children_dir).await {
+            while let Ok(Some(entry)) = entries.next_entry().await {
+                if entry.file_type().await.map(|ft| ft.is_dir()).unwrap_or(false) {
+                    stack.push(entry.path());
+                }
+            }
+        }
+    }
+
+    paths
+}
+
+/// List all files in a directory (non-recursive), returning absolute paths.
+async fn collect_files(dir: &std::path::Path, out: &mut Vec<String>) {
+    if let Ok(mut entries) = tokio::fs::read_dir(dir).await {
+        while let Ok(Some(entry)) = entries.next_entry().await {
+            if entry.file_type().await.map(|ft| ft.is_file()).unwrap_or(false) {
+                out.push(entry.path().to_string_lossy().to_string());
+            }
+        }
+    }
+}
+
+/// Build an [`ExplainReport`] from trace records and task metadata.
+fn build_explain_report(
+    task_id: &str,
+    description: &str,
+    status: &str,
+    trace_records: Option<Vec<crate::infra::trace::TraceRecord>>,
+    deliverables: Vec<String>,
+) -> ExplainReport {
+    let mut max_depth = 0u32;
+    let mut max_cycle = 0u32;
+    let mut timeline: Vec<PhaseSummary> = Vec::new();
+    let mut decisions: Vec<DecisionSummary> = Vec::new();
+    let mut total_duration_ms = 0u64;
+
+    if let Some(records) = trace_records {
+        if records.is_empty() {
+            // No trace records → assume running or just created
+            return ExplainReport {
+                task_id: task_id.to_string(),
+                description: description.to_string(),
+                status: "running".to_string(),
+                total_cycles: 0,
+                total_rounds: 0,
+                total_depth: 0,
+                total_duration_ms: 0,
+                timeline: vec![],
+                decisions: vec![],
+                final_deliverables: deliverables,
+                summary: "任务没有执行记录（可能刚创建或仍在运行）。".into(),
+            };
+        }
+
+        // Sort by timestamp
+        let mut sorted = records.clone();
+        sorted.sort_by(|a, b| a.ts.cmp(&b.ts));
+
+        // Calculate total duration from first to last record
+        if let (Ok(first), Ok(last)) = (
+            chrono::DateTime::parse_from_rfc3339(&sorted[0].ts),
+            chrono::DateTime::parse_from_rfc3339(&sorted[sorted.len() - 1].ts),
+        ) {
+            total_duration_ms = (last.timestamp_millis() - first.timestamp_millis()) as u64;
+        } else {
+            total_duration_ms = sorted.iter().map(|r| r.duration_ms).sum();
+        }
+
+        // Group by cycle for timeline phases
+        // Track tool calls per cycle to identify probability fitting phases
+        let mut prev_cycle = 0u32;
+        let mut current_tools: Vec<String> = Vec::new();
+        let mut current_duration = 0u64;
+
+        for record in &sorted {
+            if record.cycle != prev_cycle {
+                // Cycle boundary → finalize previous phase
+                if current_duration > 0 {
+                    timeline.push(PhaseSummary {
+                        phase: "概率拟合".into(),
+                        cycle: prev_cycle,
+                        round: 0,
+                        depth: record.depth,
+                        duration_ms: current_duration,
+                        tools_used: std::mem::take(&mut current_tools),
+                        key_output: String::new(),
+                    });
+                }
+                current_duration = 0;
+
+                // Detect BACK_TO_META decision (cycle boundary)
+                decisions.push(DecisionSummary {
+                    cycle: prev_cycle,
+                    round: 0,
+                    verdict: "BACK_TO_META".into(),
+                    reason: "TPN 循环检测到认知偏差，重新运行权重更新（元）。".into(),
+                    constraint_violations: vec![],
+                });
+
+                prev_cycle = record.cycle;
+            }
+
+            // Track tool calls
+            if record.phase.starts_with("tool_call::") {
+                let tool_name = record.phase.strip_prefix("tool_call::").unwrap_or("");
+                if !current_tools.contains(&tool_name.to_string()) {
+                    current_tools.push(tool_name.to_string());
+                }
+            }
+
+            current_duration += record.duration_ms;
+
+            // Track max values
+            if record.cycle > max_cycle {
+                max_cycle = record.cycle;
+            }
+            if record.depth > max_depth {
+                max_depth = record.depth;
+            }
+        }
+
+        // Final phase
+        if current_duration > 0 {
+            timeline.push(PhaseSummary {
+                phase: "概率拟合".into(),
+                cycle: prev_cycle,
+                round: 0,
+                depth: max_depth,
+                duration_ms: current_duration,
+                tools_used: current_tools,
+                key_output: String::new(),
+            });
+        }
+
+        // Final decision based on status
+        match status {
+            "Completed" => {
+                decisions.push(DecisionSummary {
+                    cycle: prev_cycle,
+                    round: 0,
+                    verdict: "PASS".into(),
+                    reason: "因果验证通过，任务收敛。".into(),
+                    constraint_violations: vec![],
+                });
+            }
+            "Failed" | "Cancelled" => {
+                decisions.push(DecisionSummary {
+                    cycle: prev_cycle,
+                    round: 0,
+                    verdict: "FAIL".into(),
+                    reason: format!("任务最终状态：{status}"),
+                    constraint_violations: vec![],
+                });
+            }
+            _ => {}
+        }
+    }
+
+    // Build human-readable summary
+    let total_seconds = if total_duration_ms > 0 { total_duration_ms / 1000 } else { 0 };
+    let total_cycles = max_cycle + 1;
+    let total_depth = max_depth + 1;
+
+    let summary = if status == "Completed" {
+        format!(
+            "任务已完成。共经历 {} 个 TPN 周期、{} 层递归深度，耗时 {} 秒。生成 {} 个交付产物。",
+            total_cycles, total_depth, total_seconds, deliverables.len(),
+        )
+    } else if status == "Failed" || status == "Cancelled" {
+        format!(
+            "任务失败（{status}）。共经历 {} 个 TPN 周期、{} 层递归深度，耗时 {} 秒。",
+            total_cycles, total_depth, total_seconds,
+        )
+    } else {
+        format!(
+            "任务当前状态：{status}。已进行 {} 个 TPN 周期、{} 层递归深度，耗时 {} 秒。",
+            total_cycles, total_depth, total_seconds,
+        )
+    };
+
+    ExplainReport {
+        task_id: task_id.to_string(),
+        description: description.to_string(),
+        status: status.to_string(),
+        total_cycles,
+        total_rounds: 0,
+        total_depth,
+        total_duration_ms,
+        timeline,
+        decisions,
+        final_deliverables: deliverables,
+        summary,
     }
 }

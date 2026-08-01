@@ -9,11 +9,11 @@
 //! The FittingAgent's transient Rig agent is wired with:
 //! - **`recursive_decompose`**: spawns child FittingAgents for subtasks.
 //! - **`causal_verify`**: invokes CausalAgent.verify() on intermediate outputs.
+//! - **5 L1 Skills**: `read`, `write`, `bash`, `search`, `webfetch`.
 //! - **`SafetyHook`** and **`TraceHook`**: registered as Rig `PromptHook`s.
 //!
-//! L1 Skills (read/write/bash/etc.) are provided by the calling frontend agent
-//! (e.g. pi_agent_rust via MCP) and injected as external context.  The TPN
-//! engine does not carry built-in tool implementations.
+//! L1 Skills are real built-in implementations.  A frontend agent may also
+//! inject additional context via MCP ExternalContext.
 //!
 //! # Constraints (AGENTS.md §2)
 //! - `max_turns = config.runtime.max_rounds` (default 30).
@@ -28,15 +28,18 @@
 use std::sync::Arc;
 
 use rig::client::CompletionClient;
-use rig::completion::Prompt;
+use rig::completion::{Chat, Message};
 use rig::providers::deepseek;
+use rig::tool::ToolDyn;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::factory::AgentFactory;
 use crate::agents::tools::causal_verify::CausalVerifyTool;
 use crate::agents::tools::recursive_decompose::RecursiveDecomposeTool;
+use crate::agents::tools::skills::SkillRegistry;
 use crate::hooks::trace::TraceHook;
 use crate::infra::error::TaijiError;
+use crate::infra::trace::save_json_atomic;
 use crate::types::agent::{AgentMode, MetaContext};
 use crate::types::execution::EngineContext;
 use crate::types::task::TPNResult;
@@ -158,7 +161,11 @@ impl FittingAgentBuilder {
     /// - `Ok(TPNResult)` on successful execution.
     /// - `Err(TaijiError::LLMCallFailed)` if the underlying LLM call fails
     ///   (after retries).
-    pub async fn run(&self, task_description: &str) -> Result<TPNResult, TaijiError> {
+    pub async fn run(
+        &self,
+        task_description: &str,
+        chat_history: Option<Vec<Message>>,
+    ) -> Result<TPNResult, TaijiError> {
         // ── Guard against runaway recursion ──
         let max_depth = self.factory.config.runtime.max_depth;
         if self.depth > max_depth {
@@ -209,6 +216,13 @@ impl FittingAgentBuilder {
         let agent_builder = agent_builder.hook(safety_hook).hook(trace_hook);
 
         // ── Register built-in composite tools ──
+        // recursive_decompose is ONLY registered for Orchestration mode.
+        // Execution mode agents should not decompose further — the depth guard
+        // on the tool (self.depth >= max_depth) may NOT block all cases (e.g.
+        // when max_depth is high).  Registering it conditionally prevents the
+        // LLM from ever seeing it, which also avoids a WorkerPool semaphore
+        // deadlock (Execution mode agent holding a permit could block forever
+        // trying to acquire another permit for its own recursive_decompose).
         let recursive_decompose = RecursiveDecomposeTool::new(
             self.factory.clone(),
             self.engine_ctx.clone(),
@@ -224,26 +238,73 @@ impl FittingAgentBuilder {
             self.meta_ctx.clone(),
         );
 
-        let agent = agent_builder
-            .tool(recursive_decompose)
-            .tool(causal_verify)
-            .build();
+        // ── Register L1 Skills ──
+        let skill_registry = SkillRegistry::new();
+        let skill_tools: Vec<Box<dyn ToolDyn>> = skill_registry
+            .tools()
+            .iter()
+            .map(|t| Box::new(t.clone()) as Box<dyn ToolDyn>)
+            .collect();
 
-        // ── Execute the prompt ──
-        let response = agent
-            .prompt(task_description)
-            .await
-            .map_err(|e| TaijiError::LLMCallFailed {
-                context: format!("FittingAgent LLM call failed: {e}"),
-            })?;
+        let agent = if self.mode == AgentMode::Orchestration {
+            agent_builder
+                .tool(recursive_decompose)
+                .tool(causal_verify)
+                .tools(skill_tools)
+                .build()
+        } else {
+            agent_builder
+                .tool(causal_verify)
+                .tools(skill_tools)
+                .build()
+        };
+
+        // ── Execute the prompt — always use Chat::chat for history persistence ──
+        let history_path = self.engine_ctx.task_dir.join("chat_history.json");
+        let (response, _history) = {
+            let mut history: Vec<Message> = match chat_history {
+                Some(h) => h,
+                None => match crate::infra::trace::load_json_optional::<Vec<Message>>(&history_path) {
+                    Ok(Some(h)) => {
+                        tracing::debug!("Loaded existing chat_history from checkpoint");
+                        h
+                    }
+                    _ => Vec::new(),
+                },
+            };
+
+            // Chat::chat appends all new messages (user prompt + assistant + tool calls)
+            // to `history`, so BACK_TO_TPN naturally carries forward context.
+            let result = agent
+                .chat(Message::user(task_description), &mut history)
+                .await
+                .map_err(|e| TaijiError::LLMCallFailed {
+                    context: format!("FittingAgent LLM call failed: {e}"),
+                });
+
+            // Save chat_history to disk even on error (partial history is better than none).
+            if let Err(e) = save_json_atomic(&history, &history_path) {
+                tracing::warn!(
+                    path = %history_path.display(),
+                    error = %e,
+                    "Failed to save chat_history"
+                );
+            }
+
+            (result, history)
+        };
+        let response = response?;
 
         // ── Extract tool call info from response (basic parsing) ──
         // The LLM response may mention which tools were used; we capture
         // available tool names from the registered set as a best-effort summary.
-        let registered_tool_names: Vec<String> = vec![
-            "recursive_decompose".to_string(),
-            "causal_verify".to_string(),
-        ];
+        // "causal_verify" and L1 skills are always registered; "recursive_decompose"
+        // is only registered for Orchestration mode.
+        let mut registered_tool_names: Vec<String> = vec!["causal_verify".to_string()];
+        registered_tool_names.extend(skill_registry.get_tool_names());
+        if self.mode == AgentMode::Orchestration {
+            registered_tool_names.push("recursive_decompose".to_string());
+        }
 
         // Check which tools appear in the response text
         let tools_used: Vec<String> = registered_tool_names
@@ -338,22 +399,13 @@ fn build_orchestration_prompt(
         prompt.push_str("\n\n");
     }
 
-    // Reasoning path summaries
-    if !meta_ctx.yang_prompt.reasoning_path_summaries.is_empty() {
-        prompt.push_str("## Reasoning Paths (from NSKG)\n");
-        for (i, summary) in meta_ctx.yang_prompt.reasoning_path_summaries.iter().enumerate() {
-            prompt.push_str(&format!("{}. {}\n", i + 1, summary));
-        }
-        prompt.push_str("\n");
-    }
-
     // Constraint summaries
     if !meta_ctx.yang_prompt.constraint_summaries.is_empty() {
         prompt.push_str("## Constraints\n");
         for summary in &meta_ctx.yang_prompt.constraint_summaries {
             prompt.push_str(&format!("- {}\n", summary));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
     }
 
     // Output directory (absolute path)
@@ -376,7 +428,7 @@ fn build_orchestration_prompt(
         for (i, path) in meta_ctx.yang_prompt.parent_deliverables.iter().enumerate() {
             prompt.push_str(&format!("{}. {}\n", i + 1, path));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
     }
 
     // External context (from frontend agent via MCP)
@@ -384,7 +436,7 @@ fn build_orchestration_prompt(
         let files_dir = ctx_dir.join("files");
         if files_dir.exists() {
             prompt.push_str("## External Context (from Frontend Agent)\n");
-            prompt.push_str("以下文件由前端 agent（如 pi_agent_rust）已读取并传递给此任务：\n");
+            prompt.push_str("以下文件由前端 agent 已读取并传递给此任务：\n");
             if let Ok(entries) = std::fs::read_dir(&files_dir) {
                 for entry in entries.flatten() {
                     let index = entry.file_name().to_string_lossy().to_string();
@@ -404,7 +456,7 @@ fn build_orchestration_prompt(
                 skill.tool_name, skill.name, skill.id
             ));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
     }
 
     // Orchestration-specific instructions with plant-growth guidance
@@ -464,22 +516,13 @@ fn build_execution_prompt(
         prompt.push_str("\n\n");
     }
 
-    // Reasoning path summaries
-    if !meta_ctx.yang_prompt.reasoning_path_summaries.is_empty() {
-        prompt.push_str("## Reasoning Paths (from NSKG)\n");
-        for (i, summary) in meta_ctx.yang_prompt.reasoning_path_summaries.iter().enumerate() {
-            prompt.push_str(&format!("{}. {}\n", i + 1, summary));
-        }
-        prompt.push_str("\n");
-    }
-
     // Constraint summaries
     if !meta_ctx.yang_prompt.constraint_summaries.is_empty() {
         prompt.push_str("## Constraints\n");
         for summary in &meta_ctx.yang_prompt.constraint_summaries {
             prompt.push_str(&format!("- {}\n", summary));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
     }
 
     // Output directory (absolute path)
@@ -501,7 +544,7 @@ fn build_execution_prompt(
         for (i, path) in meta_ctx.yang_prompt.parent_deliverables.iter().enumerate() {
             prompt.push_str(&format!("{}. {}\n", i + 1, path));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
     }
 
     // External context (from frontend agent via MCP)
@@ -509,7 +552,7 @@ fn build_execution_prompt(
         let files_dir = ctx_dir.join("files");
         if files_dir.exists() {
             prompt.push_str("## External Context (from Frontend Agent)\n");
-            prompt.push_str("以下文件由前端 agent（如 pi_agent_rust）已读取并传递给此任务：\n");
+            prompt.push_str("以下文件由前端 agent 已读取并传递给此任务：\n");
             if let Ok(entries) = std::fs::read_dir(&files_dir) {
                 for entry in entries.flatten() {
                     let index = entry.file_name().to_string_lossy().to_string();
@@ -529,7 +572,7 @@ fn build_execution_prompt(
                 skill.tool_name, skill.name, skill.id
             ));
         }
-        prompt.push_str("\n");
+        prompt.push('\n');
     }
 
     // Execution-specific instructions
@@ -540,9 +583,9 @@ fn build_execution_prompt(
          ### 执行优先原则 (Execution-First)\n\
          1. 🎯 Try to complete the task directly using available tools first.\n\
             Read files, write code, execute commands — get the work done.\n\n\
-         2. 🔄 Only use `recursive_decompose` as a last resort — when the task\n\
-            genuinely cannot be completed in a single execution pass. If you do\n\
-            decompose, set subtask mode=\"Execution\" for atomic pieces.\n\n\
+         2. 🔄 Complete the task directly in a single execution pass. You do not\n\
+            have access to recursive_decompose — focus on producing concrete\n\
+            output using the available L1 tools.\n\n\
          3. ✅ Self-verify your output with `causal_verify` before finishing.\n\
             Check that your deliverables meet the requirements.\n\n\
           4. 📦 Produce concrete artifacts in the deliverables directory.\n\
@@ -575,7 +618,7 @@ mod tests {
     use crate::orchestration::constraint_engine::ConstraintEngine;
     use crate::orchestration::trigger_engine::SkillTriggerEngine;
     use crate::orchestration::worker_pool::WorkerPool;
-    use crate::types::agent::{AgentMode, ReasoningPath, SkillRef, YangPrompt};
+    use crate::types::agent::{AgentMode, SkillRef, YangPrompt};
     use crate::types::verification::TruthConstraint;
 
     fn make_config() -> TaijiConfig {
@@ -630,18 +673,11 @@ mod tests {
 
     fn sample_meta_context() -> MetaContext {
         MetaContext {
-            reasoning_paths: vec![ReasoningPath {
-                source_grid: "grid-42".into(),
-                chains: vec![],
-                depth: 1,
-                task_type_tags: vec!["code".into()],
-            }],
-            constraints: vec![TruthConstraint {
-                id: "truth:no-fabrication".into(),
-                name: "不编造事实".into(),
-                description: "Don't fabricate facts".into(),
-                severity: crate::types::verification::ConstraintSeverity::Hard,
-            }],
+            constraints: vec![TruthConstraint::hard(
+                "truth:no-fabrication",
+                "不编造事实",
+                "Don't fabricate facts",
+            )],
             matched_skills: vec![SkillRef {
                 id: "read".into(),
                 name: "文件读取".into(),
@@ -650,9 +686,6 @@ mod tests {
             }],
             yang_prompt: YangPrompt {
                 task_description: "Refactor the logging module.".into(),
-                reasoning_path_summaries: vec![
-                    "Path 1: grid-42 → grid-17 (depends_on)".into(),
-                ],
                 constraint_summaries: vec![
                     "Hard: Do not fabricate facts".into(),
                 ],
@@ -677,7 +710,6 @@ mod tests {
         assert!(prompt.contains("你是概率拟合专家"));
         assert!(prompt.contains("Orchestration"));
         assert!(prompt.contains("Refactor the logging module"));
-        assert!(prompt.contains("grid-42"));
         assert!(prompt.contains("recursive_decompose"));
         assert!(prompt.contains("产出目录"));
         // Should NOT contain execution-specific text
@@ -759,7 +791,7 @@ mod tests {
             .create_fitting_agent(1, AgentMode::Execution, &meta_ctx, &engine_ctx, cancel)
             .expect("builder");
 
-        let result = builder.run("Write a test for the logging module").await;
+        let result = builder.run("Write a test for the logging module", None).await;
         // In an environment without LLM access, expect LLMCallFailed.
         // With a valid API key + Qdrant, this should return Ok(TPNResult).
         match result {
@@ -804,7 +836,7 @@ mod tests {
 
         // run() should NOT return MaxDepthExceeded because 1 <= 2.
         // It will return LLMCallFailed because no API key is available.
-        let result = builder.run("test").await;
+        let result = builder.run("test", None).await;
         match result {
             Ok(_) => { /* valid result — requires API key */ }
             Err(e) => {

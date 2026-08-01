@@ -1,4 +1,4 @@
-// taiji — lightweight AGI cognitive kernel (TPN-DMN-理络)
+// taiji — lightweight AGI cognitive kernel (TPN-DMN-归藏)
 //
 // Module structure (7-layer):
 //   L0 types          — foundational data types
@@ -7,7 +7,8 @@
 //   L3 agents         — transient Rig Agents (meta, fitting, causal) + tools
 //   L4 orchestration  — runner, constraint engine, trigger engine, cognition evolver
 //   L5 mcp            — MCP server/client
-//   L6 entry          — main.rs (clap CLI)
+//   L6 ws             — WebSocket event server (frontend bridge)
+//   L7 entry          — main.rs (clap CLI)
 
 pub mod types;
 pub mod infra;
@@ -15,10 +16,11 @@ pub mod hooks;
 pub mod agents;
 pub mod orchestration;
 pub mod mcp;
+pub mod ws;
 
 // Re-export key types for convenience
 pub use types::{
-    task::{Task, TaskStatus, TPNResult, SubtaskSpec, DecomposeResult},
-    agent::{Chain, ReasoningPath, MetaContext},
+    task::{Checkpoint, ChildResultSummary, CyclePhase, DecomposeResult, SubtaskSpec, Task, TaskStatus, TPNResult},
+    agent::MetaContext,
     verification::{VerificationReport, ConvergenceDecision, VerificationRoute, ConvergenceStatus},
 };

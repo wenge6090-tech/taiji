@@ -324,8 +324,8 @@ impl SafetyHook {
 
         // Fragment before @ bypass: http://evil.com#@127.0.0.1
         // The @ comes after #, so extract_host sees evil.com but connection goes to 127.0.0.1.
-        if let (Some(hash_pos), Some(at_pos)) = (lower.find('#'), lower.find('@')) {
-            if hash_pos < at_pos {
+        if let (Some(hash_pos), Some(at_pos)) = (lower.find('#'), lower.find('@'))
+            && hash_pos < at_pos {
                 let reason = format!(
                     "SSRF bypass detected: fragment before '@' in URL: {}",
                     url
@@ -333,12 +333,11 @@ impl SafetyHook {
                 tracing::warn!("{reason}");
                 return Err(TaijiError::SafetyViolation { reason });
             }
-        }
 
         // Decimal IP: 2130706433 = 127.0.0.1
-        if !host.is_empty() && host.chars().all(|c| c.is_ascii_digit()) {
-            if let Ok(n) = host.parse::<u32>() {
-                if n >= 16777216 {
+        if !host.is_empty() && host.chars().all(|c| c.is_ascii_digit())
+            && let Ok(n) = host.parse::<u32>()
+                && n >= 16777216 {
                     let reason = format!(
                         "Decimal IP rejected (SSRF prevention): {}",
                         url
@@ -346,12 +345,10 @@ impl SafetyHook {
                     tracing::warn!("{reason}");
                     return Err(TaijiError::SafetyViolation { reason });
                 }
-            }
-        }
 
         // Hex IP: 0x7f000001 = 127.0.0.1
-        if host.starts_with("0x") && host.len() > 2 {
-            if let Ok(n) = u32::from_str_radix(&host[2..], 16) {
+        if host.starts_with("0x") && host.len() > 2
+            && let Ok(n) = u32::from_str_radix(&host[2..], 16) {
                 let first_octet = (n >> 24) & 0xff;
                 if first_octet == 127
                     || first_octet == 10
@@ -370,7 +367,6 @@ impl SafetyHook {
                     return Err(TaijiError::SafetyViolation { reason });
                 }
             }
-        }
 
         // 0.0.0.0 (often maps to localhost on Linux)
         if host == "0.0.0.0" {

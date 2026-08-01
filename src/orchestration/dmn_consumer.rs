@@ -103,7 +103,7 @@ impl DmnConsumer {
                     match entry {
                         Ok(e) => {
                             let path = e.path();
-                            if path.extension().map_or(false, |ext| ext == "json") {
+                            if path.extension().is_some_and(|ext| ext == "json") {
                                 files.push(path);
                             }
                         }

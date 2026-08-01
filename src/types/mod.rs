@@ -3,3 +3,5 @@ pub mod agent;
 pub mod verification;
 pub mod execution;
 pub mod task_spec;
+pub mod plan;
+pub mod frontend;

@@ -5,3 +5,5 @@ pub mod worker_pool;
 pub mod cognition_evolver;
 pub mod dmn_consumer;
 pub mod tpn_cycle;
+pub mod event_bus;
+pub mod task_tree_builder;

@@ -36,6 +36,16 @@ enum Command {
     Status,
     /// Start MCP server for tool integration
     Mcp,
+    /// Serve the taiji-web frontend (pure-Web mode): HTTP static hosting +
+    /// WebSocket bridge on 17890 + auto-open browser
+    Serve {
+        /// HTTP port for the frontend (default 1420)
+        #[arg(long, default_value_t = 1420)]
+        port: u16,
+        /// Do not auto-open the browser
+        #[arg(long)]
+        no_open: bool,
+    },
 }
 
 #[tokio::main]
@@ -57,6 +67,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::List => cmd_list()?,
         Command::Status => cmd_status()?,
         Command::Mcp => cmd_mcp().await?,
+        Command::Serve { port, no_open } => cmd_serve(port, no_open).await?,
     }
 
     Ok(())
@@ -71,38 +82,7 @@ async fn cmd_run(description: Vec<String>) -> Result<(), Box<dyn std::error::Err
     let config = load_config()?;
 
     // Provider registry (LLM clients).
-    let providers = Arc::new(taiji::infra::provider::ProviderRegistry::new(&config)?);
-
-    // 理络 client — file-system cognitive knowledge warehouse.
-    let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
-    let liluo = match taiji::infra::knowledge::LiluoClient::new(&knowledge_dir).await {
-        Ok(c) => Arc::new(c),
-        Err(e) => {
-            tracing::warn!("理络 knowledge store unavailable, creating sparse client: {e}");
-            Arc::new(taiji::infra::knowledge::LiluoClient::new_sparse(&knowledge_dir).await?)
-        }
-    };
-
-    // Infrastructure engines.
-    let safety_hook = Arc::new(taiji::hooks::safety::SafetyHook::new(&config.safety));
-    let worker_pool = Arc::new(taiji::orchestration::worker_pool::WorkerPool::new(
-        config.runtime.max_concurrent_agents,
-    ));
-    let constraint_engine =
-        Arc::new(taiji::orchestration::constraint_engine::ConstraintEngine::new());
-    let trigger_engine =
-        Arc::new(taiji::orchestration::trigger_engine::SkillTriggerEngine::new());
-
-    // Agent factory — creates transient Rig Agents on demand.
-    let factory = Arc::new(taiji::agents::factory::AgentFactory::new(
-        liluo,
-        providers,
-        config.clone(),
-        safety_hook,
-        worker_pool,
-        constraint_engine,
-        trigger_engine,
-    ));
+    let factory = build_engine(&config).await?;
 
     // Execute task via RecursiveRunner.
     let runner = taiji::orchestration::runner::RecursiveRunner::new(factory, config);
@@ -290,19 +270,37 @@ async fn cmd_mcp() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config()?;
 
     // Provider registry (LLM clients).
-    let providers = Arc::new(taiji::infra::provider::ProviderRegistry::new(&config)?);
+    let factory = build_engine(&config).await?;
 
-    // 理络 client — file-system cognitive knowledge warehouse.
+    // Start MCP server (blocks until stdin closes).
+    let server = taiji::mcp::server::TaijiMcpServer::new(factory);
+    server.serve().await?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Shared engine construction
+// ---------------------------------------------------------------------------
+
+/// Build the full engine component set (provider registry → 归藏 client →
+/// safety hook → worker pool → agent factory).
+///
+/// Shared by `run`, `mcp` and `serve` — the single initialization path.
+async fn build_engine(
+    config: &taiji::infra::config::TaijiConfig,
+) -> Result<Arc<taiji::agents::factory::AgentFactory>, Box<dyn std::error::Error>> {
+    let providers = Arc::new(taiji::infra::provider::ProviderRegistry::new(config)?);
+
     let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
     let liluo = match taiji::infra::knowledge::LiluoClient::new(&knowledge_dir).await {
         Ok(c) => Arc::new(c),
         Err(e) => {
-            tracing::warn!("理络 knowledge store unavailable, creating sparse client: {e}");
+            tracing::warn!("归藏 knowledge store unavailable, creating sparse client: {e}");
             Arc::new(taiji::infra::knowledge::LiluoClient::new_sparse(&knowledge_dir).await?)
         }
     };
 
-    // Infrastructure engines.
     let safety_hook = Arc::new(taiji::hooks::safety::SafetyHook::new(&config.safety));
     let worker_pool = Arc::new(taiji::orchestration::worker_pool::WorkerPool::new(
         config.runtime.max_concurrent_agents,
@@ -312,8 +310,7 @@ async fn cmd_mcp() -> Result<(), Box<dyn std::error::Error>> {
     let trigger_engine =
         Arc::new(taiji::orchestration::trigger_engine::SkillTriggerEngine::new());
 
-    // Agent factory.
-    let factory = Arc::new(taiji::agents::factory::AgentFactory::new(
+    Ok(Arc::new(taiji::agents::factory::AgentFactory::new(
         liluo,
         providers,
         config.clone(),
@@ -321,13 +318,81 @@ async fn cmd_mcp() -> Result<(), Box<dyn std::error::Error>> {
         worker_pool,
         constraint_engine,
         trigger_engine,
-    ));
+    )))
+}
 
-    // Start MCP server (blocks until stdin closes).
-    let server = taiji::mcp::server::TaijiMcpServer::new(factory);
-    server.serve().await?;
+// ---------------------------------------------------------------------------
+// `taiji serve` — pure-Web frontend mode
+// ---------------------------------------------------------------------------
 
+/// WebSocket bridge port (taiji pinyin initial digits), loopback only.
+const WS_PORT: u16 = 17890;
+
+/// Serve the taiji-web frontend:
+/// 1. Engine init (same chain as `run` / `mcp`).
+/// 2. WebSocket bridge on 127.0.0.1:17890 + global event bus.
+/// 3. HTTP static hosting of `taiji-web/dist/` on 127.0.0.1:<port>.
+/// 4. Auto-open the browser (unless `--no-open`).
+async fn cmd_serve(port: u16, no_open: bool) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config()?;
+    let factory = build_engine(&config).await?;
+    let data_root = std::path::PathBuf::from(&config.data_root);
+
+    // ── WebSocket bridge + global event bus ────────────────────────────
+    let ws_server = std::sync::Arc::new(taiji::ws::server::WsServer::new(WS_PORT));
+    let serve_state = std::sync::Arc::new(taiji::ws::handler::ServeState {
+        factory: factory.clone(),
+        config: config.clone(),
+        data_root: data_root.clone(),
+    });
+    ws_server.set_state(serve_state);
+    if let Err(e) = taiji::orchestration::event_bus::init_event_bus(ws_server.clone()) {
+        tracing::warn!("事件总线初始化失败: {e}");
+    }
+    ws_server.start().await?;
+
+    // ── HTTP static hosting of the frontend build output ───────────────
+    let dist_dir = std::path::PathBuf::from("taiji-web/dist");
+    if !dist_dir.join("index.html").exists() {
+        eprintln!(
+            "⚠ 前端构建产物不存在于 {}，请先运行: cd taiji-web && npm run build",
+            dist_dir.display()
+        );
+    }
+    let app = axum::Router::new().fallback_service(
+        tower_http::services::ServeDir::new(&dist_dir).append_index_html_on_directories(true),
+    );
+
+    let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+    let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    println!("✓ taiji serve 已启动");
+    println!("  HTTP 前端:   http://127.0.0.1:{port}");
+    println!("  WS 事件桥:   ws://127.0.0.1:{WS_PORT}");
+    println!("  数据根目录:  {}", data_root.display());
+    println!("  按 Ctrl+C 退出");
+
+    if !no_open {
+        open_browser(&format!("http://127.0.0.1:{port}"));
+    }
+
+    axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Open the system browser on Linux via `xdg-open`. Failure is advisory
+/// (the URL is printed above; users may open it manually).
+fn open_browser(url: &str) {
+    #[cfg(target_os = "linux")]
+    {
+        if let Err(e) = std::process::Command::new("xdg-open").arg(url).spawn() {
+            tracing::warn!("自动打开浏览器失败(请手动访问 {url}): {e}");
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        tracing::info!("请手动访问 {url}");
+    }
 }
 
 // ---------------------------------------------------------------------------

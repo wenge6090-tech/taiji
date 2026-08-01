@@ -27,8 +27,10 @@ use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::causal::{CausalConvergeAgentBuilder, CausalVerifyAgentBuilder};
+use crate::agents::chat::ChatAgentBuilder;
 use crate::agents::fitting::FittingAgentBuilder;
 use crate::agents::meta::MetaAgentBuilder;
+use crate::agents::plan::PlanBuilder;
 use crate::hooks::safety::SafetyHook;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
@@ -114,6 +116,29 @@ impl AgentFactory {
             "Creating MetaAgent"
         );
         Ok(MetaAgentBuilder::new(
+            task_id,
+            self.liluo.clone(),
+            self.providers.clone(),
+            &model,
+        ))
+    }
+
+    /// Create a [`PlanBuilder`] (预演编排) for a given task ID.
+    ///
+    /// The PlanBuilder runs the MetaAgent to obtain cognitive context, then
+    /// calls the LLM to compose a structured [`PlanSummary`] **without**
+    /// entering the TPN loop.  This is a read-only planning operation.
+    ///
+    /// **LLM config**: resolved from `agent_overrides["plan"]`, falling back
+    /// to the default provider + model.
+    pub fn create_plan_agent(&self, task_id: &str) -> Result<PlanBuilder, TaijiError> {
+        let (_provider, model) = self.agent_llm_config("plan");
+        tracing::debug!(
+            task_id,
+            model = %model,
+            "Creating PlanBuilder"
+        );
+        Ok(PlanBuilder::new(
             task_id,
             self.liluo.clone(),
             self.providers.clone(),
@@ -213,6 +238,41 @@ impl AgentFactory {
     }
 
     // ── Configuration helpers ────────────────────────────────────────
+
+    /// Create a [`ChatAgentBuilder`] (对话 agent, long-lived session).
+    ///
+    /// The ChatAgent is a full conversational Rig agent: 5 built-in L1 Skills
+    /// + SafetyHook + streaming multi-turn output + session history
+    /// persistence. It lives outside the TPN cycle.
+    ///
+    /// **LLM config**: resolved from `agent_overrides["chat"]` (or defaults).
+    pub fn create_chat_agent(
+        &self,
+        session_id: String,
+        context_task_id: Option<String>,
+        model: Option<String>,
+        provider_name: Option<String>,
+    ) -> Result<ChatAgentBuilder, TaijiError> {
+        let (provider, default_model) = self.agent_llm_config("chat");
+        let model = model.unwrap_or(default_model);
+        let provider = provider_name.unwrap_or(provider);
+        tracing::debug!(
+            session = %session_id,
+            model = %model,
+            provider = %provider,
+            "Creating ChatAgent"
+        );
+        Ok(ChatAgentBuilder::new(
+            session_id,
+            context_task_id,
+            self.providers.clone(),
+            self.safety_hook.clone(),
+            self.config.clone(),
+            self.data_root.clone(),
+            &model,
+            &provider,
+        ))
+    }
 
     /// Resolve the LLM provider name and model name for a given agent type.
     ///
@@ -356,7 +416,7 @@ mod tests {
         // Verify the builder is properly initialised by checking internal
         // fields through its public API (run returns a MetaContext).
         let ctx = builder.run("test task", &[]).await.expect("MetaAgent run");
-        assert_eq!(ctx.reasoning_paths.len(), 0);
+        assert!(ctx.constraints.is_empty());
         // Cleanup
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }

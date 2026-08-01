@@ -1,13 +1,19 @@
-//! L1 Skill tools — dynamically loaded from NSKG and matched by
-//! `SkillTriggerEngine`.
+//! L1 Skill tools — built-in real implementations with optional augmentation
+//! via MCP ExternalContext from a frontend agent.
 //!
 //! Each [`SkillRef`](crate::types::agent::SkillRef) from the MetaContext is
 //! wrapped in a [`SkillTool`].  The [`SkillRegistry`] manages the full set
 //! and provides tool names suitable for Rig agent registration.
 //!
-//! A handful of built-in skills (`read`, `write`, `bash`, `search`,
-//! `webfetch`) serve as placeholders.  In production they will be replaced
-//! or augmented by Qdrant-hosted L1 skill definitions.
+//! The five built-in skills (`read`, `write`, `bash`, `search`, `webfetch`)
+//! have real implementations adapted from pi_agent_rust's tool algorithms.
+
+pub mod bash;
+pub mod common;
+pub mod read;
+pub mod search;
+pub mod webfetch;
+pub mod write;
 
 use std::sync::Arc;
 
@@ -38,10 +44,10 @@ pub trait BuiltinSkill: Send + Sync {
 }
 
 // ---------------------------------------------------------------------------
-// Built-in skill implementations
+// Built-in skill implementations (thin wrappers around real modules)
 // ---------------------------------------------------------------------------
 
-/// Placeholder `read` tool — emulates file reading.
+/// Built-in `read` tool — delegates to [`read::ReadTool`].
 #[derive(Debug, Clone, Default)]
 pub struct ReadTool;
 
@@ -52,20 +58,11 @@ impl BuiltinSkill for ReadTool {
     }
 
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("<unknown>");
-        Ok(serde_json::json!({
-            "tool": "read",
-            "status": "ok",
-            "path": path,
-            "content": format!("[placeholder] contents of {}", path),
-        }))
+        read::ReadTool.call(args).await
     }
 }
 
-/// Placeholder `write` tool — emulates file writing.
+/// Built-in `write` tool — delegates to [`write::WriteTool`].
 #[derive(Debug, Clone, Default)]
 pub struct WriteTool;
 
@@ -76,21 +73,11 @@ impl BuiltinSkill for WriteTool {
     }
 
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        let path = args
-            .get("path")
-            .and_then(|v| v.as_str())
-            .unwrap_or("<unknown>");
-        Ok(serde_json::json!({
-            "tool": "write",
-            "status": "ok",
-            "path": path,
-            "bytes_written": 0,
-            "note": "[placeholder] write simulated",
-        }))
+        write::WriteTool.call(args).await
     }
 }
 
-/// Placeholder `bash` tool — emulates command execution.
+/// Built-in `bash` tool — delegates to [`bash::BashTool`].
 #[derive(Debug, Clone, Default)]
 pub struct BashTool;
 
@@ -101,22 +88,11 @@ impl BuiltinSkill for BashTool {
     }
 
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        let command = args
-            .get("command")
-            .and_then(|v| v.as_str())
-            .unwrap_or("<empty>");
-        Ok(serde_json::json!({
-            "tool": "bash",
-            "status": "ok",
-            "command": command,
-            "stdout": format!("[placeholder] output of: {command}"),
-            "stderr": "",
-            "exit_code": 0,
-        }))
+        bash::BashTool.call(args).await
     }
 }
 
-/// Placeholder `search` tool — emulates web / knowledge-base search.
+/// Built-in `search` tool — delegates to [`search::SearchTool`].
 #[derive(Debug, Clone, Default)]
 pub struct SearchTool;
 
@@ -127,23 +103,11 @@ impl BuiltinSkill for SearchTool {
     }
 
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        let query = args
-            .get("query")
-            .and_then(|v| v.as_str())
-            .unwrap_or("<empty>");
-        Ok(serde_json::json!({
-            "tool": "search",
-            "status": "ok",
-            "query": query,
-            "results": [
-                {"title": "[placeholder]", "url": "https://example.com/1", "snippet": "…"},
-                {"title": "[placeholder]", "url": "https://example.com/2", "snippet": "…"},
-            ],
-        }))
+        search::SearchTool.call(args).await
     }
 }
 
-/// Placeholder `webfetch` tool — emulates URL fetching.
+/// Built-in `webfetch` tool — delegates to [`webfetch::WebfetchTool`].
 #[derive(Debug, Clone, Default)]
 pub struct WebfetchTool;
 
@@ -154,16 +118,7 @@ impl BuiltinSkill for WebfetchTool {
     }
 
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        let url = args
-            .get("url")
-            .and_then(|v| v.as_str())
-            .unwrap_or("<empty>");
-        Ok(serde_json::json!({
-            "tool": "webfetch",
-            "status": "ok",
-            "url": url,
-            "content": format!("[placeholder] fetched content from {url}"),
-        }))
+        webfetch::WebfetchTool.call(args).await
     }
 }
 
@@ -245,11 +200,11 @@ impl SkillTool {
     /// Map a skill name to an optional built-in implementation.
     fn lookup_builtin(name: &str) -> Option<Arc<dyn BuiltinSkill>> {
         match name {
-            "read" => Some(Arc::new(ReadTool::default())),
-            "write" => Some(Arc::new(WriteTool::default())),
-            "bash" => Some(Arc::new(BashTool::default())),
-            "search" => Some(Arc::new(SearchTool::default())),
-            "webfetch" => Some(Arc::new(WebfetchTool::default())),
+            "read" => Some(Arc::new(ReadTool)),
+            "write" => Some(Arc::new(WriteTool)),
+            "bash" => Some(Arc::new(BashTool)),
+            "search" => Some(Arc::new(SearchTool)),
+            "webfetch" => Some(Arc::new(WebfetchTool)),
             _ => None,
         }
     }
@@ -412,18 +367,19 @@ mod tests {
     use crate::types::agent::SkillRef;
 
     #[tokio::test]
-    async fn test_read_tool_returns_placeholder() {
+    async fn test_read_tool_returns_result() {
         let tool = SkillTool::new(SkillRef {
             id: "builtin::read".into(),
             name: "read".into(),
             tool_name: "read".into(),
             match_weight: 1.0,
         });
-        let args = serde_json::json!({"path": "/tmp/foo.txt"});
+        let args = serde_json::json!({"path": "Cargo.toml"});
         let result = tool.execute(&args).await.unwrap();
         assert_eq!(result["tool"], "read");
         assert_eq!(result["status"], "ok");
-        assert_eq!(result["path"], "/tmp/foo.txt");
+        assert!(result["path"].as_str().unwrap_or("").contains("Cargo.toml"));
+        assert!(result["content"].as_str().unwrap_or("").len() > 0);
     }
 
     #[tokio::test]
@@ -472,10 +428,18 @@ mod tests {
     #[tokio::test]
     async fn test_builtin_skills_all_executable() {
         let reg = SkillRegistry::new();
+        // Provide valid args for each known built-in skill.
+        // webfetch is excluded — it requires network; see SSRF tests in webfetch module.
         for tool in reg.tools() {
-            let args = serde_json::json!({});
+            let args = match tool.name() {
+                "read" => serde_json::json!({"path": "Cargo.toml"}),
+                "write" => serde_json::json!({"path": "target/taiji_test_write.txt", "content": "test"}),
+                "bash" => serde_json::json!({"command": "echo hello"}),
+                "search" => serde_json::json!({"query": "fn main", "path": ".", "limit": 3}),
+                _ => continue, // skip webfetch and unknown skills
+            };
             let result = tool.execute(&args).await;
-            assert!(result.is_ok(), "Skill '{}' failed", tool.name());
+            assert!(result.is_ok(), "Skill '{}' failed: {:?}", tool.name(), result.err());
         }
     }
 }

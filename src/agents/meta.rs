@@ -1,8 +1,8 @@
 //! MetaAgent builder (权重更新·元) — "weight update, the meta phase".
 //!
-//! The MetaAgent is the **first** agent in the TPN cycle.  It traverses the
-//! 理络 (cognitive network) via Rig's `dynamic_context` mechanism to extract
-//! reasoning paths that serve as cognitive bias for downstream agents.
+//! The MetaAgent is the **first** agent in the TPN cycle.  It queries the
+//! 归藏 (cognitive warehouse) via Rig's `dynamic_context` mechanism to extract
+//! matched prompt assets that serve as cognitive bias for downstream agents.
 //!
 //! # Constraints (AGENTS.md §2, §4)
 //! - `max_turns = 1` — the MetaAgent is a single-shot structured extractor.
@@ -17,6 +17,7 @@
 //!    and returns a [`MetaContext`].
 //! 3. The caller feeds the [`MetaContext`] into `create_fitting_agent`.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use rig::client::CompletionClient;
@@ -25,6 +26,7 @@ use rig::completion::Prompt;
 use crate::infra::error::TaijiError;
 use crate::infra::knowledge::LiluoClient;
 use crate::infra::provider::ProviderRegistry;
+use crate::infra::trace::save_json_atomic;
 use crate::types::agent::{MetaContext, PromptAsset};
 
 /// Builder for the MetaAgent (权重更新·元).
@@ -40,6 +42,8 @@ pub struct MetaAgentBuilder {
     model: String,
     /// max_turns = 1 — MetaAgent is always single-shot structured extraction.
     max_turns: u32,
+    /// Optional task directory for persisting meta_conversation.json.
+    task_dir: Option<PathBuf>,
 }
 
 impl MetaAgentBuilder {
@@ -59,7 +63,14 @@ impl MetaAgentBuilder {
             provider,
             model: model.to_string(),
             max_turns: 1, // MetaAgent is always single-shot
+            task_dir: None,
         }
+    }
+
+    /// Set an optional task directory for persisting meta_conversation.json.
+    pub fn task_dir(mut self, path: PathBuf) -> Self {
+        self.task_dir = Some(path);
+        self
     }
 
     /// Run the MetaAgent: query the 理络, LLM-compose prompts, produce [`MetaContext`].
@@ -125,7 +136,7 @@ impl MetaAgentBuilder {
         })?;
 
         // ── 4. Parse response into MetaContext ──
-        match serde_json::from_str::<MetaContext>(response.as_ref()) {
+        let ctx = match serde_json::from_str::<MetaContext>(response.as_ref()) {
             Ok(ctx) => {
                 tracing::debug!(
                     task_id = %self.task_id,
@@ -135,16 +146,36 @@ impl MetaAgentBuilder {
                     has_converge = ctx.converge_system_prompt.is_some(),
                     "MetaAgent: successfully composed MetaContext"
                 );
-                Ok(ctx)
+                ctx
             }
             Err(e) => {
                 tracing::warn!(
                     task_id = %self.task_id,
                     "MetaAgent: failed to parse LLM response as MetaContext: {e} — falling back"
                 );
-                Ok(MetaContext::empty())
+                MetaContext::empty()
+            }
+        };
+
+        // ── 5. Persist meta_conversation.json for crash recovery ──
+        if let Some(ref dir) = self.task_dir {
+            let meta_state = serde_json::json!({
+                "task_description": task_description,
+                "llm_input": llm_prompt,
+                "llm_response": &response,
+                "meta_ctx": ctx,
+            });
+            let meta_path = dir.join("meta_conversation.json");
+            if let Err(e) = save_json_atomic(&meta_state, &meta_path) {
+                tracing::warn!(
+                    path = %meta_path.display(),
+                    error = %e,
+                    "Failed to save meta_conversation"
+                );
             }
         }
+
+        Ok(ctx)
     }
 }
 
@@ -177,12 +208,10 @@ const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Upd
   "fitting_system_prompt": "完整的 FittingAgent 系统提示词，包含角色定义、指令和约束",
   "verify_system_prompt": "完整的 verify 系统提示词，以'你是因果验证器'开头",
   "converge_system_prompt": "完整的 converge 系统提示词，以'你是收敛判决器'开头",
-  "reasoning_paths": [],
   "constraints": [],
   "matched_skills": [],
   "yang_prompt": {
     "task_description": "（保持原始 task_description）",
-    "reasoning_path_summaries": [],
     "constraint_summaries": []
   }
 }
@@ -279,7 +308,6 @@ mod tests {
         // Empty tags → fallback path → empty MetaContext.
         let ctx = builder.run("test task description", &[]).await.expect("MetaAgent run");
 
-        assert!(ctx.reasoning_paths.is_empty());
         assert!(ctx.constraints.is_empty());
         assert!(ctx.matched_skills.is_empty());
         assert!(ctx.yang_prompt.task_description.is_empty());

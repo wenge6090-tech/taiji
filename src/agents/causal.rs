@@ -33,6 +33,7 @@ use rig::completion::Prompt;
 use rig::providers::deepseek;
 
 use crate::infra::error::TaijiError;
+use crate::infra::trace::save_json_atomic;
 use crate::infra::provider::ProviderRegistry;
 use crate::orchestration::constraint_engine::ConstraintEngine;
 use crate::types::agent::{AgentMode, MetaContext};
@@ -275,6 +276,21 @@ impl CausalVerifyAgentBuilder {
             "CausalVerifyAgent — LLM verification completed"
         );
 
+        // ── Persist verify state for crash recovery ──
+        let verify_state = serde_json::json!({
+            "report": &report,
+            "round": self.engine_ctx.round,
+            "cycle": self.engine_ctx.cycle,
+        });
+        let verify_path = self.engine_ctx.task_dir.join("verify_state.json");
+        if let Err(e) = save_json_atomic(&verify_state, &verify_path) {
+            tracing::warn!(
+                path = %verify_path.display(),
+                error = %e,
+                "Failed to save verify_state"
+            );
+        }
+
         Ok(report)
     }
 }
@@ -487,6 +503,21 @@ impl CausalConvergeAgentBuilder {
             "CausalConvergeAgent — LLM convergence judgment completed"
         );
 
+        // ── Persist converge state for crash recovery ──
+        let converge_state = serde_json::json!({
+            "decision": decision,
+            "round": self.engine_ctx.round,
+            "cycle": self.engine_ctx.cycle,
+        });
+        let converge_path = self.engine_ctx.task_dir.join("converge_state.json");
+        if let Err(e) = save_json_atomic(&converge_state, &converge_path) {
+            tracing::warn!(
+                path = %converge_path.display(),
+                error = %e,
+                "Failed to save converge_state"
+            );
+        }
+
         Ok(decision)
     }
 }
@@ -678,16 +709,24 @@ mod tests {
 
         let results = vec![
             DecomposeResult {
+                task_id: "sub-1".into(),
                 summary: "Done".into(),
                 status: ConvergenceStatus::Converged,
                 subtask_count: 0,
                 deliverables: vec![],
+                rounds: 1,
+                tools_used: vec!["write".into()],
+                child_results: vec![],
             },
             DecomposeResult {
+                task_id: "sub-2".into(),
                 summary: "Done too".into(),
                 status: ConvergenceStatus::Converged,
                 subtask_count: 0,
                 deliverables: vec![],
+                rounds: 1,
+                tools_used: vec![],
+                child_results: vec![],
             },
         ];
 
@@ -708,16 +747,24 @@ mod tests {
 
         let results = vec![
             DecomposeResult {
+                task_id: "sub-1".into(),
                 summary: "Done".into(),
                 status: ConvergenceStatus::Converged,
                 subtask_count: 0,
                 deliverables: vec![],
+                rounds: 1,
+                tools_used: vec![],
+                child_results: vec![],
             },
             DecomposeResult {
+                task_id: "sub-2".into(),
                 summary: "Partial".into(),
                 status: ConvergenceStatus::Partial,
                 subtask_count: 0,
                 deliverables: vec![],
+                rounds: 3,
+                tools_used: vec![],
+                child_results: vec![],
             },
         ];
 
@@ -738,16 +785,24 @@ mod tests {
 
         let results = vec![
             DecomposeResult {
+                task_id: "sub-1".into(),
                 summary: "Failed".into(),
                 status: ConvergenceStatus::Diverged,
                 subtask_count: 0,
                 deliverables: vec![],
+                rounds: 5,
+                tools_used: vec![],
+                child_results: vec![],
             },
             DecomposeResult {
+                task_id: "sub-2".into(),
                 summary: "Also failed".into(),
                 status: ConvergenceStatus::Diverged,
                 subtask_count: 0,
                 deliverables: vec![],
+                rounds: 4,
+                tools_used: vec![],
+                child_results: vec![],
             },
         ];
 

@@ -1,20 +1,19 @@
-//! LiluoClient — 理络 (cognitive network) file-system warehouse.
+//! LiluoClient — 归藏 (cognitive warehouse) file-system client.
 //!
-//! All cognitive assets (Truths, Grids, Models, Skills) are stored as YAML
-//! files under `{data_dir}/{type}s/{id}.yaml`.  An `index.yaml` at the root
-//! maintains a tag-based reverse index for efficient search.
+//! Cognitive assets (Prompts, Truths, Models) are stored as YAML files under
+//! `{data_dir}/{type}s/{id}.yaml`.  An `index.yaml` at the root maintains a
+//! tag-based reverse index for efficient search.
 //!
-//! # Directory layout
+//! # Directory layout (V22 三层+预留)
 //!
 //! ```text
 //! {data_dir}/
-//! ├── index.yaml          # tag → [AssetRef] reverse index (derived)
-//! ├── truths/             # L4 Truth assets
-//! │   ├── truth-001.yaml
+//! ├── index.yaml          # tag → [AssetRef] reverse index (derived, tag_index only)
+//! ├── prompts/            # L5 Prompt assets (行为模板)
+//! │   ├── prompt-001.yaml
 //! │   └── ...
-//! ├── grids/              # L3 Grid assets (with inline relations)
-//! ├── models/             # L2 Model assets (Bayesian)
-//! └── skills/             # L1 Skill assets
+//! ├── truths/             # L4 Truth assets
+//! └── models/             # L2 Model assets (预留 — 待连山流型系统接入)
 //! ```
 //!
 //! # Consistency (AGENTS.md §7)
@@ -25,7 +24,7 @@
 use crate::infra::error::TaijiError;
 use crate::types::agent::PromptAsset;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
@@ -52,7 +51,7 @@ pub struct AssetRef {
 /// # Serde note
 /// `asset_type` is skipped during (de)serialization because the type is
 /// already conveyed by the enclosing `CognitiveAsset` enum tag and by
-/// the directory structure (`truths/`, `grids/`, etc.).  The field is
+/// the directory structure (`truths/`, `models/`, etc.).  The field is
 /// populated programmatically via `CognitiveAsset::asset_type()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetHeader {
@@ -73,17 +72,14 @@ pub struct TruthAsset {
     #[serde(flatten)]
     pub header: AssetHeader,
     pub severity: String, // "Hard" | "Soft"
+    // ── TMS 字段（V18 新增；V22 仅保留审计字段） ──
+    #[serde(default)]
+    pub status: String, // "active" | "retracted" | "stale"
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub justification: Option<String>,
 }
 
-/// L3 Grid — cognitive grid with typed relations to other assets.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GridAsset {
-    #[serde(flatten)]
-    pub header: AssetHeader,
-    pub relations: Vec<Relation>,
-}
-
-/// L2 Model — Bayesian confidence model.
+/// L2 Model — Bayesian confidence model (预留层).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelAsset {
     #[serde(flatten)]
@@ -104,21 +100,12 @@ pub struct SkillAsset {
     pub fail_count: u64,
 }
 
-/// Typed relation edge between two cognitive assets.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Relation {
-    pub target_id: String,
-    pub target_type: String,
-    pub relation_type: String,
-    pub weight: f64,
-    pub interpretation: String,
-}
-
 // ---------------------------------------------------------------------------
 // Index data structure
 // ---------------------------------------------------------------------------
 
-/// The on-disk index.yaml schema.
+/// The on-disk index.yaml schema (V22: tag_index only — TMS dependency_index
+/// removed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexData {
     tag_index: HashMap<String, Vec<AssetRef>>,
@@ -151,14 +138,13 @@ impl LiluoClient {
     fn type_dir_name(type_: &str) -> &'static str {
         match type_ {
             "truth" => "truths",
-            "grid" => "grids",
             "model" => "models",
             "skill" => "skills",
             "prompt" => "prompts",
             _ => {
-                // Fallback: treat unknown types as grids
-                tracing::warn!("unknown cognitive asset type: {type_}, defaulting to 'grids'");
-                "grids"
+                // Fallback: treat unknown types as prompts (V22 主层)
+                tracing::warn!("unknown cognitive asset type: {type_}, defaulting to 'prompts'");
+                "prompts"
             }
         }
     }
@@ -194,11 +180,11 @@ impl LiluoClient {
         Ok(this)
     }
 
-    /// Create directories for all four asset types under `data_dir`.
+    /// Create directories for the asset types under `data_dir`
+    /// (V22 三层+预留: prompts/ truths/ models/ + skills 统计元数据).
     async fn ensure_dirs(&self) -> Result<(), TaijiError> {
         let dirs = [
             self.data_dir.join("truths"),
-            self.data_dir.join("grids"),
             self.data_dir.join("models"),
             self.data_dir.join("skills"),
             self.data_dir.join("prompts"),
@@ -416,7 +402,7 @@ impl LiluoClient {
     pub async fn build_index(&self) -> Result<(), TaijiError> {
         let mut index = IndexData::empty();
 
-        for type_ in &["truth", "grid", "model", "skill", "prompt"] {
+        for type_ in &["truth", "model", "skill", "prompt"] {
             let dir = self.data_dir.join(Self::type_dir_name(type_));
             if !dir.exists() {
                 continue;
@@ -432,12 +418,12 @@ impl LiluoClient {
                 match entry {
                     Ok(e) => {
                         let path = e.path();
-                        if path.extension().map_or(true, |ext| ext != "yaml") {
+                        if path.extension().is_none_or(|ext| ext != "yaml") {
                             continue;
                         }
                         if path
                             .file_name()
-                            .map_or(true, |n| n.to_string_lossy().ends_with(".tmp"))
+                            .is_none_or(|n| n.to_string_lossy().ends_with(".tmp"))
                         {
                             continue;
                         }
@@ -531,100 +517,100 @@ impl LiluoClient {
         Ok(())
     }
 
-    // ── Relation traversal (BFS) ──────────────────────────────────────
+    // ── Truth I/O (TMS convenience) ────────────────────────────────────
 
-    /// Traverse relations starting from an asset using BFS, deduplicating
-    /// visited nodes to prevent cycles.
+    /// Load a single Truth asset by ID.
     ///
-    /// `max_hops` bounds the traversal depth.  Returns a flat list of
-    /// all [`Relation`] edges discovered.
-    pub async fn traverse_relations(
-        &self,
-        start_id: &str,
-        max_hops: u32,
-    ) -> Result<Vec<Relation>, TaijiError> {
-        let mut visited: HashSet<String> = HashSet::new();
-        let mut queue: VecDeque<(String, u32)> = VecDeque::new();
-        let mut edges: Vec<Relation> = Vec::new();
-
-        queue.push_back((start_id.to_string(), 0));
-        visited.insert(start_id.to_string());
-
-        while let Some((current_id, depth)) = queue.pop_front() {
-            if depth >= max_hops {
-                continue;
+    /// Returns `None` when the asset does not exist (graceful fallback).
+    pub async fn load_truth(&self, id: &str) -> Result<Option<TruthAsset>, TaijiError> {
+        match self.load_asset("truth", id).await {
+            Ok(CognitiveAsset::Truth(t)) => Ok(Some(t)),
+            Ok(_) => {
+                tracing::warn!("asset '{id}' found in truths/ but has wrong type tag");
+                Ok(None)
             }
-
-            // Try loading as grid (only grids carry relations).
-            // Also try other types in case they have relations.
-            for type_ in &["grid", "truth", "model", "skill"] {
-                if let Ok(asset) = self.load_asset(type_, &current_id).await {
-                    match asset {
-                        CognitiveAsset::Grid(grid) => {
-                            for rel in &grid.relations {
-                                edges.push(rel.clone());
-                                if visited.insert(rel.target_id.clone()) {
-                                    queue.push_back((rel.target_id.clone(), depth + 1));
-                                }
-                            }
-                        }
-                        _ => {}
-                    }
-                    break; // Found the asset, no need to try other types
+            Err(e) => {
+                if e.to_string().contains("failed to read asset") {
+                    Ok(None)
+                } else {
+                    Err(e)
                 }
             }
         }
-
-        Ok(edges)
     }
 
-    /// Build reasoning paths from a set of starting assets.
+    /// Save a [`TruthAsset`] to the `truths/` directory.
     ///
-    /// For each start ID, performs a BFS up to `max_hops` and produces a
-    /// [`ReasoningPath`] per start node.
+    /// Thin wrapper around [`save_asset`](Self::save_asset).
+    pub async fn save_truth(&self, truth: &mut TruthAsset) -> Result<(), TaijiError> {
+        let mut asset = CognitiveAsset::Truth(truth.clone());
+        truth.header.asset_type = "truth".into();
+        self.save_asset(&mut asset).await?;
+        truth.header.version = asset.version();
+        Ok(())
+    }
+
+    /// Load all Truth assets whose `status == "active"`.
     ///
-    /// Uses the existing [`super::super::types::agent::ReasoningPath`] and
-    /// [`super::super::types::agent::Chain`] types for compatibility with
-    /// the agent system.
-    pub async fn build_reasoning_paths(
-        &self,
-        start_ids: &[String],
-        max_hops: u32,
-    ) -> Result<Vec<crate::types::agent::ReasoningPath>, TaijiError> {
-        let mut paths = Vec::new();
-
-        for start_id in start_ids {
-            let edges = self.traverse_relations(start_id, max_hops).await?;
-
-            let chains: Vec<crate::types::agent::Chain> = edges
-                .into_iter()
-                .map(|rel| crate::types::agent::Chain {
-                    source: start_id.clone(),
-                    target: rel.target_id,
-                    target_type: rel.target_type,
-                    relation_type: rel.relation_type,
-                    weight: rel.weight,
-                    interpretation: rel.interpretation,
-                })
-                .collect();
-
-            let depth = chains
-                .iter()
-                .map(|_| 1u32)
-                .max()
-                .unwrap_or(0)
-                .min(max_hops);
-
-            paths.push(crate::types::agent::ReasoningPath {
-                source_grid: start_id.clone(),
-                chains,
-                depth,
-                task_type_tags: vec![],
-            });
+    /// Skips retracted/stale truths. Returns all active truths for the
+    /// ConstraintEngine to load.
+    pub async fn load_active_truths(&self) -> Result<Vec<TruthAsset>, TaijiError> {
+        let dir = self.data_dir.join("truths");
+        let mut truths = Vec::new();
+        if !dir.exists() {
+            return Ok(truths);
         }
-
-        Ok(paths)
+        let mut read_dir = fs::read_dir(&dir).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to read truths directory: {e}"),
+            }
+        })?;
+        while let Some(entry) = read_dir.next_entry().await.transpose() {
+            match entry {
+                Ok(e) => {
+                    let path = e.path();
+                    if path.extension().is_none_or(|ext| ext != "yaml") {
+                        continue;
+                    }
+                    if path.file_name().is_none_or(|n| n.to_string_lossy().ends_with(".tmp")) {
+                        continue;
+                    }
+                    match self.load_truth_from_path(&path).await {
+                        Ok(Some(truth)) => {
+                            if truth.status == "active" || truth.status.is_empty() {
+                                truths.push(truth);
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(e) => {
+                            tracing::warn!("failed to load truth {:?}: {e}", path);
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("error reading truths directory entry: {e}");
+                }
+            }
+        }
+        Ok(truths)
     }
+
+    /// Load a single Truth asset from a specific file path.
+    async fn load_truth_from_path(&self, path: &Path) -> Result<Option<TruthAsset>, TaijiError> {
+        let content = fs::read_to_string(path).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to read truth file {:?}: {e}", path),
+            }
+        })?;
+        match serde_yaml::from_str::<CognitiveAsset>(&content) {
+            Ok(CognitiveAsset::Truth(t)) => Ok(Some(t)),
+            _ => {
+                // File might be GFM/YAML frontmatter or some other format.
+                Ok(None)
+            }
+        }
+    }
+
 
     // ── Prompt asset convenience methods ──────────────────────────────
 
@@ -692,8 +678,6 @@ impl LiluoClient {
 pub enum CognitiveAsset {
     #[serde(rename = "truth")]
     Truth(TruthAsset),
-    #[serde(rename = "grid")]
-    Grid(GridAsset),
     #[serde(rename = "model")]
     Model(ModelAsset),
     #[serde(rename = "skill")]
@@ -703,12 +687,11 @@ pub enum CognitiveAsset {
 }
 
 impl CognitiveAsset {
-    /// Return the asset type string (`"truth"`, `"grid"`, `"model"`,
+    /// Return the asset type string (`"truth"`, `"model"`,
     /// `"skill"`, `"prompt"`).
     pub fn asset_type(&self) -> String {
         match self {
             CognitiveAsset::Truth(_) => "truth".into(),
-            CognitiveAsset::Grid(_) => "grid".into(),
             CognitiveAsset::Model(_) => "model".into(),
             CognitiveAsset::Skill(_) => "skill".into(),
             CognitiveAsset::Prompt(_) => "prompt".into(),
@@ -719,7 +702,6 @@ impl CognitiveAsset {
     pub fn id(&self) -> &str {
         match self {
             CognitiveAsset::Truth(a) => &a.header.id,
-            CognitiveAsset::Grid(a) => &a.header.id,
             CognitiveAsset::Model(a) => &a.header.id,
             CognitiveAsset::Skill(a) => &a.header.id,
             CognitiveAsset::Prompt(a) => &a.id,
@@ -730,7 +712,6 @@ impl CognitiveAsset {
     pub fn version(&self) -> u32 {
         match self {
             CognitiveAsset::Truth(a) => a.header.version,
-            CognitiveAsset::Grid(a) => a.header.version,
             CognitiveAsset::Model(a) => a.header.version,
             CognitiveAsset::Skill(a) => a.header.version,
             CognitiveAsset::Prompt(a) => a.version,
@@ -741,7 +722,6 @@ impl CognitiveAsset {
     pub fn set_version(&mut self, v: u32) {
         match self {
             CognitiveAsset::Truth(a) => a.header.version = v,
-            CognitiveAsset::Grid(a) => a.header.version = v,
             CognitiveAsset::Model(a) => a.header.version = v,
             CognitiveAsset::Skill(a) => a.header.version = v,
             CognitiveAsset::Prompt(a) => a.version = v,
@@ -780,7 +760,6 @@ mod tests {
         let dir = test_dir("new_creates_dirs").await;
         let _client = LiluoClient::new(&dir).await.unwrap();
         assert!(dir.join("truths").exists());
-        assert!(dir.join("grids").exists());
         assert!(dir.join("models").exists());
         assert!(dir.join("skills").exists());
         assert!(dir.join("index.yaml").exists());
@@ -812,6 +791,8 @@ mod tests {
                 version: 0, // will be set to 1 on save
             },
             severity: "Hard".into(),
+            status: "active".into(),
+            justification: None,
         });
 
         client.save_asset(&mut asset).await.unwrap();
@@ -849,6 +830,8 @@ mod tests {
                 version: 0,
             },
             severity: "Soft".into(),
+            status: "active".into(),
+            justification: None,
         });
 
         client.save_asset(&mut asset).await.unwrap();
@@ -863,44 +846,6 @@ mod tests {
         cleanup(&dir).await;
     }
 
-    #[tokio::test]
-    async fn test_save_and_load_grid_with_relations() {
-        let dir = test_dir("grid_relations").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
-
-        let mut grid = CognitiveAsset::Grid(GridAsset {
-            header: AssetHeader {
-                asset_type: "grid".into(),
-                layer: 3,
-                id: "grid-001".into(),
-                name: "Test Grid".into(),
-                description: "Grid with relations".into(),
-                tags: vec!["test".into()],
-                confidence: 0.8,
-                version: 0,
-            },
-            relations: vec![Relation {
-                target_id: "truth-001".into(),
-                target_type: "truth".into(),
-                relation_type: "causes".into(),
-                weight: 0.7,
-                interpretation: "leads to".into(),
-            }],
-        });
-
-        client.save_asset(&mut grid).await.unwrap();
-
-        let loaded = client.load_asset("grid", "grid-001").await.unwrap();
-        match loaded {
-            CognitiveAsset::Grid(g) => {
-                assert_eq!(g.relations.len(), 1);
-                assert_eq!(g.relations[0].relation_type, "causes");
-            }
-            _ => panic!("expected Grid asset"),
-        }
-
-        cleanup(&dir).await;
-    }
 
     #[tokio::test]
     async fn test_search_by_tags() {
@@ -920,6 +865,8 @@ mod tests {
                 version: 0,
             },
             severity: "Hard".into(),
+            status: "active".into(),
+            justification: None,
         });
         client.save_asset(&mut asset).await.unwrap();
 
@@ -961,141 +908,7 @@ mod tests {
         cleanup(&dir).await;
     }
 
-    #[tokio::test]
-    async fn test_traverse_relations_bfs() {
-        let dir = test_dir("traverse_bfs").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
 
-        // Save grid-0 with relation to grid-1.
-        let mut g0 = CognitiveAsset::Grid(GridAsset {
-            header: AssetHeader {
-                asset_type: "grid".into(),
-                layer: 3,
-                id: "grid-0".into(),
-                name: "Root".into(),
-                description: "".into(),
-                tags: vec![],
-                confidence: 0.8,
-                version: 0,
-            },
-            relations: vec![Relation {
-                target_id: "grid-1".into(),
-                target_type: "grid".into(),
-                relation_type: "causes".into(),
-                weight: 0.9,
-                interpretation: "triggers".into(),
-            }],
-        });
-        client.save_asset(&mut g0).await.unwrap();
-
-        // Save grid-1 with relation to grid-2.
-        let mut g1 = CognitiveAsset::Grid(GridAsset {
-            header: AssetHeader {
-                asset_type: "grid".into(),
-                layer: 3,
-                id: "grid-1".into(),
-                name: "Mid".into(),
-                description: "".into(),
-                tags: vec![],
-                confidence: 0.8,
-                version: 0,
-            },
-            relations: vec![Relation {
-                target_id: "grid-2".into(),
-                target_type: "grid".into(),
-                relation_type: "inhibits".into(),
-                weight: -0.5,
-                interpretation: "blocks".into(),
-            }],
-        });
-        client.save_asset(&mut g1).await.unwrap();
-
-        // Save grid-2 (leaf).
-        let mut g2 = CognitiveAsset::Grid(GridAsset {
-            header: AssetHeader {
-                asset_type: "grid".into(),
-                layer: 3,
-                id: "grid-2".into(),
-                name: "Leaf".into(),
-                description: "".into(),
-                tags: vec![],
-                confidence: 0.8,
-                version: 0,
-            },
-            relations: vec![],
-        });
-        client.save_asset(&mut g2).await.unwrap();
-
-        // Traverse from grid-0 with 1 hop — should get only grid-0→grid-1.
-        let edges = client
-            .traverse_relations("grid-0", 1)
-            .await
-            .unwrap();
-        assert_eq!(edges.len(), 1);
-
-        // Traverse from grid-0 with 2 hops — should get both edges.
-        let edges = client
-            .traverse_relations("grid-0", 2)
-            .await
-            .unwrap();
-        assert_eq!(edges.len(), 2);
-
-        cleanup(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_build_reasoning_paths() {
-        let dir = test_dir("reasoning_paths").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
-
-        // Create a simple chain: grid-a → grid-b
-        let mut ga = CognitiveAsset::Grid(GridAsset {
-            header: AssetHeader {
-                asset_type: "grid".into(),
-                layer: 3,
-                id: "grid-a".into(),
-                name: "Source".into(),
-                description: "".into(),
-                tags: vec!["test".into()],
-                confidence: 0.8,
-                version: 0,
-            },
-            relations: vec![Relation {
-                target_id: "grid-b".into(),
-                target_type: "grid".into(),
-                relation_type: "causes".into(),
-                weight: 0.6,
-                interpretation: "activates".into(),
-            }],
-        });
-        client.save_asset(&mut ga).await.unwrap();
-
-        let mut gb = CognitiveAsset::Grid(GridAsset {
-            header: AssetHeader {
-                asset_type: "grid".into(),
-                layer: 3,
-                id: "grid-b".into(),
-                name: "Target".into(),
-                description: "".into(),
-                tags: vec![],
-                confidence: 0.8,
-                version: 0,
-            },
-            relations: vec![],
-        });
-        client.save_asset(&mut gb).await.unwrap();
-
-        let paths = client
-            .build_reasoning_paths(&["grid-a".to_string()], 3)
-            .await
-            .unwrap();
-        assert_eq!(paths.len(), 1);
-        assert_eq!(paths[0].source_grid, "grid-a");
-        assert_eq!(paths[0].chains.len(), 1);
-        assert_eq!(paths[0].chains[0].target, "grid-b");
-
-        cleanup(&dir).await;
-    }
 
     #[tokio::test]
     async fn test_index_rebuild_on_corruption() {
@@ -1115,6 +928,8 @@ mod tests {
                 version: 0,
             },
             severity: "Soft".into(),
+            status: "active".into(),
+            justification: None,
         });
         client.save_asset(&mut asset).await.unwrap();
 

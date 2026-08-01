@@ -27,7 +27,6 @@ pub struct TraceRecord {
     pub input: Value,
     pub output: Value,
     pub degraded: bool,
-    pub reasoning_path_ids: Option<Vec<String>>,
     pub constraint_violations: Option<Vec<String>>,
 }
 
@@ -110,7 +109,7 @@ impl TraceWriter {
                 Value::Object(new_map)
             }
             Value::Array(arr) => {
-                Value::Array(arr.iter().map(|v| Self::redact_sensitive(v)).collect())
+                Value::Array(arr.iter().map(Self::redact_sensitive).collect())
             }
             Value::String(s) => {
                 if key_value_re.is_match(s) {
@@ -190,5 +189,54 @@ impl TraceWriter {
         }
 
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Persistence helpers — atomic JSON save + graceful load
+// Used by TpnCycle, FittingAgent, CausalAgent, MetaAgent for checkpoint
+// and conversation-history persistence.
+// ---------------------------------------------------------------------------
+
+/// Atomically write a serializable value to a JSON file using
+/// temp-file + rename.  If the write is interrupted (crash, SIGKILL),
+/// the target file is never partially written — only the temp file is.
+pub fn save_json_atomic<T: Serialize>(value: &T, path: &Path) -> Result<(), std::io::Error> {
+    let tmp = path.with_extension("tmp");
+    // Ensure parent directory exists.
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    {
+        let file = std::fs::File::create(&tmp)?;
+        serde_json::to_writer(file, value)?;
+    }
+    std::fs::rename(&tmp, path)?;
+    Ok(())
+}
+
+/// Load a JSON file and deserialize it.  Returns `Ok(Some(T))` on success,
+/// `Ok(None)` if the file does not exist, or `Err(io_error)` on I/O failure.
+/// Malformed JSON also returns `Ok(None)` with a logged warning — callers
+/// should treat this as "file unavailable" and degrade gracefully.
+pub fn load_json_optional<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, std::io::Error> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let content = match std::fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
+    match serde_json::from_str(&content) {
+        Ok(v) => Ok(Some(v)),
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "Failed to parse JSON file, treating as unavailable"
+            );
+            Ok(None)
+        }
     }
 }

@@ -15,10 +15,13 @@ use tokio_util::sync::CancellationToken;
 use crate::agents::factory::AgentFactory;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
+use crate::orchestration::event_bus;
 use crate::orchestration::tpn_cycle::TpnCycle;
 use crate::types::agent::{AgentMode, ExternalContext};
 use crate::types::execution::EngineContext;
+use crate::types::frontend::NodeStatus;
 use crate::types::task::{Task, TaskStatus, TPNResult};
+use crate::ws::types::TaskEvent;
 
 /// Thin wrapper around the root-level TPN execution loop.
 ///
@@ -43,7 +46,7 @@ impl RecursiveRunner {
     }
 
     /// Execute a task description end-to-end with optional external context
-    /// from a frontend agent (e.g. pi_agent_rust via MCP).
+    /// from a frontend agent (e.g. any MCP-compatible frontend agent).
     ///
     /// Same as [`execute`](Self::execute) but also materialises the external
     /// context (files, tool results, session summary) into `task_dir/context/`
@@ -97,6 +100,14 @@ impl RecursiveRunner {
         std::fs::write(&meta_path, serde_json::to_string_pretty(&task)?)
             .map_err(TaijiError::IO)?;
 
+        // ── 3.1 Broadcast task creation (frontend auto-popup) ─────────
+        event_bus::emit_event(TaskEvent::TaskCreated {
+            task_id: task_id.clone(),
+            description: description.to_string(),
+            parent_id: None,
+            depth: 0,
+        });
+
         // ── 4. EngineContext at root ───────────────────────────────────
         let mut engine_ctx = EngineContext {
             task_id: task_id.clone(),
@@ -115,7 +126,7 @@ impl RecursiveRunner {
         let timeout_secs = self.config.runtime.exec_timeout;
         let result = timeout(
             Duration::from_secs(timeout_secs),
-            tpn_cycle.execute(description, None, &mut engine_ctx, AgentMode::Orchestration),
+            tpn_cycle.execute(description, None, &mut engine_ctx, AgentMode::Orchestration, None),
         )
         .await
         .map_err(|_| TaijiError::Other("Task execution timed out".into()))??;
@@ -124,6 +135,13 @@ impl RecursiveRunner {
         task.status = TaskStatus::Completed;
         std::fs::write(&meta_path, serde_json::to_string_pretty(&task)?)
             .map_err(TaijiError::IO)?;
+
+        // ── 7.1 Broadcast completion (frontend turns node green) ──────
+        event_bus::emit_event(TaskEvent::TaskStatusChanged {
+            task_id: task_id.clone(),
+            old_status: NodeStatus::Running,
+            new_status: NodeStatus::Converged,
+        });
 
         tracing::info!(task_id, "Task completed successfully");
         Ok(result)

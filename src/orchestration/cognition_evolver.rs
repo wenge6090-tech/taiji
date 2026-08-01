@@ -1,34 +1,22 @@
-//! CognitionEvolver — DMN cognitive evolution (δ₀-δ₃).
+//! CognitionEvolver — DMN cognitive evolution (δ₀-δ₂).
 //! Called by DMN Consumer background task.
 //! See AGENTS.md §6 for detailed rules.
 //!
 //! Operations:
 //! - δ₀: Prune low-confidence nodes (confidence < threshold).
 //! - δ₁: L1 skill tuning (update success/fail counts).
-//! - δ₂: L2 Bayesian confidence update.
-//! - δ₃: L3 grid rewiring (relation weight adjustments).
-//! - evolve(): Run δ₀→δ₃ in sequence, producing an EvolutionReport.
+//! - δ₂: L2 Bayesian confidence update (预留).
+//! - evolve(): Run δ₀→δ₂ in sequence, producing an EvolutionReport.
 //!
-//! # 理络 integration
-//! Evolution results are written to the 理络 knowledge store as cognitive
-//! assets (Grid type) so they can be revisited by future TPN cycles.
+//! # 归藏 integration
+//! Evolution results are written back to the 归藏 knowledge store as
+//! metadata placeholders (V22: grids/ removed — no asset is persisted).
 
 use crate::infra::error::TaijiError;
 use crate::infra::knowledge::LiluoClient;
 use crate::infra::trace::TraceRecord;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
-
-/// Adjustment to a single relation during grid rewiring (δ₃).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RelationAdjustment {
-    /// Target cognitive asset ID.
-    pub target_id: String,
-    /// Type of the relation being adjusted (e.g. "causes", "inhibits").
-    pub relation_type: String,
-    /// Signed delta to apply to the relation weight, in range [-1.0, 1.0].
-    pub delta: f64,
-}
 
 /// Aggregate report produced by a full evolution cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,7 +27,7 @@ pub struct EvolutionReport {
     pub skills_tuned: u64,
     /// Number of Bayesian model updates performed.
     pub models_updated: u64,
-    /// Number of grid rewiring operations applied.
+    /// Number of grid rewiring operations applied (V22: always 0).
     pub grids_rewired: u64,
     /// Aggregate confidence delta across all updated models.
     pub confidence_delta: f64,
@@ -47,15 +35,13 @@ pub struct EvolutionReport {
 
 /// DMN Cognitive Evolution Engine.
 ///
-/// Drives the four evolution operators (δ₀–δ₃) over the 理络 knowledge store.
-/// All writes go through [`LiluoClient`] which handles version++ and index
-/// maintenance automatically.
+/// Drives the evolution operators (δ₀–δ₂) over the 归藏 knowledge store.
 pub struct CognitionEvolver {
     liluo: Arc<LiluoClient>,
 }
 
 impl CognitionEvolver {
-    /// Create a new evolver with a reference to the 理络 client.
+    /// Create a new evolver with a reference to the 归藏 client.
     pub fn new(liluo: Arc<LiluoClient>) -> Self {
         Self { liluo }
     }
@@ -71,7 +57,7 @@ impl CognitionEvolver {
             "[δ₀] prune_low_confidence: would remove nodes with confidence < {threshold}",
         );
 
-        // In a production implementation this would query the 理络 via
+        // In a production implementation this would query the 归藏 via
         // `search_by_tags()` or directory scan, then delete assets whose
         // `confidence` is below threshold. Here we log and return 0.
         Ok(0)
@@ -115,38 +101,11 @@ impl CognitionEvolver {
         Ok(new_confidence)
     }
 
-    /// δ₃: L3 grid rewiring — adjust relation weights.
-    ///
-    /// Applies the given signed deltas to relations of the specified grid node.
-    /// Each delta is clamped to [-1.0, 1.0] before logging.
-    pub async fn grid_rewire(
-        &self,
-        grid_id: &str,
-        relation_adjustments: &[RelationAdjustment],
-    ) -> Result<(), TaijiError> {
-        for adj in relation_adjustments {
-            let clamped_delta = adj.delta.clamp(-1.0, 1.0);
-            tracing::info!(
-                knowledge_dir = %self.liluo.knowledge_dir().display(),
-                grid_id = %grid_id,
-                target_id = %adj.target_id,
-                relation_type = %adj.relation_type,
-                delta = clamped_delta,
-                "[δ₃] grid_rewire: grid={grid_id} target={} type={} delta={clamped_delta:.4}",
-                adj.target_id,
-                adj.relation_type,
-            );
-        }
-
-        Ok(())
-    }
-
-    /// Run a full evolution cycle: δ₀ → δ₁ → δ₂ → δ₃.
+    /// Run a full evolution cycle: δ₀ → δ₁ → δ₂.
     ///
     /// * δ₀ — prunes low-confidence nodes (threshold 0.1 per AGENTS.md §6).
     /// * δ₁ — replays trace records to tune skills (no-op when `trace_records` is empty).
     /// * δ₂ — placeholder for Bayesian model updates driven by trace data.
-    /// * δ₃ — placeholder for grid rewiring driven by trace data.
     ///
     /// Returns an `EvolutionReport` summarising the cycle.
     pub async fn evolve(
@@ -187,8 +146,7 @@ impl CognitionEvolver {
             }
         }
 
-        // δ₃: Grid rewiring (placeholder — no trace-driven adjustments yet).
-        self.grid_rewire(task_id, &[]).await?;
+        // δ₃ removed (V22): grid rewiring deleted — grids_rewired always 0.
         let grids_rewired = 0u64;
 
         let report = EvolutionReport {
@@ -221,51 +179,25 @@ impl CognitionEvolver {
         Ok(report)
     }
 
-    /// Write an evolution record as a 理络 cognitive asset.
+    /// Write an evolution record back to the 归藏 knowledge store.
     ///
-    /// Stores the evolution report as a Grid asset in the knowledge store so
-    /// it can be discovered by future TPN cycles via BFS traversal.
+    /// V22: the `grids/` layer and GridAsset were removed — evolution results
+    /// are no longer persisted as cognitive assets. This is a log-only
+    /// placeholder (the report is already emitted via tracing in `evolve`).
+    /// Future layers (e.g. `prompts/` metadata) may consume this hook.
     pub async fn write_evolution(
         &self,
         task_id: &str,
         report: &EvolutionReport,
     ) -> Result<(), TaijiError> {
-        use crate::infra::knowledge::{
-            AssetHeader, CognitiveAsset, GridAsset,
-        };
-
-        let evolution_id = format!("evolution::{task_id}");
-        let mut grid = CognitiveAsset::Grid(GridAsset {
-            header: AssetHeader {
-                asset_type: "grid".into(),
-                layer: 3,
-                id: evolution_id.clone(),
-                name: format!("Evolution: {task_id}"),
-                description: format!(
-                    "DMN evolution cycle: pruned={} tuned={} updated={} rewired={} Δ={:.4}",
-                    report.pruned,
-                    report.skills_tuned,
-                    report.models_updated,
-                    report.grids_rewired,
-                    report.confidence_delta,
-                ),
-                tags: vec![
-                    "evolution".into(),
-                    "dmn".into(),
-                ],
-                confidence: 0.9,
-                version: 0, // set to 1 by save_asset
-            },
-            relations: vec![],
-        });
-
-        self.liluo.save_asset(&mut grid).await?;
-
         tracing::info!(
             task_id,
-            evolution_id = %evolution_id,
-            evolution = ?report,
-            "Evolution written to 理络 knowledge store",
+            pruned = report.pruned,
+            skills_tuned = report.skills_tuned,
+            models_updated = report.models_updated,
+            grids_rewired = report.grids_rewired,
+            confidence_delta = report.confidence_delta,
+            "Evolution record for task={task_id} (V22: no asset persisted — grids/ removed)",
         );
 
         Ok(())
@@ -335,25 +267,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_grid_rewire() {
-        let (evolver, dir) = test_evolver().await;
-        let adjustments = vec![
-            RelationAdjustment {
-                target_id: "node_a".to_string(),
-                relation_type: "causes".to_string(),
-                delta: 0.3,
-            },
-            RelationAdjustment {
-                target_id: "node_b".to_string(),
-                relation_type: "inhibits".to_string(),
-                delta: -0.2,
-            },
-        ];
-        evolver.grid_rewire("grid_001", &adjustments).await.unwrap();
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
     async fn test_evolve_empty_traces() {
         let (evolver, dir) = test_evolver().await;
         let report = evolver.evolve("task_empty", &[]).await.unwrap();
@@ -379,7 +292,6 @@ mod tests {
                 input: serde_json::json!({}),
                 output: serde_json::json!({}),
                 degraded: false,
-                reasoning_path_ids: None,
                 constraint_violations: None,
             },
             TraceRecord {
@@ -393,7 +305,6 @@ mod tests {
                 input: serde_json::json!({}),
                 output: serde_json::json!({}),
                 degraded: false,
-                reasoning_path_ids: None,
                 constraint_violations: None,
             },
         ];
@@ -404,16 +315,26 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_evolve_writes_to_knowledge_store() {
+    async fn test_evolve_no_persisted_asset() {
         let (evolver, dir) = test_evolver().await;
         let _report = evolver.evolve("write_test", &[]).await.unwrap();
 
-        // The evolution report should have been saved as a Grid asset.
-        let loaded = evolver
-            .liluo
-            .load_asset("grid", "evolution::write_test")
-            .await;
-        assert!(loaded.is_ok(), "evolution asset should exist in knowledge store");
+        // V22: grids/ removed — evolution must NOT persist any asset.
+        let mut dir_exists = tokio::fs::read_dir(&dir).await.unwrap();
+        let mut assets: Vec<String> = Vec::new();
+        while let Ok(Some(entry)) = dir_exists.next_entry().await {
+            assets.push(entry.file_name().to_string_lossy().to_string());
+        }
+        assert!(
+            assets.iter().all(|n| {
+                n == "truths"
+                    || n == "models"
+                    || n == "skills"
+                    || n == "prompts"
+                    || n == "index.yaml"
+            }),
+            "unexpected files written during evolve: {assets:?}"
+        );
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -431,18 +352,5 @@ mod tests {
         let deserialized: EvolutionReport = serde_json::from_str(&json).unwrap();
         assert_eq!(deserialized.pruned, 3);
         assert_eq!(deserialized.confidence_delta, 0.42);
-    }
-
-    #[test]
-    fn test_relation_adjustment_serde() {
-        let adj = RelationAdjustment {
-            target_id: "n_001".to_string(),
-            relation_type: "causes".to_string(),
-            delta: 0.5,
-        };
-        let json = serde_json::to_string(&adj).unwrap();
-        let deserialized: RelationAdjustment = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.target_id, "n_001");
-        assert!((deserialized.delta - 0.5).abs() < 1e-10);
     }
 }
