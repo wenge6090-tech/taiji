@@ -29,6 +29,7 @@ use crate::agents::tools::skills::SkillRegistry;
 use crate::hooks::safety::SafetyHook;
 use crate::infra::config::SafetyConfig;
 use crate::infra::error::TaijiError;
+use crate::infra::json_util::parse_llm_json;
 use crate::infra::knowledge::LiluoClient;
 use crate::infra::provider::ProviderRegistry;
 use crate::infra::trace::save_json_atomic;
@@ -176,7 +177,7 @@ impl MetaAgentBuilder {
         })?;
 
         // ── 4. Parse response into MetaContext ──
-        let ctx = match serde_json::from_str::<MetaContext>(response.as_ref()) {
+        let ctx = match parse_llm_json::<MetaContext>(response.as_ref()) {
             Ok(ctx) => {
                 tracing::debug!(
                     task_id = %self.task_id,

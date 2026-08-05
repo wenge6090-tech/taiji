@@ -22,6 +22,7 @@ use rig::client::CompletionClient;
 use rig::completion::Prompt;
 
 use crate::infra::error::TaijiError;
+use crate::infra::json_util::parse_llm_json;
 use crate::infra::knowledge::LiluoClient;
 use crate::infra::provider::ProviderRegistry;
 use crate::types::agent::MetaContext;
@@ -132,7 +133,7 @@ impl PlanBuilder {
         })?;
 
         // Parse the LLM response as PlanSummary JSON
-        let plan: PlanSummary = serde_json::from_str(response.as_ref()).map_err(|e| {
+        let plan: PlanSummary = parse_llm_json(response.as_ref()).map_err(|e| {
             TaijiError::StructuredOutputParseFailed {
                 context: format!(
                     "Failed to parse PlanSummary from LLM response: {e}. Raw: {response}"

@@ -36,6 +36,7 @@ use crate::agents::tools::skills::SkillRegistry;
 use crate::hooks::safety::SafetyHook;
 use crate::infra::config::SafetyConfig;
 use crate::infra::error::TaijiError;
+use crate::infra::json_util::parse_llm_json;
 use crate::infra::trace::save_json_atomic;
 use crate::infra::provider::ProviderRegistry;
 use crate::orchestration::constraint_engine::ConstraintEngine;
@@ -289,7 +290,7 @@ impl CausalVerifyAgentBuilder {
 
         // Parse structured output into VerificationReport
         let report: VerificationReport =
-            serde_json::from_str(response.as_ref()).map_err(|e| {
+            parse_llm_json(response.as_ref()).map_err(|e| {
                 TaijiError::StructuredOutputParseFailed {
                     context: format!(
                         "Failed to parse VerificationReport from LLM response: {e}. Raw: {response}"
@@ -547,7 +548,7 @@ impl CausalConvergeAgentBuilder {
         })?;
 
         let decision: ConvergenceDecision =
-            serde_json::from_str(response.as_ref()).map_err(|e| {
+            parse_llm_json(response.as_ref()).map_err(|e| {
                 TaijiError::StructuredOutputParseFailed {
                     context: format!(
                         "Failed to parse ConvergenceDecision from LLM response: {e}. Raw: {response}"

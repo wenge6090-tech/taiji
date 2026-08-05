@@ -199,3 +199,9 @@ TpnCycle 恢复历史时严格按此顺序：
 
 - **带工具必有安全钩子（硬约束）**：任何注册工具的 Agent 必须挂载 SafetyHook（同一 `Arc<SafetyHook>` 单例）。MetaAgent 注册只读收集工具 read/search/webfetch；CausalAgent verify/converge 注册 read/webfetch；执行工具（write/bash/recursive_decompose/causal_verify）仅 Fitting 持有，Meta/Causal 不得注册。
 - Rig agent 构建保持**一次链式调用**：`preamble(...).default_max_turns(...).hook(...).tools(...)` 一次 build 完成，不得分多次构建或中途覆盖配置；收集工具从 `SkillRegistry` 按名过滤克隆（`matches!(t.name(), "read" | ...)`），带工具 agent 的 `max_turns` 需 ≥3（Meta 默认 6，允许收集→提取工具循环）。
+
+## 12. LLM 结构化输出解析（V25 冒烟实测修复）
+
+- **LLM 响应解析一律走 `src/infra/json_util.rs` 的 `parse_llm_json<T>`**，禁止直接 `serde_json::from_str` 解析 LLM 输出文本（冒烟实测发现 LLM 常在 JSON 前后输出叙述文本或包 ` ```json ` 围栏，直接解析抛 `StructuredOutputParseFailed` 导致 TPN 任务失败）。
+- `parse_llm_json` 四级容错顺序（勿改动）：①直接 `from_str` → ②` ```json ` 围栏提取 + 内容内首尾大括号切片 → ③全文首个 `{` 到最后一个 `}` 切片 → ④返回原始完整文本的解析错误（调用方包装 `StructuredOutputParseFailed` 时保留 Raw 供诊断）。
+- 覆盖范围：MetaAgent（MetaContext）、CausalAgent verify/converge（VerificationReport/ConvergenceDecision）、PlanBuilder（PlanSummary）；新增 LLM 结构化输出解析点必须复用此函数。`serde_json::from_str` 仅允许用于非 LLM 输出（trace/ws/配置文件等本地数据）；causal.rs 文档注释中的旧示例为历史说明可豁免，不得照抄。
