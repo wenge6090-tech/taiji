@@ -1,78 +1,89 @@
-# 实现计划 — 生产就绪安全整改（三项阻断风险）
+# 实现计划 — 阶段 B：Meta/Causal 相位「LLM + 收集工具」落地（V25 蓝图对齐）
 
 ## 目标
-消除 taiji 仓库生产就绪的三项 🔴 阻断风险：① API key 泄露进 git 历史；② 敏感路径未被 .gitignore 覆盖；③ 无安全的本地密钥存放位。**范围仅限安全项**，不动业务代码、不启动 DMN、不补 CI（均属后续工程化阶段）。
 
-## 背景事实（已审计确认）
-- `taiji.config.json` 含真实 key `sk-REVOKED-3d9f…(脱敏)`，已被 git 跟踪（`HEAD:taiji.config.json` 可检出），历史 7 个 commit 中均存在。
-- 根 `.gitignore` 仅 1 行 `/target`；`taiji-web/.gitignore` 已正确忽略 node_modules/dist。
-- `.taiji/knowledge/prompts/*.yaml` 6 个 seed 资产**有意跟踪**（勿误删）；`.taiji/chat/`、`.taiji/tasks/`、`.taiji/knowledge/index.yaml` 当前未跟踪（防误提交需忽略）。
-- 无 git remote（本地仓库），历史清洗无推送冲突，但仍需备份防数据丢失。
-- 配置搜索顺序（main.rs `load_config`）：`.taiji/config.json` → `taiji.config.json`；api_key 为空时跳过该路径继续找下一个。
+按用户框架要求「Meta 与 Causal 都需要 LLM 与收集信息的工具，才能更新权重、验证收敛」+「需要能上网查询网络信息核实」，将 MetaAgent / CausalAgent 从「无工具」升级为「LLM + 只读收集工具（read / search / webfetch）+ SafetyHook 挂载」，使蓝图 V25（§1.2 权限面、§8.2 权限同构、§8.5 Hook 安全模型）与代码一致。**webfetch 归入收集工具**（只读网络信息获取，不改变世界），write / bash / recursive_decompose / causal_verify 为仅 Fitting 持有的执行工具。
 
-## 任务清单
+**前置状态**：A1 安全验证、A2 WorkerPool 整改已完成并验收（144 passed / 0 failed / 9 ignored）。本计划独立于此，不重复。
 
-### 阶段 1：备份（不可跳过）
-- [ ] 镜像备份仓库：`git clone --mirror . /tmp/taiji-backup-<date>.git`（或 `cp -r .git`），确认备份存在后再进行任何历史重写。
+## 现状事实（已审计确认，2026-08-05）
 
-### 阶段 2：密钥迁移与模板化
-- [ ] 创建 `.taiji/config.json`（新文件，将被忽略）：从 `taiji.config.json` 复制完整内容，**保留真实 api_key**，作为本地运行配置。
-- [ ] 将 `taiji.config.json` 改造为**仓库内模板**：
-  - `api_key` → 占位符 `"sk-REPLACE_WITH_REAL_KEY"`（非空，避免硬错误语义混乱；运行时会走 `.taiji/config.json` 优先路径）
-  - `workspace` → 占位符说明（机器特定路径不适合提交）
-  - `mcp_servers[].args` 中 `/home/vingo/mimo-mcp` → 说明为机器特定路径（保留示例，注明按环境调整）
-  - 文件头注释说明"这是模板，真实配置放 .taiji/config.json"
-- [ ] 验证：`load_config` 逻辑确认 `.taiji/config.json` 存在时优先于模板（读 main.rs 确认逻辑不变）。
+- **LLM 已存在，注释过时**：`src/agents/causal.rs` `verify()`（L236-277）与 `converge()`（L471-504）**已真实调用 LLM**（`agent.prompt` → serde 解析 `VerificationReport`/`ConvergenceDecision`），但文档注释仍写"degraded mode（跳过 LLM）"——过时注释需修正。`src/agents/meta.rs` `run()`（L126-136）也已调 LLM 做 MetaContext 编排。
+- **真正的缺口 = 收集工具 + 安全钩子**：
+  - MetaAgent：Rig agent 无任何工具注册（`max_turns=1` 单次提取，L129 `.default_max_turns(1)`），LLM 无法主动收集任务上下文/父层 deliverables/归藏资产
+  - CausalAgent：verify/converge 的 agent 均未注册工具（L237-242、L472-477 只有 preamble/max_tokens/max_turns/build），**但系统提示模板明确要求「MUST use the read tool to open each referenced file」**（causal.rs L315/L351/L541/L572）——模板要求与工具注册脱节，LLM 无法真正逐文件验证
+  - 三相位均未挂 SafetyHook（factory 中 `Arc<SafetyHook>` 单例已存在，仅 FittingAgent 挂载）
+- **追踪约束**（§7.2，不改）：元/阴相位用手动 TraceWriter 单条记录，**Meta/Causal 不加 TraceHook**，仅加 SafetyHook。
+- **测试现状**：causal.rs LLM 测试已 `#[ignore]`（L630/L666）；非 ignore 的 `test_verify_empty_summary_triggers_back_to_meta`（L645）走 ConstraintEngine Hard 短路不调 LLM——144 基线无真实 LLM 调用。
+- factory.rs：`safety_hook: Arc<SafetyHook>`（L56），`create_meta_agent`（L111）构造 `MetaAgentBuilder::new(task_id, liluo, providers, model)` 后直接返回——需链式接线。
+- 命名约束（AGENTS.md §1）：新代码用 `GuizangClient`/`guizang`/「归藏」，不改既有 `LiluoClient` 旧名。
 
-### 阶段 3：.gitignore 补充（根目录）
-- [ ] 追加到根 `.gitignore`：
-  ```
-  # 敏感配置（含 API key）
-  /taiji.config.json
-  /.taiji/config.json
-  # 运行时数据
-  /.taiji/chat/
-  /.taiji/tasks/
-  /.taiji/knowledge/index.yaml
-  ```
-- [ ] **不得**忽略 `.taiji/knowledge/prompts/`（seed 资产有意跟踪）。
+## 模块清单
 
-### 阶段 4：git 停止跟踪 + 收尾提交
-- [ ] `git rm --cached taiji.config.json`（保留工作区文件，仅解除跟踪）。
-- [ ] 提交当前全部工作区改动（40+ 文件，V24 遗留）：`git add -A && git commit -m "chore: 生产安全整改 — 密钥移出版本控制 + .gitignore 补全"`。
-  - ⚠️ 此步是 filter-repo 的前提（工作区必须干净），同时也解决"重构半途未提交"风险。
+- [ ] `src/agents/meta.rs` — MetaAgentBuilder 加收集工具 + SafetyHook + max_turns 提升
+- [ ] `src/agents/causal.rs` — CausalVerifyAgentBuilder / CausalConvergeAgentBuilder 加 read 工具 + SafetyHook；修正过时注释
+- [ ] `src/agents/factory.rs` — create_meta_agent / create_causal_verify_agent / create_causal_converge_agent 接线 SafetyHook（与 create_fitting_agent 同一单例 Arc）
+- [ ] `src/agents/meta.rs` / `src/agents/causal.rs` 测试 — 新增 builder 配置断言测试；确认既有非 ignore 测试仍不触发真实 LLM
 
-### 阶段 5：git 历史清洗（破坏性操作，备份完成后执行）
-- [ ] 安装工具：`pip install git-filter-repo`（如不可用则备选 `git filter-branch --index-filter 'git rm --cached --ignore-unmatch taiji.config.json' -- --all`）。
-- [ ] 执行：`git filter-repo --path taiji.config.json --invert-paths --force`，从全部历史 commit 中移除该文件。
-- [ ] 彻底清除残留对象：`git reflog expire --expire=now --all && git gc --prune=now --aggressive`。
-- [ ] 验证历史已清洗：`git log --all --oneline -- taiji.config.json` 无输出；`git rev-list --all | xargs git grep -l 'sk-xxxx'` 无匹配。
+## 接口签名（关键变更）
 
-### 阶段 6：密钥轮换（人工步骤，需要用户操作）
-- [ ] 用户登录 DeepSeek 平台，**吊销**旧 key `sk-REVOKED-3d9f…(脱敏)`（已泄露进过 git 历史，轮换不可省）。
-- [ ] 生成新 key，写入 `.taiji/config.json` 的 `llm.api_key`（该文件已被 git 忽略，安全）。
-- [ ] 旧 key 即使历史已清洗，也因"可能曾被他人接触"必须轮换——清洗是防扩散，轮换是根治。
+```rust
+// ── src/agents/meta.rs ──
+pub struct MetaAgentBuilder {
+    task_id: String,
+    liluo: Arc<LiluoClient>,
+    provider: Arc<ProviderRegistry>,
+    model: String,
+    max_turns: u32,                      // 默认 1 → 6（允许工具循环后二次提取）
+    task_dir: Option<PathBuf>,
+    safety_hook: Option<Arc<SafetyHook>>, // 新增
+}
 
-### 阶段 7：验证（verify agent 执行）
-- [ ] `git ls-files | grep -E 'taiji\.config|\.taiji/(chat|tasks)'` 输出为空。
-- [ ] `git status --short` 干净（除被忽略文件）。
-- [ ] `git log --all --oneline -- taiji.config.json` 无输出。
-- [ ] `git grep` 全历史无 `sk-xxxx` 匹配。
-- [ ] `cargo test --lib` 仍 142 passed / 0 failed / 9 ignored（无回归）。
-- [ ] 新 key 配置可被 `load_config` 正常加载（`.taiji/config.json` 优先）。
+impl MetaAgentBuilder {
+    pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self; // 新增 setter
+    pub fn max_turns(mut self, n: u32) -> Self;                  // 新增 setter（默认值 6）
+    // run() 内 agent 构建：.tool(read).tool(search) + safety_hook 为 Some 时 .hook(...)
+}
+
+// ── src/agents/causal.rs ──
+pub struct CausalVerifyAgentBuilder {
+    // ...既有字段
+    safety_hook: Option<Arc<SafetyHook>>, // 新增
+}
+pub struct CausalConvergeAgentBuilder {
+    // ...既有字段
+    safety_hook: Option<Arc<SafetyHook>>, // 新增
+}
+// 两 builder 各新增 pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self
+// verify()/converge() 内 agent 构建：.tool(ReadTool) + safety_hook 为 Some 时 .hook(...)
+
+// ── src/agents/factory.rs（接线，签名不变）──
+create_meta_agent:        MetaAgentBuilder::new(...).max_turns(6).safety_hook(self.safety_hook.clone())
+create_causal_verify_agent:   ...builder.safety_hook(self.safety_hook.clone())
+create_causal_converge_agent: ...builder.safety_hook(self.safety_hook.clone())
+```
 
 ## 依赖顺序
-1. 阶段 1 备份 → 2. 阶段 2 密钥迁移（依赖 .gitignore 规划，先做无妨）→ 3. 阶段 3 .gitignore → 4. 阶段 4 git rm --cached + 收尾 commit（**filter-repo 前置**）→ 5. 阶段 5 历史清洗（依赖阶段 1 备份 + 阶段 4 干净工作区）→ 6. 阶段 6 用户人工轮换 key（可与阶段 5 并行）→ 7. 阶段 7 验证（全部完成后）。
 
-## 明确不做（本次范围外）
-- 不补 CI / Dockerfile / README / LICENSE（后续工程化阶段）
-- 不动 3 条编译警告、不改 AGENTS.md 基线数字（非安全项）
-- 不启动 DMN Consumer、不触碰业务代码
+1. **B1 `src/agents/meta.rs`**：新增 `safety_hook` 字段 + setter；`max_turns` 默认 1→6 + setter；`run()` 构建 agent 时注册只读收集工具 read + search + webfetch（复用 `src/agents/tools/skills/` 既有实现），`safety_hook` 为 Some 时挂载。更新 L37 附近 `#[allow(dead_code)]` 注释（若字段不再死代码则移除该 allow，消除既有警告）。
+2. **B2 `src/agents/causal.rs`**：两 builder 新增 `safety_hook` 字段 + setter；`verify()`/`converge()` 构建 agent 时注册 read + webfetch 工具 + 挂 SafetyHook；修正过时注释（L158-162、L442-444「degraded mode」→ 实际 LLM 路径描述：ConstraintEngine 预检 → LLM 逐文件验证 + 联网核实 → 结构化裁决；LLM 失败 → `LLMCallFailed`）。
+3. **B3 `src/agents/factory.rs`**：三个 create_* 方法接线（依赖 B1/B2 的 setter）。
+4. **B4 测试与回归**：新增 builder 配置测试（safety_hook/max_turns 断言）；`cargo test --lib` 全量回归；`cargo build` 检查无新增警告；清理修改文件中的旧 `use` 导入/死字段。
 
 ## 验收标准
-- [ ] 真实 API key 不再存在于 git 跟踪文件与全部历史 commit 中
-- [ ] `.gitignore` 覆盖 `taiji.config.json` / `.taiji/config.json` / `.taiji/chat/` / `.taiji/tasks/`，且 prompts seed 资产仍被跟踪
-- [ ] 本地运行配置（`.taiji/config.json`）含新轮换后的 key，`taiji` 可正常加载
-- [ ] `taiji.config.json` 成为无敏感信息的仓库模板
-- [ ] 历史清洗后所有 commit 可正常 checkout、无 dangling 大对象残留
-- [ ] `cargo test --lib` 基线无回归（142/0/9）
+
+- [ ] `cargo build` 无新增警告（允许既有 3 个 lib 警告 + vendor cfg 警告）
+- [ ] `cargo test --lib` 全绿：144 基线 + 新增测试，0 failed（LLM 相关测试维持 `#[ignore]`）
+- [ ] 蓝图 V25 与代码一致：MetaAgent 注册 read+search+webfetch、CausalAgent verify/converge 均注册 read+webfetch、三相位（Meta/Fitting/Causal）挂载同一 SafetyHook 单例 Arc
+- [ ] 权限分工符合 §1.2：Meta/Causal 仅只读收集工具（read/search/webfetch），无 write/bash/recursive_decompose 等执行工具；webfetch 受 SafetyHook SSRF 检查约束（check_web_url）
+- [ ] 模板要求与工具注册闭合：causal.rs 系统提示中 read 工具要求（L315/L351/L541/L572）不再悬空；webfetch 供 LLM 按需联网核实（build 可酌情在 verify/converge 模板补充联网核实引导句）
+- [ ] Meta/Causal 不挂 TraceHook（§7.2 手动 TraceWriter 约定不变）
+- [ ] 新代码命名遵守 Guizang/guizang/归藏；修改文件无残留死代码/旧 use
+
+## 范围外（明确不做）
+
+- Causal/Meta LLM 调用失败**重试机制**（AGENTS.md §6 提到重试 3 次，但现状代码无重试——既有偏差，本次不扩范围，单独跟进）
+- TraceHook 挂载 Meta/Causal（蓝图 §7.2 明确手动记录）
+- 温度调整（四象温度表不变，Meta 不在表内）
+- PlanBuilder（预演编排，不进 TPN，非目标相位；如内部复用 MetaAgentBuilder 路径则顺带获得工具）
+- 前端 / ChatAgent / DMN 激活

@@ -5,7 +5,9 @@
 //! matched prompt assets that serve as cognitive bias for downstream agents.
 //!
 //! # Constraints (AGENTS.md §2, §4)
-//! - `max_turns = 1` — the MetaAgent is a single-shot structured extractor.
+//! - `max_turns = 6` — the MetaAgent is a multi-turn extractor: it can invoke
+//!   read-only collection tools (`read` / `search` / `webfetch`) to gather task
+//!   context, parent deliverables and web facts before composing weights.
 //! - System prompt starts with Chinese identifier "你是权重更新专家".
 //! - Output is parsed into [`MetaContext`] which is injected into the
 //!   FittingAgent (概率拟合·阳).
@@ -23,6 +25,9 @@ use std::sync::Arc;
 use rig::client::CompletionClient;
 use rig::completion::Prompt;
 
+use crate::agents::tools::skills::SkillRegistry;
+use crate::hooks::safety::SafetyHook;
+use crate::infra::config::SafetyConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::knowledge::LiluoClient;
 use crate::infra::provider::ProviderRegistry;
@@ -32,18 +37,27 @@ use crate::types::agent::{MetaContext, PromptAsset};
 /// Builder for the MetaAgent (权重更新·元).
 ///
 /// Encapsulates all configuration needed to construct and execute a Rig agent
-/// that extracts reasoning paths from the 理络.  Created by
+/// that extracts reasoning paths from the 归藏.  Created by
 /// [`AgentFactory::create_meta_agent`](super::factory::AgentFactory::create_meta_agent).
-#[allow(dead_code)] // R2 production path reserve — fields used when Rig agent is wired
+///
+/// The Rig agent registers read-only collection tools (`read` / `search` /
+/// `webfetch`) so the LLM can gather task context, parent deliverables and web
+/// facts before composing the weight update; the [`SafetyHook`] is **always**
+/// mounted (defaults to `SafetyConfig::default()` when no shared singleton is
+/// injected) — "带工具必有安全钩子" is a type-level guarantee.
 pub struct MetaAgentBuilder {
     task_id: String,
     liluo: Arc<LiluoClient>,
     provider: Arc<ProviderRegistry>,
     model: String,
-    /// max_turns = 1 — MetaAgent is always single-shot structured extraction.
+    /// max_turns = 6 — allows tool loops (collect → extract) before the final
+    /// structured MetaContext emission.
     max_turns: u32,
     /// Optional task directory for persisting meta_conversation.json.
     task_dir: Option<PathBuf>,
+    /// Process-wide SafetyHook (or a default-configured instance) — always
+    /// mounted on the Rig agent.
+    safety_hook: Arc<SafetyHook>,
 }
 
 impl MetaAgentBuilder {
@@ -62,8 +76,9 @@ impl MetaAgentBuilder {
             liluo,
             provider,
             model: model.to_string(),
-            max_turns: 1, // MetaAgent is always single-shot
+            max_turns: 6, // tool-loop headroom: collect → extract
             task_dir: None,
+            safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
         }
     }
 
@@ -73,12 +88,26 @@ impl MetaAgentBuilder {
         self
     }
 
-    /// Run the MetaAgent: query the 理络, LLM-compose prompts, produce [`MetaContext`].
+    /// Override the SafetyHook with the shared process-wide singleton.
+    pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self {
+        self.safety_hook = hook;
+        self
+    }
+
+    /// Override the LLM turn budget (default 6).
+    pub fn max_turns(mut self, n: u32) -> Self {
+        self.max_turns = n;
+        self
+    }
+
+    /// Run the MetaAgent: query the 归藏, LLM-compose prompts, produce [`MetaContext`].
     ///
     /// # Flow
-    /// 1. Query 理络 via `search_prompts(task_type_tags)` for matching prompt assets.
+    /// 1. Query 归藏 via `search_prompts(task_type_tags)` for matching prompt assets.
     /// 2. Filter by confidence threshold (`CONFIDENCE_THRESHOLD = 0.3`).
-    /// 3. When matching assets exist → call LLM to compose `MetaContext`.
+    /// 3. When matching assets exist → call LLM to compose `MetaContext`. The
+    ///    LLM may use read-only collection tools (`read` / `search` / `webfetch`)
+    ///    to gather task context / parent deliverables / web facts first.
     /// 4. When no assets or LLM fails → fallback to `MetaContext::empty()`.
     ///
     /// # Parameters
@@ -123,10 +152,21 @@ impl MetaAgentBuilder {
             }
         })?;
 
+        // ── 收集工具（只读）：read / search / webfetch — 供 LLM 收集任务上下文、
+        //    父层 deliverables 与网络信息后更新权重（V25 权限分工：收集工具三相共有）。
+        //    带工具必有安全钩子（§8.5 硬约束，类型级保证）：无条件挂载 SafetyHook ──
+        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new()
+            .tools()
+            .iter()
+            .filter(|t| matches!(t.name(), "read" | "search" | "webfetch"))
+            .map(|t| Box::new(t.clone()) as Box<dyn rig::tool::ToolDyn>)
+            .collect();
         let agent = client
             .agent(&self.model)
             .preamble(META_COMPOSE_SYSTEM_PROMPT)
-            .default_max_turns(1)
+            .default_max_turns(self.max_turns as usize)
+            .hook(self.safety_hook.as_ref().clone())
+            .tools(skill_tools)
             .build();
 
         let response = agent.prompt(&llm_prompt).await.map_err(|e| {
@@ -347,5 +387,43 @@ mod tests {
         assert!(input.contains("test-prompt"));
         assert!(input.contains("You are a test agent"));
         assert!(input.contains("Orchestration"));
+    }
+
+    #[tokio::test]
+    async fn test_meta_builder_defaults_and_safety_hook_setter() {
+        // 蓝图 V25 §8.5：Meta 带收集工具（read/search/webfetch）→ 必有安全钩子
+        // （类型级保证，字段非 Option）；max_turns 默认 6（工具循环余量）。
+        let config = make_config();
+        let tmp_dir = std::env::temp_dir()
+            .join(format!(
+                "taiji_meta_builder_test_{}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+        let liluo = Arc::new(
+            LiluoClient::new(&tmp_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let provider = Arc::new(
+            ProviderRegistry::new(&config).expect("ProviderRegistry"),
+        );
+
+        let builder = MetaAgentBuilder::new("test-task", liluo, provider, "deepseek-chat");
+        // 默认值：max_turns=6，且 safety_hook 恒有值（默认配置实例）。
+        assert_eq!(builder.max_turns, 6);
+
+        // setter 生效：注入进程级单例后指针一致。
+        let hook = Arc::new(SafetyHook::new(&SafetyConfig {
+            enabled: false,
+            trusted_mcp_servers: vec![],
+        }));
+        let builder = builder.safety_hook(hook.clone()).max_turns(8);
+        assert!(Arc::ptr_eq(&builder.safety_hook, &hook));
+        assert_eq!(builder.max_turns, 8);
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 }

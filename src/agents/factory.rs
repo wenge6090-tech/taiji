@@ -102,9 +102,11 @@ impl AgentFactory {
 
     /// Create a [`MetaAgentBuilder`] (权重更新·元) for the given task ID.
     ///
-    /// The MetaAgent traverses the 理络 via dynamic context injection to
-    /// extract reasoning paths that bias downstream agents.  It is always
-    /// limited to `max_turns = 1` (single-shot structured extraction).
+    /// The MetaAgent traverses the 归藏 via dynamic context injection to
+    /// extract reasoning paths that bias downstream agents.  Its Rig agent
+    /// registers read-only collection tools (`read` / `search` / `webfetch`)
+    /// and is limited to `max_turns = 6` (collect → extract); the shared
+    /// process-wide [`SafetyHook`] is mounted — "带工具必有安全钩子" (蓝图 V25).
     ///
     /// **LLM config**: resolved from `agent_overrides["meta"]`, falling back
     /// to the default provider + model.
@@ -120,7 +122,9 @@ impl AgentFactory {
             self.liluo.clone(),
             self.providers.clone(),
             &model,
-        ))
+        )
+        .max_turns(6)
+        .safety_hook(self.safety_hook.clone()))
     }
 
     /// Create a [`PlanBuilder`] (预演编排) for a given task ID.
@@ -206,10 +210,10 @@ impl AgentFactory {
         );
         Ok(CausalVerifyAgentBuilder::new(
             engine_ctx.clone(),
-            self.constraint_engine.clone(),
             self.providers.clone(),
             &model,
-        ))
+        )
+        .safety_hook(self.safety_hook.clone()))
     }
 
     /// Create a [`CausalConvergeAgentBuilder`] (收敛判定, converge mode).
@@ -234,7 +238,8 @@ impl AgentFactory {
             engine_ctx.clone(),
             self.providers.clone(),
             &model,
-        ))
+        )
+        .safety_hook(self.safety_hook.clone()))
     }
 
     // ── Configuration helpers ────────────────────────────────────────

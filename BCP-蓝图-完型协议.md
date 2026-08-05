@@ -8,6 +8,8 @@
 >
 > **2026-08-01 实现后对齐修订：** 校准 §3 契约 #13-#15、§9.9 契约 #16-#17 的签名与返回类型，补充 `guizang_digest()` 方法文档，修正 §9.7 流式渲染描述。均为实现后校准，不改变架构设计。
 >
+> **V25 变更摘要（2026-08-05，Meta/Causal 收集工具落地）：** Meta 与 Causal 相位从「无工具」升级为「LLM + 只读收集工具」——MetaAgent 注册 read / search / webfetch（收集任务上下文、父层 deliverables、归藏资产与网络信息后更新权重），CausalAgent 注册 read / webfetch（LLM 逐文件核验 deliverables、联网核实外部事实后裁决路由）。§1.2 权限面列、§8.2 权限同构、§8.5 Hook 安全模型更新：执行工具（write / bash / recursive_decompose / causal_verify）收敛 Fitting 相位，收集工具（read / search / webfetch）三相共有，「带工具必有安全钩子」为硬约束（Meta / Causal 均挂载 SafetyHook，webfetch 的 SSRF 检查由此生效）。§8.9 硬编码保证第 3、4 条（read 逐文件验证）由此从模板要求变为工具注册事实。
+>
 
 ---
 
@@ -17,19 +19,23 @@
 
 递归树的每一层结构完全相同。depth=0 的根节点和 depth=N 的子节点执行相同的 TPN 三阶段循环、拥有相同的文件目录布局。**system prompt 的内容因 `AgentMode`（编排或执行）而分化**，但 prompt 的注入点和构建函数相同——同一结构在不同深度和模式下重复应用产生复杂行为，不为不同深度写不同的控制流。
 
+**异层同构 = 结构同构 + 权限同构**：任务节点（单个三相循环，见 §8.1）在任意深度保持相同的三相相位分工（Meta 认知权 / Fitting 执行权 / Causal 裁判权，见 §8.5）与相同的权限配置（同一 SafetyHook 单例、相同工具面、相同白名单）——权限不随 depth / round / cycle 变化，不同深度不存在权限梯度。
+
 `AgentMode` 决定 prompt 内容偏向：**Orchestration（编排）** 模式强调任务拆解与综合，**Execution（执行）** 模式强调直接产出。mode 不由 depth 推导（根任务固定 Orchestration，叶子强制 Execution），而是由父 LLM 在拆解时显式分配。
 
 **提示词来源：** FittingAgent / CausalAgent 的 system prompt 由 MetaAgent 在每次 TPN 循环的开始阶段动态编排。MetaAgent 首先查询归藏 `prompts/` 层的提示词资产（标签匹配 + 置信度排序），若有高置信度匹配则调用 LLM 将资产组合为三份完整的 system prompt（fitting、verify、converge），注入 `MetaContext` 传递到下游 Agent。无归藏匹配时降级到 4 个 Base 硬编码模板（FittingAgent 的编排/执行各一、CausalAgent 的 verify/converge 各一），下游 Agent 自动使用内置回退。
 
 ### 1.2 三相互补 (Tri-Phase Complementarity)
 
-| Agent | 相位 | 易经 | 职责 |
-|-------|------|------|------|
-| **MetaAgent** | 权重更新·元 | 无极生太极 | 遍历归藏图谱提取推理路径，注入认知偏置 |
-| **FittingAgent** | 概率拟合·阳 | 阳 | 沿路径发散探索，LLM 做微观概率采样，可递归拆解 |
-| **CausalAgent** | 因果验证·阴 | 阴 | 将结果收敛回符号约束，验证宏观因果性 |
+| Agent | 相位 | 易经 | 职责 | 权限面 |
+|-------|------|------|------|--------|
+| **MetaAgent** | 权重更新·元 | 无极生太极 | 遍历归藏图谱提取推理路径，注入认知偏置 | **认知权 + 收集权**：注册只读收集工具（read / search / webfetch，可联网核实），受 SafetyHook 约束；LLM 多轮收集任务上下文、父层 deliverables、归藏资产与网络信息后更新权重；归藏只读 |
+| **FittingAgent** | 概率拟合·阳 | 阳 | 沿路径发散探索，LLM 做微观概率采样，可递归拆解 | **执行权**：注册 5 个 L1 Skills + recursive_decompose + causal_verify，受 SafetyHook + TraceHook 约束（全节点唯一持有变更世界工具的相位） |
+| **CausalAgent** | 因果验证·阴 | 阴 | 将结果收敛回符号约束，验证宏观因果性 | **裁判权 + 收集权**：注册只读验证工具（read / webfetch，逐文件核验 + 联网核实），受 SafetyHook 约束；LLM 核验 deliverables 与外部事实后裁决路由（PASS / BACK_TO_TPN / BACK_TO_META） |
 
 TPN 循环 = 阳生（概率采样）→ 阴克（验证驳回）→ 元调（调整权重）→ 再阳生...，直到收敛。
+
+**循环内权限分工**：执行工具（write / bash / recursive_decompose / causal_verify——变更世界的工具面）收敛于 Fitting 相位；收集工具（read / search / webfetch——只读信息收集与网络核实）为三相共有，Meta / Causal 相位仅持有收集工具、无执行工具。分工是角色性的（执行者 / 认知者 / 裁判者），由工具注册面天然保证，不可被 LLM 动态改变。
 
 ### 1.3 神经与符号统一 (Neural-Symbolic Integration)
 
@@ -807,9 +813,21 @@ data/                               ← 默认 data_root
 
 ## 8. 关键架构决策
 
-### 8.1 瞬态 Agent 生命周期
+### 8.1 瞬态任务节点生命周期
 
-所有 Agent 均为瞬态：`AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → AgentBuilder drop`。状态不跨调用保留，认知更新通过归藏 YAML 文件持久化，下轮加载时自动生效。
+**任务节点 = 单个三相循环（TpnCycle 实例），而非循环内的某个 Agent。** 生成树 / 收敛树的每个节点是完整的「权重更新 → 概率拟合 → 因果验证 → 路由决策」循环（`TpnCycle.execute()`），递归分解 spawn 的是**子循环节点**（`TpnCycle::new`，同一段代码），不是子 Agent。
+
+循环内的 Agent（Meta / Fitting / Causal）是节点的**相位执行器**，生命周期从属于所属节点：
+
+```
+AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → AgentBuilder drop
+```
+
+- 每轮循环（round）新建 FittingAgent 与 CausalAgent 实例；每次 BACK_TO_META（cycle++）重建 MetaAgent 实例——用完即弃，状态不跨调用保留
+- 认知更新通过归藏 YAML 文件持久化，下轮加载时自动生效
+- 整个系统 = 多瞬态任务节点系统：节点实例 = round × cycle × depth 的笛卡尔积，沿生成树展开（蒙特卡洛树式概率探索）、沿收敛树归并（马尔可夫链式状态转移与收敛），每一层递归与每一轮循环都是一次概率采样
+
+瞬态性保证：节点销毁后磁盘状态（checkpoint / chat_history / trace / deliverables）按 §7 原子持久化，崩溃恢复按恢复优先级链重建节点（`resume_history` > `decompose_result.json` > `checkpoint.json`）。
 
 ### 8.2 异层同构与模式分化
 
@@ -818,6 +836,8 @@ data/                               ← 默认 data_root
 - **Execution 模式**：prompt 包含「执行优先」原则（优先使用可用工具直接产出；前端注入的上下文指向预读取的文件），recursive_decompose 仅作最后手段
 
 递归层间通过 `MetaContext`（推理偏置注入）和 `ConvergenceDecision`（收敛结果上浮）传递信息。`AgentMode` 不由 `depth` 自动推导，而是由父 LLM 在拆解时显式分配。叶子层（`depth+1 >= max_depth`）由 RecursiveDecomposeTool 强制覆盖为 Execution。
+
+**权限同构（异层同构的权限维度）**：任务节点在任意深度保持相同的三相分工与权限配置——每个子循环节点与根节点一样：Fitting 相位持有全部执行工具并受同一 SafetyHook 约束、Meta / Causal 相位持有只读收集工具（read / search / webfetch）且无执行工具。权限不随 depth 变化，不同深度不存在权限梯度；深度变化唯一影响的是 `AgentMode`（prompt 编排偏好），与权限无关。
 
 ### 8.3 TPN 只读 / DMN 单写者
 
@@ -829,7 +849,19 @@ TPN 循环的路由决策（PASS / BACK_TO_TPN / BACK_TO_META）由 CausalAgent 
 
 ### 8.5 Hook 安全模型
 
-SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到 FittingAgent 的 Rig Agent 上。SafetyHook 在 ToolCall 事件上拦截危险操作（路径穿越、命令注入、SSRF），拦截时返回 `Flow::skip()`。非白名单 MCP 工具强制执行安全检查。
+SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到带工具的 Rig Agent 上（FittingAgent / MetaAgent / CausalAgent）。SafetyHook 在 ToolCall 事件上拦截危险操作（路径穿越、命令注入、SSRF），拦截时返回 `Flow::skip()`。非白名单 MCP 工具强制执行安全检查。
+
+**循环内权限分工的实现机制**：SafetyHook 挂载在**所有注册了工具的相位**上（Fitting / Meta / Causal），因为收集工具虽然只读，仍持有文件系统访问面（read / search）——这是 §1.2 相位分工的安全落地，而非偶然：
+
+| 相位 | 工具注册 | SafetyHook | 权限角色 |
+|------|:---:|:---:|------|
+| MetaAgent | read + search + webfetch（只读收集 / 联网核实） | **挂载** | 认知者 + 收集者：LLM 收集任务上下文 / 父层 deliverables / 归藏资产与网络信息后更新权重，无执行面 |
+| FittingAgent | 5 L1 Skills + recursive_decompose + causal_verify | **挂载**（+ TraceHook） | 执行者：唯一持有变更世界工具、受安全约束的权限面 |
+| CausalAgent | read + webfetch（只读验证 / 联网核实） | **挂载** | 裁判者 + 收集者：LLM 逐文件核验 deliverables、联网核实外部事实后裁决路由，无执行面 |
+
+**节点间权限同构**：所有任务节点（任意 depth / round / cycle）共享同一进程级 `SafetyHook` 单例（`build_engine` 创建一次，`Arc` 注入全部带工具的 Agent），规则一致、白名单一致——权限配置在节点间完全同构，不存在按深度 / 轮次 / 层级的权限分化。
+
+**带工具必有安全钩子（硬约束）**：任何相位只要注册工具（含只读收集工具），就必须挂载 SafetyHook——「无工具的相位允许不挂载，带工具的相位必须挂载」是相位权限闭合的底线。CausalAgent 的 LLM 验证路径（verify / converge 真实 LLM 调用 + read 逐文件核验）已在此约束下落地。
 
 ### 8.6 递归防护
 
@@ -901,6 +933,8 @@ DecomposeResult.deliverables → 父 CausalAgent.converge() 逐文件检查
 ```
 
 **权限模型：**
+
+> 本节的路径权限与 §8.5 的相位权限分工共同构成节点间权限同构：每个任务节点（任意 depth）都遵循相同的「父→子只读、子→父聚合、兄弟隔离」目录规则——权限同构覆盖工具面（§8.5）与数据面（本节）两个维度。
 
 | 方向 | 规则 | 保证方式 |
 |------|------|---------|

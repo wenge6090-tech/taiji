@@ -188,3 +188,14 @@ TpnCycle 恢复历史时严格按此顺序：
 - `PlanSummary.reasoning_path_summary` 已改名为 `matched_prompts_summary`（归藏 L5 Prompt 匹配摘要），旧字段名只允许出现在注释性历史说明中。
 - `EvolutionReport.grids_rewired` 是保留的兼容字段（V22 δ₃ 删除后恒为 0），只允许读取/透传，不允许重新引入 grid 重连逻辑。
 - 删除模块后必须清理残留：用残留检查模式 `ReasoningPath|GridAsset|grid_rewire|RelationEngine|dependency_index|justification_depends_on` 扫 `src/` + `taiji-web/src/`，注释性历史说明可豁免；同时清除编译警告（unused import / dead_code 字段）。
+
+## 10. WorkerPool 错误路径与测试数据污染（V25 实测前置收尾）
+
+- `WorkerPool::execute()` / `acquire()` 返回 `Result<T, TaijiError>`：semaphore 关闭（permit 永久丢失）时返回 `TaijiError::WorkerPoolUnavailable { context }` 而非 panic——async 上下文禁止 `expect()`/`panic!` 打崩 `taiji serve` 进程；`new()` 的 `assert!(max_concurrent > 0)` 保留（同步构造期快速失败）。
+- 调用方（如 `RecursiveDecomposeTool` spawn 循环内）acquire 失败时，必须先 `join_set.abort_all()` 清理已 spawn 子任务，再传播错误（`?` 前无 abort 会悬挂子任务）。
+- 测试不得把 task_dir 指向**已跟踪**的 `test_data/` 目录：trace hook 会向 `trace.jsonl` 追加记录，导致每次 `cargo test` 后 `git status` 变脏（如 fitting.rs depth-check 测试）。测试写入路径一律用 `tmp_dir` 或在 `#[ignore]` 下运行。
+
+## 11. Meta/Causal 收集工具与安全钩子（V25）
+
+- **带工具必有安全钩子（硬约束）**：任何注册工具的 Agent 必须挂载 SafetyHook（同一 `Arc<SafetyHook>` 单例）。MetaAgent 注册只读收集工具 read/search/webfetch；CausalAgent verify/converge 注册 read/webfetch；执行工具（write/bash/recursive_decompose/causal_verify）仅 Fitting 持有，Meta/Causal 不得注册。
+- Rig agent 构建保持**一次链式调用**：`preamble(...).default_max_turns(...).hook(...).tools(...)` 一次 build 完成，不得分多次构建或中途覆盖配置；收集工具从 `SkillRegistry` 按名过滤克隆（`matches!(t.name(), "read" | ...)`），带工具 agent 的 `max_turns` 需 ≥3（Meta 默认 6，允许收集→提取工具循环）。

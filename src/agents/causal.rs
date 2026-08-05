@@ -32,6 +32,9 @@ use rig::client::CompletionClient;
 use rig::completion::Prompt;
 use rig::providers::deepseek;
 
+use crate::agents::tools::skills::SkillRegistry;
+use crate::hooks::safety::SafetyHook;
+use crate::infra::config::SafetyConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::trace::save_json_atomic;
 use crate::infra::provider::ProviderRegistry;
@@ -52,14 +55,21 @@ use crate::types::verification::{
 /// Checks whether a task output (or tool result) satisfies L4 Truth
 /// constraints and passes LLM-based verification.
 ///
+/// The LLM registers read-only verification tools (`read` + `webfetch`) so it
+/// can open each referenced file and cross-check external facts before
+/// issuing the route verdict; the [`SafetyHook`] is **always** mounted
+/// (defaults to `SafetyConfig::default()` when no shared singleton is
+/// injected) — "带工具必有安全钩子" is a type-level guarantee (蓝图 V25 §8.5).
+///
 /// Created by [`AgentFactory::create_causal_verify_agent`].
-#[allow(dead_code)] // R2 production path reserve — fields used when LLM verify is wired
 pub struct CausalVerifyAgentBuilder {
     engine_ctx: EngineContext,
-    constraint_engine: Arc<ConstraintEngine>,
     model: String,
     provider: Arc<ProviderRegistry>,
     max_turns: u32,
+    /// Process-wide SafetyHook (or a default-configured instance) — always
+    /// mounted on the Rig agent.
+    safety_hook: Arc<SafetyHook>,
 }
 
 impl CausalVerifyAgentBuilder {
@@ -70,17 +80,22 @@ impl CausalVerifyAgentBuilder {
     /// directly.
     pub fn new(
         engine_ctx: EngineContext,
-        constraint_engine: Arc<ConstraintEngine>,
         provider: Arc<ProviderRegistry>,
         model: &str,
     ) -> Self {
         Self {
             engine_ctx,
-            constraint_engine,
             model: model.to_string(),
             provider,
             max_turns: 3,
+            safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
         }
+    }
+
+    /// Override the SafetyHook with the shared process-wide singleton.
+    pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self {
+        self.safety_hook = hook;
+        self
     }
 
     /// Run verification: check the task output and tool results against L4
@@ -90,9 +105,10 @@ impl CausalVerifyAgentBuilder {
     /// 1. **Constraint pre-check**: runs `ConstraintEngine::check_causal_output`
     ///    on the concatenated input.  Any hard violation short-circuits with
     ///    `BackToMeta` immediately (no LLM call).
-    /// 2. **LLM verification** (TODO): constructs a Rig agent with the verify
-    ///    system prompt (`VERIFY_SYSTEM_PROMPT`, starts with "你是因果验证器"),
-    ///    calls the LLM, and parses the structured output into a
+    /// 2. **LLM verification**: constructs a Rig agent with the verify system
+    ///    prompt (`VERIFY_SYSTEM_PROMPT`, starts with "你是因果验证器"), registers
+    ///    read-only tools `read` + `webfetch` (逐文件核验 + 联网核实), mounts the
+    ///    SafetyHook, calls the LLM, and parses the structured output into a
     ///    [`VerificationReport`].
     /// 3. **Return**: the final report.
     ///
@@ -155,11 +171,12 @@ impl CausalVerifyAgentBuilder {
     /// Ok(report)
     /// ```
     ///
-    /// # Current behaviour (degraded mode)
-    /// Skips the LLM call and returns a default `VerificationReport` with
-    /// `route: Pass`.  Constraint pre-checks are **not** performed in degraded
-    /// mode — callers that need strict enforcement should implement the
-    /// production path.
+    /// # Current behaviour (production path)
+    /// Runs the **LLM verification path**: constraint pre-check first (hard
+    /// violations short-circuit to `BackToMeta`), then the LLM reviews the task
+    /// output with `read` / `webfetch` tools for file-level and web fact
+    /// verification and issues a structured [`VerificationReport`].  LLM
+    /// failures surface as `TaijiError::LLMCallFailed`.
     pub async fn verify(
         &self,
         task_output: &str,
@@ -234,11 +251,23 @@ impl CausalVerifyAgentBuilder {
 
         // Call the LLM for verification
         let client: Arc<deepseek::Client> = self.provider.client("deepseek")?;
+
+        // ── 收集工具（只读）：read + webfetch — 逐文件核验 deliverables、
+        //    联网核实外部事实（V25 权限分工：收集工具三相共有）。
+        //    带工具必有安全钩子（§8.5 硬约束，类型级保证）：无条件挂载 SafetyHook ──
+        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new()
+            .tools()
+            .iter()
+            .filter(|t| matches!(t.name(), "read" | "webfetch"))
+            .map(|t| Box::new(t.clone()) as Box<dyn rig::tool::ToolDyn>)
+            .collect();
         let agent = client
             .agent(&self.model)
             .preamble(system_prompt)
             .max_tokens(1024u64)
-            .default_max_turns(3usize)
+            .default_max_turns(self.max_turns as usize)
+            .hook(self.safety_hook.as_ref().clone())
+            .tools(skill_tools)
             .build();
 
         let input = format!(
@@ -378,12 +407,20 @@ Routing guidance:
 /// decides whether the overall task has converged.
 ///
 /// Created by [`AgentFactory::create_causal_converge_agent`].
-#[allow(dead_code)] // R2 production path reserve — fields used when LLM converge is wired
+///
+/// The LLM registers read-only verification tools (`read` + `webfetch`) so it
+/// can open each referenced deliverable and cross-check external facts before
+/// issuing the convergence verdict; the [`SafetyHook`] is **always** mounted
+/// (defaults to `SafetyConfig::default()` when no shared singleton is
+/// injected) — "带工具必有安全钩子" is a type-level guarantee (蓝图 V25 §8.5).
 pub struct CausalConvergeAgentBuilder {
     engine_ctx: EngineContext,
     model: String,
     provider: Arc<ProviderRegistry>,
     max_turns: u32,
+    /// Process-wide SafetyHook (or a default-configured instance) — always
+    /// mounted on the Rig agent.
+    safety_hook: Arc<SafetyHook>,
 }
 
 impl CausalConvergeAgentBuilder {
@@ -402,19 +439,27 @@ impl CausalConvergeAgentBuilder {
             model: model.to_string(),
             provider,
             max_turns: 3,
+            safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
         }
+    }
+
+    /// Override the SafetyHook with the shared process-wide singleton.
+    pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self {
+        self.safety_hook = hook;
+        self
     }
 
     /// Run convergence: aggregate subtask results and decide convergence.
     ///
     /// # Logic
-    /// 1. Checks if all subtasks completed successfully → `Converged`.
-    /// 2. If some failed or are pending → `Partial`.
-    /// 3. If all failed or diverged → `Diverged`.
-    ///
-    /// In the production path an LLM call (with system prompt
-    /// `CONVERGE_SYSTEM_PROMPT`) reviews the subtask outputs and makes a
-    /// nuanced decision.  In degraded mode a deterministic heuristic is used.
+    /// 1. Empty subtask results short-circuit to `Converged` (trivially).
+    /// 2. Otherwise the **LLM convergence judgment** runs: a Rig agent with the
+    ///    converge system prompt (`CONVERGE_SYSTEM_PROMPT`, starts with
+    ///    "你是收敛判决器") registers read-only tools `read` + `webfetch`, mounts
+    ///    the SafetyHook, reviews the aggregated subtask results and issues a
+    ///    structured [`ConvergenceDecision`] (Converged / Partial / Diverged).
+    /// 3. The decision is persisted to `converge_state.json` (crash recovery)
+    ///    and returned.
     ///
     /// # Production wiring (pinned for Rig API verification)
     ///
@@ -439,9 +484,12 @@ impl CausalConvergeAgentBuilder {
     /// Ok(decision)
     /// ```
     ///
-    /// # Current behaviour (degraded mode)
-    /// Uses a deterministic heuristic based on subtask status counts.  Returns
-    /// `Converged` when all subtasks are in a non-failed state.
+    /// # Current behaviour (production path)
+    /// Runs the **LLM convergence judgment**: the LLM reviews the aggregated
+    /// subtask results with `read` / `webfetch` tools for file-level and web
+    /// fact verification, then issues a structured [`ConvergenceDecision`].
+    /// Empty results short-circuit to `Converged`; LLM failures surface as
+    /// `TaijiError::LLMCallFailed`.
     pub async fn converge(
         &self,
         subtask_results: &[DecomposeResult],
@@ -469,11 +517,23 @@ impl CausalConvergeAgentBuilder {
 
         // ── Production path: LLM convergence judgment ──
         let client: Arc<deepseek::Client> = self.provider.client("deepseek")?;
+
+        // ── 收集工具（只读）：read + webfetch — 逐文件核验 deliverables、
+        //    联网核实外部事实（V25 权限分工：收集工具三相共有）。
+        //    带工具必有安全钩子（§8.5 硬约束，类型级保证）：无条件挂载 SafetyHook ──
+        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new()
+            .tools()
+            .iter()
+            .filter(|t| matches!(t.name(), "read" | "webfetch"))
+            .map(|t| Box::new(t.clone()) as Box<dyn rig::tool::ToolDyn>)
+            .collect();
         let agent = client
             .agent(&self.model)
             .preamble(system_prompt)
             .max_tokens(1024u64)
-            .default_max_turns(3usize)
+            .default_max_turns(self.max_turns as usize)
+            .hook(self.safety_hook.as_ref().clone())
+            .tools(skill_tools)
             .build();
 
         let input = serde_json::to_string_pretty(subtask_results).map_err(|e| {
@@ -631,7 +691,6 @@ mod tests {
     async fn test_verify_returns_default_pass() {
         let builder = CausalVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
-            Arc::new(ConstraintEngine::new()),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
             ),
@@ -648,7 +707,6 @@ mod tests {
         // truth:no-fabrication (hard).
         let builder = CausalVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
-            Arc::new(ConstraintEngine::new()),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
             ),
@@ -669,7 +727,6 @@ mod tests {
         // constraint, but since it's soft the verify should still pass.
         let builder = CausalVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
-            Arc::new(ConstraintEngine::new()),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
             ),
@@ -847,5 +904,35 @@ mod tests {
         assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Partial"));
         assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Diverged"));
         assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Execution"));
+    }
+
+    #[test]
+    fn test_causal_builders_safety_hook_setters() {
+        // 蓝图 V25 §8.5：Causal 相位带收集工具（read+webfetch）→ 必有安全钩子
+        // （类型级保证，字段非 Option）；注入进程级单例后指针一致。
+        let hook = Arc::new(SafetyHook::new(&SafetyConfig {
+            enabled: false,
+            trusted_mcp_servers: vec![],
+        }));
+
+        let verify_builder = CausalVerifyAgentBuilder::new(
+            make_engine_ctx("test-task"),
+            Arc::new(
+                ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
+            ),
+            "deepseek-chat",
+        )
+        .safety_hook(hook.clone());
+        assert!(Arc::ptr_eq(&verify_builder.safety_hook, &hook));
+
+        let converge_builder = CausalConvergeAgentBuilder::new(
+            make_engine_ctx("test-task"),
+            Arc::new(
+                ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
+            ),
+            "deepseek-chat",
+        )
+        .safety_hook(hook.clone());
+        assert!(Arc::ptr_eq(&converge_builder.safety_hook, &hook));
     }
 }
