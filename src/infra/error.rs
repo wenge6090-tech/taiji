@@ -42,6 +42,9 @@ pub enum TaijiError {
     #[error("cancelled: {context}")]
     Cancelled { context: String },
 
+    #[error("worker pool unavailable: {context}")]
+    WorkerPoolUnavailable { context: String },
+
     #[error("{0}")]
     Other(String),
 }

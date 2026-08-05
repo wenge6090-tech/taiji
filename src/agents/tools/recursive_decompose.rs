@@ -294,7 +294,17 @@ impl RecursiveDecomposeTool {
             }
 
             // Acquire a semaphore permit from the shared WorkerPool.
-            let permit = self.factory.worker_pool.acquire().await;
+            // If the pool is closed (all permits permanently lost), abort any
+            // already-spawned subtasks and propagate the error — never panic.
+            let permit = match self.factory.worker_pool.acquire().await {
+                Ok(permit) => permit,
+                Err(e) => {
+                    if !join_set.is_empty() {
+                        join_set.abort_all();
+                    }
+                    return Err(e);
+                }
+            };
 
             // Clone values needed inside the spawn closure.
             let factory = Arc::clone(&self.factory);

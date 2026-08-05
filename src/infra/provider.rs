@@ -143,7 +143,7 @@ impl ProviderRegistry {
         match self.openai_clients.get(name) {
             Some(client) => Ok(client.clone()),
             None => Err(TaijiError::KnowledgeStoreUnavailable {
-                context: format!("openai-compatible provider '{name}' is not configured (add it to llm.providers in taiji.config.json)"),
+                context: format!("openai-compatible provider '{name}' is not configured (add it to llm.providers in .taiji/config.json)"),
             }),
         }
     }

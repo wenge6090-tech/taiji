@@ -7,6 +7,8 @@
 
 use std::sync::Arc;
 
+use crate::infra::error::TaijiError;
+
 /// Bounded concurrency pool for agent execution.
 ///
 /// Every call to [`execute`](WorkerPool::execute) acquires a semaphore permit
@@ -21,7 +23,7 @@ use std::sync::Arc;
 ///
 /// ```ignore
 /// let pool = WorkerPool::new(4);
-/// let result = pool.execute(async { 42 }).await;
+/// let result = pool.execute(async { 42 }).await.unwrap();
 /// assert_eq!(result, 42);
 /// ```
 pub struct WorkerPool {
@@ -52,23 +54,22 @@ impl WorkerPool {
     /// inside the permit's scope, and releases the permit when `f` completes.
     ///
     /// If the semaphore has been closed (e.g. all permits have been forgotten
-    /// — an unusual edge case), this method returns the error from
-    /// [`Semaphore::acquire`] by wrapping it in a panic after closing the
-    /// semaphore. Under normal operation the semaphore is never closed, so
-    /// this function will simply await a permit and execute `f`.
-    pub async fn execute<F, T>(&self, f: F) -> T
+    /// — an unusual edge case), this method returns
+    /// [`TaijiError::WorkerPoolUnavailable`] instead of panicking, so the
+    /// caller can degrade gracefully (e.g. abort sibling tasks and propagate
+    /// the error) rather than crashing the whole process.
+    pub async fn execute<F, T>(&self, f: F) -> Result<T, TaijiError>
     where
         F: std::future::Future<Output = T> + Send,
         T: Send,
     {
-        // Acquire a permit. If the semaphore is closed (all permits
-        // permanently lost), we panic — this is an unrecoverable state
-        // for the pool.
         let permit = self
             .semaphore
             .acquire()
             .await
-            .expect("WorkerPool semaphore was closed — all permits permanently lost");
+            .map_err(|e| TaijiError::WorkerPoolUnavailable {
+                context: e.to_string(),
+            })?;
 
         // DropGuards guarantee release even if f panics.
         // The permit is held until f completes.
@@ -77,7 +78,7 @@ impl WorkerPool {
         // Permit is dropped here, automatically returning it to the semaphore.
         drop(permit);
 
-        result
+        Ok(result)
     }
 
     /// Acquire an owned permit from the semaphore.
@@ -87,13 +88,18 @@ impl WorkerPool {
     /// that can be moved into the spawned task.
     ///
     /// If the semaphore has been closed (all permits permanently lost),
-    /// this will panic (same as [`execute`](WorkerPool::execute)).
-    pub async fn acquire(&self) -> tokio::sync::OwnedSemaphorePermit {
+    /// this returns [`TaijiError::WorkerPoolUnavailable`] (same as
+    /// [`execute`](WorkerPool::execute)) instead of panicking.
+    pub async fn acquire(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, TaijiError> {
         self.semaphore
             .clone()
             .acquire_owned()
             .await
-            .expect("WorkerPool semaphore was closed — all permits permanently lost")
+            .map_err(|e| TaijiError::WorkerPoolUnavailable {
+                context: e.to_string(),
+            })
     }
 
     /// Maximum number of concurrent executions allowed.
@@ -127,7 +133,7 @@ mod tests {
     #[tokio::test]
     async fn test_execute_returns_value() {
         let pool = WorkerPool::new(2);
-        let result = pool.execute(async { 42 }).await;
+        let result = pool.execute(async { 42 }).await.unwrap();
         assert_eq!(result, 42);
     }
 
@@ -161,7 +167,8 @@ mod tests {
                     tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
                     counter.fetch_sub(1, Ordering::SeqCst);
                 })
-                .await;
+                .await
+                .unwrap();
             }));
         }
 
@@ -194,5 +201,32 @@ mod tests {
     #[should_panic(expected = "max_concurrent > 0")]
     fn test_zero_max_concurrent_panics() {
         WorkerPool::new(0);
+    }
+
+    #[tokio::test]
+    async fn test_closed_semaphore_acquire_returns_error() {
+        // Closing the semaphore (all permits permanently lost) must yield a
+        // `WorkerPoolUnavailable` error, NOT a panic — the whole serve/run
+        // process must survive this edge case.
+        let pool = WorkerPool::new(2);
+        pool.semaphore.close();
+
+        let err = pool.acquire().await.unwrap_err();
+        assert!(
+            matches!(err, TaijiError::WorkerPoolUnavailable { .. }),
+            "expected WorkerPoolUnavailable, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_closed_semaphore_execute_returns_error() {
+        let pool = WorkerPool::new(2);
+        pool.semaphore.close();
+
+        let err = pool.execute(async { 42 }).await.unwrap_err();
+        assert!(
+            matches!(err, TaijiError::WorkerPoolUnavailable { .. }),
+            "expected WorkerPoolUnavailable, got {err:?}"
+        );
     }
 }
