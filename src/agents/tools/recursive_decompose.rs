@@ -27,7 +27,7 @@ use crate::infra::error::TaijiError;
 use crate::infra::trace::load_json_optional;
 use crate::orchestration::event_bus;
 use crate::orchestration::tpn_cycle::TpnCycle;
-use crate::types::agent::{AgentMode, MetaContext};
+use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 use crate::types::frontend::NodeStatus;
 use crate::types::task::{ChildResultSummary, DecomposeResult, SubtaskSpec, TPNResult};
@@ -57,8 +57,6 @@ pub struct RecursiveDecomposeTool {
     /// Reasoning bias inherited from the parent's MetaAgent run.
     /// Passed to child TPN cycles as `initial_meta_ctx` (BCP §8.2).
     parent_meta_ctx: MetaContext,
-    /// The mode of the parent FittingAgent — used for converge and passed to children.
-    mode: AgentMode,
 }
 
 impl RecursiveDecomposeTool {
@@ -75,7 +73,6 @@ impl RecursiveDecomposeTool {
         depth: u32,
         cancel: CancellationToken,
         parent_meta_ctx: MetaContext,
-        mode: AgentMode,
     ) -> Self {
         // Guard: depth and engine_ctx.depth must agree (single source of truth).
         debug_assert_eq!(
@@ -90,28 +87,32 @@ impl RecursiveDecomposeTool {
             depth,
             cancel,
             parent_meta_ctx,
-            mode,
         }
     }
 
     /// Execute the recursive decomposition.
     ///
-    /// 1. Validates `depth` against `max_depth` from config.
-    /// 2. Spawns one child `TpnCycle` per subtask (parallel, full TPN).
-    /// 3. Collects all `TPNResult`s.
-    /// 4. Converges via `CausalAgent.converge()`.
-    /// 5. Returns a `DecomposeResult`.
+    /// 1. Acquires 1 WorkerPool permit (并行分解节点上限 — V26 语义：permit 在
+    ///    工具入口 acquire，join 完成后释放；子任务运行不持 permit，任意深度
+    ///    decompose 在各自入口 acquire，无嵌套持有 → 无死锁)。
+    /// 2. Validates `depth` against `max_depth` from config.
+    /// 3. Spawns one child `TpnCycle` per subtask (parallel, full TPN).
+    /// 4. Collects all `TPNResult`s.
+    /// 5. Converges via `CausalAgent.converge()`.
+    /// 6. Returns a `DecomposeResult`.
     pub async fn execute(&self, subtasks: Vec<SubtaskSpec>) -> Result<DecomposeResult, TaijiError> {
-        // --- Mode guard: Execution mode agents should not decompose. -------
-        // This is belt-and-suspenders with the FittingAgentBuilder only
-        // registering this tool for Orchestration mode.  If a bug or future
-        // change bypasses that gate, this guard prevents WorkerPool semaphore
-        // deadlock (Execution agent holding a permit + trying to acquire more).
-        if self.mode == AgentMode::Execution {
-            return Err(TaijiError::Other(
-                "recursive_decompose is not available in Execution mode".into(),
-            ));
-        }
+        // ── Permit acquisition: tool entry, held until join completes ──
+        // V26 permit 语义：permit = 并行分解节点上限。入口 acquire 1 个并持有
+        // 到函数返回，spawn 闭包不再捕获 permit。持 permit 者只等待子任务 join
+        // （子任务运行不持 permit），无嵌套持有 → 无死锁路径。
+        let _permit = self.factory.worker_pool.acquire().await.map_err(|e| {
+            TaijiError::WorkerPoolUnavailable {
+                context: format!(
+                    "recursive_decompose: failed to acquire worker permit for task {}: {e}",
+                    self.engine_ctx.task_id
+                ),
+            }
+        })?;
 
         // --- Depth guard (uses config, not hardcoded) --------------------------
         let max_depth = self.factory.config.runtime.max_depth;
@@ -206,10 +207,8 @@ impl RecursiveDecomposeTool {
         // ── Compute child indices and prepare subtask metadata ──────────
         struct SubtaskMeta {
             index: usize,
-            rerun_of: Option<usize>,
             child_dir: PathBuf,
             child_deliverables: Vec<String>,
-            mode: AgentMode,
             description: String,
             resume_history: Option<Vec<Message>>,
         }
@@ -257,14 +256,7 @@ impl RecursiveDecomposeTool {
                     (new_idx, dir, None)
                 };
 
-            // Determine child mode:
-            let child_depth = self.engine_ctx.depth + 1;
-            let actual_mode = if child_depth >= self.factory.config.runtime.max_depth {
-                AgentMode::Execution
-            } else {
-                subtask.mode
-            };
-
+            // V26 起子任务与父任务完全同构：无 mode 分化（异层同构，BCP §1.1）。
             let enriched_description = assemble_child_description(
                 &subtask.description,
                 &subtask.verification_spec,
@@ -273,16 +265,15 @@ impl RecursiveDecomposeTool {
 
             subtask_metas.push(SubtaskMeta {
                 index: child_index,
-                rerun_of: subtask.rerun_of,
                 child_dir,
                 child_deliverables: parent_deliverables.clone(),
-                mode: actual_mode,
                 description: enriched_description,
                 resume_history,
             });
         }
 
-        // --- Spawn child TPN cycles with WorkerPool concurrency limiting ----
+        // --- Spawn child TPN cycles (V26: 子任务运行不持 permit — permit 已由
+        // 本工具入口 acquire，见 execute() 开头) ----
         let mut join_set = tokio::task::JoinSet::new();
 
         for meta in subtask_metas {
@@ -293,25 +284,11 @@ impl RecursiveDecomposeTool {
                 ));
             }
 
-            // Acquire a semaphore permit from the shared WorkerPool.
-            // If the pool is closed (all permits permanently lost), abort any
-            // already-spawned subtasks and propagate the error — never panic.
-            let permit = match self.factory.worker_pool.acquire().await {
-                Ok(permit) => permit,
-                Err(e) => {
-                    if !join_set.is_empty() {
-                        join_set.abort_all();
-                    }
-                    return Err(e);
-                }
-            };
-
             // Clone values needed inside the spawn closure.
             let factory = Arc::clone(&self.factory);
             let engine_ctx = self.engine_ctx.clone();
             let parent_meta_ctx = self.parent_meta_ctx.clone();
             let cancel = self.cancel.clone();
-            let child_mode = meta.mode;
             let child_deliverables = meta.child_deliverables;
             let child_dir = meta.child_dir;
             let resume_history = meta.resume_history;
@@ -326,7 +303,6 @@ impl RecursiveDecomposeTool {
                 parent_task_id: self.engine_ctx.task_id.clone(),
                 child_task_id: child_task_id.clone(),
                 description: child_description.clone(),
-                mode: child_mode,
                 depth: engine_ctx.depth + 1,
             });
 
@@ -365,14 +341,9 @@ impl RecursiveDecomposeTool {
                         &child_description,
                         Some(child_meta_ctx),
                         &mut child_ctx,
-                        child_mode,
                         resume_history,
                     )
                     .await;
-
-                // Hold the permit until the subtask completes, then
-                // release it back to the WorkerPool semaphore.
-                drop(permit);
 
                 (child_index, result)
             });
@@ -421,7 +392,7 @@ impl RecursiveDecomposeTool {
         let all_decompose_results: Vec<DecomposeResult> =
             prior_results.values().cloned().collect();
         let decision = converge_agent
-            .converge(&all_decompose_results, &self.parent_meta_ctx, self.mode)
+            .converge(&all_decompose_results, &self.parent_meta_ctx)
             .await?;
 
         // Build child_results summary for parent LLM.
@@ -542,17 +513,12 @@ impl Tool for RecursiveDecomposeTool {
                                     "type": "object",
                                     "description": "Additional context for the subtask"
                                 },
-                                "mode": {
-                                    "type": "string",
-                                    "enum": ["Orchestration", "Execution"],
-                                    "description": "Whether the subtask runs in Orchestration (further decomposition) or Execution (direct work) mode. Leaf-depth subtasks are forced to Execution automatically."
-                                },
                                 "rerun_of": {
                                     "type": "integer",
                                     "description": "Optional: index of an existing child subtask to re-run. When set, the child reuses its existing directory, loads prior chat history for continuity, and the old checkpoint is deleted before re-execution. Use this when a previous sub-decompose needs retrying with adjusted parameters. Leave unset for new subtasks."
                                 }
                             },
-                            "required": ["description", "verification_spec", "mode"]
+                            "required": ["description", "verification_spec"]
                         },
                         "description": "List of subtasks to execute"
                     }

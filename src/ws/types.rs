@@ -12,7 +12,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::agent::AgentMode;
 use crate::types::frontend::{EvolutionSummary, NodeStatus, TpnPhase};
 
 /// Event pushed from the engine to all connected WebSocket clients.
@@ -42,7 +41,6 @@ pub enum TaskEvent {
         parent_task_id: String,
         child_task_id: String,
         description: String,
-        mode: AgentMode,
         depth: u32,
     },
     /// A child subtask finished its TPN cycle.

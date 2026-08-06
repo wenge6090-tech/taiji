@@ -64,12 +64,6 @@ export default function PhaseDetail({
                 <dd className="mt-0.5 font-mono text-slate-200">{node.depth}</dd>
               </div>
               <div className="rounded border border-slate-800 bg-slate-900/60 px-2 py-1.5">
-                <dt className="text-slate-500">模式</dt>
-                <dd className="mt-0.5 text-slate-200">
-                  {node.mode === "Orchestration" ? "阳 · 编排" : "阴 · 执行"}
-                </dd>
-              </div>
-              <div className="rounded border border-slate-800 bg-slate-900/60 px-2 py-1.5">
                 <dt className="text-slate-500">轮次</dt>
                 <dd className="mt-0.5 font-mono text-slate-200">{node.round}</dd>
               </div>

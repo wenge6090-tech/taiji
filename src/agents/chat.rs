@@ -447,7 +447,6 @@ mod tests {
              version: 1\n\
              content: 测试内容\n\
              agent_target: FittingAgent\n\
-             agent_mode: Orchestration\n\
              usage_count: 0\n\
              success_rate: 0.0\n",
         )

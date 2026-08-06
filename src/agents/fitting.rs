@@ -40,7 +40,7 @@ use crate::agents::tools::skills::SkillRegistry;
 use crate::hooks::trace::TraceHook;
 use crate::infra::error::TaijiError;
 use crate::infra::trace::save_json_atomic;
-use crate::types::agent::{AgentMode, MetaContext};
+use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 use crate::types::task::TPNResult;
 
@@ -50,11 +50,11 @@ use crate::types::task::TPNResult;
 /// reasoning bias ([`MetaContext`]), engine context (depth, cycle, round),
 /// cancellation token, and a handle to the factory for spawning sub-agents
 /// during recursion.
+///
+/// V26 起无模式分化（异层同构）：任意深度注册全部执行工具
+/// （5 L1 Skills + recursive_decompose + causal_verify），单一 system prompt。
 pub struct FittingAgentBuilder {
     depth: u32,
-    /// Execution mode: Orchestration (decompose) or Execution (direct work).
-    /// Determines system prompt content and tool usage guidance.
-    mode: AgentMode,
     meta_ctx: MetaContext,
     engine_ctx: EngineContext,
     factory: Arc<AgentFactory>,
@@ -71,7 +71,6 @@ impl FittingAgentBuilder {
     /// callers should use the factory rather than constructing this directly.
     pub fn new(
         depth: u32,
-        mode: AgentMode,
         meta_ctx: MetaContext,
         engine_ctx: EngineContext,
         factory: Arc<AgentFactory>,
@@ -80,7 +79,6 @@ impl FittingAgentBuilder {
     ) -> Self {
         Self {
             depth,
-            mode,
             meta_ctx,
             engine_ctx,
             factory,
@@ -172,23 +170,23 @@ impl FittingAgentBuilder {
             return Err(TaijiError::MaxDepthExceeded { max: max_depth });
         }
 
-        // ── Build system prompt from MetaContext (mode-aware) ──
+        // ── Build system prompt from MetaContext (V26: 单模板，无模式分支) ──
         let system_prompt = build_system_prompt(
             &self.meta_ctx,
             &self.engine_ctx.task_dir,
             self.engine_ctx.context_dir.as_deref(),
-            self.mode,
         );
 
         // ── Obtain LLM client ──
         let client: Arc<deepseek::Client> = self.factory.providers.client("deepseek")?;
 
         // ── Build Rig agent with preamble, max_turns, max_tokens, temperature ──
-        // Check if agent-specific max_turns is configured; fallback to max_rounds.
+        // Check if agent-specific max_turns is configured; fallback to 30 (V26:
+        // Fitting max_turns 统一 30，不再复用 max_rounds)。
         let max_turns = self.factory.config.llm.agent_overrides
             .get("fitting")
             .and_then(|o| o.max_turns)
-            .unwrap_or(self.factory.config.runtime.max_rounds) as usize;
+            .unwrap_or(30) as usize;
         #[allow(unused)]
         let max_tokens = self.factory.config.llm.agent_overrides
             .get("fitting")
@@ -216,25 +214,20 @@ impl FittingAgentBuilder {
         let agent_builder = agent_builder.hook(safety_hook).hook(trace_hook);
 
         // ── Register built-in composite tools ──
-        // recursive_decompose is ONLY registered for Orchestration mode.
-        // Execution mode agents should not decompose further — the depth guard
-        // on the tool (self.depth >= max_depth) may NOT block all cases (e.g.
-        // when max_depth is high).  Registering it conditionally prevents the
-        // LLM from ever seeing it, which also avoids a WorkerPool semaphore
-        // deadlock (Execution mode agent holding a permit could block forever
-        // trying to acquire another permit for its own recursive_decompose).
+        // V26: 异层同构 — 任意深度注册全部工具（recursive_decompose +
+        // causal_verify + 5 L1 Skills），无模式分支。permit 语义 = 并行分解
+        // 节点上限：decompose 工具入口自行 acquire，spawn 闭包不持 permit，
+        // 无嵌套持有 → 无死锁。
         let recursive_decompose = RecursiveDecomposeTool::new(
             self.factory.clone(),
             self.engine_ctx.clone(),
             self.depth,
             self.cancel.clone(),
             self.meta_ctx.clone(),
-            self.mode,
         );
         let causal_verify = CausalVerifyTool::new(
             self.factory.clone(),
             self.engine_ctx.clone(),
-            self.mode,
             self.meta_ctx.clone(),
         );
 
@@ -246,18 +239,11 @@ impl FittingAgentBuilder {
             .map(|t| Box::new(t.clone()) as Box<dyn ToolDyn>)
             .collect();
 
-        let agent = if self.mode == AgentMode::Orchestration {
-            agent_builder
-                .tool(recursive_decompose)
-                .tool(causal_verify)
-                .tools(skill_tools)
-                .build()
-        } else {
-            agent_builder
-                .tool(causal_verify)
-                .tools(skill_tools)
-                .build()
-        };
+        let agent = agent_builder
+            .tool(recursive_decompose)
+            .tool(causal_verify)
+            .tools(skill_tools)
+            .build();
 
         // ── Execute the prompt — always use Chat::chat for history persistence ──
         let history_path = self.engine_ctx.task_dir.join("chat_history.json");
@@ -298,13 +284,10 @@ impl FittingAgentBuilder {
         // ── Extract tool call info from response (basic parsing) ──
         // The LLM response may mention which tools were used; we capture
         // available tool names from the registered set as a best-effort summary.
-        // "causal_verify" and L1 skills are always registered; "recursive_decompose"
-        // is only registered for Orchestration mode.
-        let mut registered_tool_names: Vec<String> = vec!["causal_verify".to_string()];
+        // V26: 全工具全层级注册，无模式分化。
+        let mut registered_tool_names: Vec<String> =
+            vec!["causal_verify".to_string(), "recursive_decompose".to_string()];
         registered_tool_names.extend(skill_registry.get_tool_names());
-        if self.mode == AgentMode::Orchestration {
-            registered_tool_names.push("recursive_decompose".to_string());
-        }
 
         // Check which tools appear in the response text
         let tools_used: Vec<String> = registered_tool_names
@@ -351,46 +334,21 @@ impl FittingAgentBuilder {
 
 // ── Internal helpers ──────────────────────────────────────────────────────
 
-/// Build the system prompt for the FittingAgent from the MetaContext and mode.
+/// Build the system prompt for the FittingAgent from the MetaContext.
 ///
-/// The prompt content bifurcates based on `mode`:
-///
-/// **Orchestration mode** — agent acts as a task decomposer/synthesizer:
-/// - Focus on MECE decomposition via `recursive_decompose`
-/// - Includes subtask mode selection guidance (plant-growth principle)
-/// - Only uses L1 skills for atomic subtasks
-///
-/// **Execution mode** — agent acts as a focused executor:
-/// - Focus on direct output via L1 skills
-/// - `recursive_decompose` only as a last resort
-/// - Emphasizes producing complete, verifiable artifacts
-fn build_system_prompt(meta_ctx: &MetaContext, task_dir: &std::path::Path, context_dir: Option<&std::path::Path>, mode: AgentMode) -> String {
+/// V26 起为**单一模板**（异层同构）：不区分 Orchestration / Execution，融合
+/// 「拆解优先 + 执行优先」引导——可用 `recursive_decompose` 拆解复杂任务，也
+/// 可直接用 L1 工具产出，由 Agent 自己判断（植物生长原则）。
+fn build_system_prompt(meta_ctx: &MetaContext, task_dir: &std::path::Path, context_dir: Option<&std::path::Path>) -> String {
     // Prefer MetaAgent-composed prompt if available.
     if let Some(ref composed) = meta_ctx.fitting_system_prompt {
         return composed.clone();
     }
 
-    // Fallback: build from mode-specific template.
+    // Fallback: single fused template (V26, no mode branch).
     let mut prompt = String::with_capacity(1024);
 
-    match mode {
-        AgentMode::Orchestration => build_orchestration_prompt(&mut prompt, meta_ctx, task_dir, context_dir),
-        AgentMode::Execution => build_execution_prompt(&mut prompt, meta_ctx, task_dir, context_dir),
-    }
-
-    prompt
-}
-
-/// Build the prompt for **Orchestration** mode — the agent decomposes tasks and
-/// synthesizes results.  The plant-growth analogy guides the LLM not to
-/// over-decompose or delegate everything to leaves.
-fn build_orchestration_prompt(
-    prompt: &mut String,
-    meta_ctx: &MetaContext,
-    task_dir: &std::path::Path,
-    context_dir: Option<&std::path::Path>,
-) {
-    prompt.push_str("你是概率拟合专家 · 编排模式 (Probability Fitting · Orchestration).\n\n");
+    prompt.push_str("你是概率拟合专家 (Probability Fitting Agent).\n\n");
 
     // Task description
     if !meta_ctx.yang_prompt.task_description.is_empty() {
@@ -459,148 +417,32 @@ fn build_orchestration_prompt(
         prompt.push('\n');
     }
 
-    // Orchestration-specific instructions with plant-growth guidance
+    // Single fused instruction set (V26 异层同构: 拆解优先 + 执行优先融合)
     prompt.push_str(
         "## Instructions\n\
-         You are in **Orchestration** mode. Your primary tool is `recursive_decompose`\n\
-         for breaking complex tasks into subtasks, then synthesizing the results.\n\n\
-         Use L1 skills directly for atomic work items that don't need decomposition.\n\n\
-         ### 子任务模式选择指南 (Subtask Mode Selection)\n\
-         When calling `recursive_decompose`, set `mode` for each subtask:\n\n\
-         - `mode: \"Execution\"` — Task is atomic enough for a focused executor:\n\
-           ✓ Clear boundaries, can be done with L1 skills\n\
-           ✓ No further decomposition needed\n\
-           ✓ One focused agent can produce a complete result\n\n\
-         - `mode: \"Orchestration\"` — Task still complex, needs further decomposition:\n\
-           ✓ Spans multiple independent dimensions\n\
-           ✓ Requires phased approach (step A → verify → step B based on A)\n\
-           ✓ Scope is too large for a single execution pass\n\n\
-         ### 关键原则 (Plant Growth Principle)\n\
-         1. 🌱 Natural branching — decompose only where truly needed.\n\
-            A task tree should look like a plant: trunk → branches → leaves.\n\
-            NOT like: bare trunk → all leaves at the bottom.\n\n\
-         2. ⚖️ Default to Execution when unsure — over-decomposition wastes cycles.\n\
-            If a subtask could reasonably be done directly, set mode=\"Execution\".\n\
-            You can always fix incomplete execution; over-decomposition is harder to undo.\n\n\
-         3. 📊 Every node produces value — orchestration nodes produce synthesis reports;\n\
-            execution nodes produce concrete artifacts. No empty shells.\n\n\
-         4. 🚫 Leaf constraint — when depth+1 >= max_depth, subtask mode will be\n\
-            FORCED to \"Execution\" by the tool. Plan accordingly.\n\n\
-         Use `causal_verify` to check intermediate results against constraints.\n\
-          When all subtasks complete, provide a final synthesis summary.\n\n\
-          ### 产物路径 (Deliverable Paths)\n\
+         你在任务树的任意深度运行，与根任务完全同构。你的工具面包括\n\
+         `recursive_decompose`（拆解）、`causal_verify`（自检）与全部 L1 工具\n\
+         （read/write/bash/search/webfetch）。\n\n\
+         ### 执行策略 (由你判断)\n\
+         1. 🌱 拆解优先 (Decompose-First): 复杂任务先用 `recursive_decompose`\n\
+            MECE 拆解为子任务，子任务完成后汇聚其结果进行综合。\n\n\
+         2. 🎯 执行优先 (Execution-First): 原子任务直接用 L1 工具完成——\n\
+            读文件、写代码、跑命令，把工作做完。\n\n\
+         3. ⚖️ 何时拆解、何时直接执行，由你判断（植物生长原则）：\n\
+            只对真正复杂、跨多独立维度的任务拆解；能直接完成就绝不拆。\n\
+            过度拆解浪费轮次，宁可先直接执行再修补。\n\n\
+         4. ✅ 用 `causal_verify` 检查中间结果与约束，自检通过后再收尾。\n\
+            若调用了 `recursive_decompose`，全部子任务完成后提供综合摘要。\n\n\
+         ### 产物路径 (Deliverable Paths)\n\
          Write all output files to the deliverables directory using their\n\
          **absolute paths**.  After execution, your deliverables will be\n\
          automatically collected from the directory.  If you used\n\
          `recursive_decompose`, your subtasks' deliverables will be available\n\
          in `parent_deliverables` for the synthesis phase.\n\n\
-          Follow all constraints strictly — hard violations cause immediate failure.\n"
-    );
-}
-
-/// Build the prompt for **Execution** mode — the agent focuses on direct output
-/// using available tools.  `recursive_decompose` is available only as a last
-/// resort — the agent should first try to complete the task directly.
-fn build_execution_prompt(
-    prompt: &mut String,
-    meta_ctx: &MetaContext,
-    task_dir: &std::path::Path,
-    context_dir: Option<&std::path::Path>,
-) {
-    prompt.push_str("你是概率拟合专家 · 执行模式 (Probability Fitting · Execution).\n\n");
-
-    // Task description
-    if !meta_ctx.yang_prompt.task_description.is_empty() {
-        prompt.push_str("## Task\n");
-        prompt.push_str(&meta_ctx.yang_prompt.task_description);
-        prompt.push_str("\n\n");
-    }
-
-    // Constraint summaries
-    if !meta_ctx.yang_prompt.constraint_summaries.is_empty() {
-        prompt.push_str("## Constraints\n");
-        for summary in &meta_ctx.yang_prompt.constraint_summaries {
-            prompt.push_str(&format!("- {}\n", summary));
-        }
-        prompt.push('\n');
-    }
-
-    // Output directory (absolute path)
-    let deliverables_dir = task_dir.join("deliverables");
-    prompt.push_str("## 产出目录\n");
-    prompt.push_str(&format!(
-        "所有产物文件请使用**绝对路径**写入: `{}`\n",
-        deliverables_dir.display()
-    ));
-    prompt.push_str(&format!(
-        "产出文件示例: `{}/report.md`（而非相对路径 `report.md`）。\n\n",
-        deliverables_dir.display()
-    ));
-
-    // Parent deliverables (injected from recursive parent — read-only reference)
-    if !meta_ctx.yang_prompt.parent_deliverables.is_empty() {
-        prompt.push_str("## 父层产物参照 (Parent Deliverables - Read Only)\n");
-        prompt.push_str("以下文件由当前任务的父层产出，你可读取其内容但不可修改：\n");
-        for (i, path) in meta_ctx.yang_prompt.parent_deliverables.iter().enumerate() {
-            prompt.push_str(&format!("{}. {}\n", i + 1, path));
-        }
-        prompt.push('\n');
-    }
-
-    // External context (from frontend agent via MCP)
-    if let Some(ctx_dir) = context_dir {
-        let files_dir = ctx_dir.join("files");
-        if files_dir.exists() {
-            prompt.push_str("## External Context (from Frontend Agent)\n");
-            prompt.push_str("以下文件由前端 agent 已读取并传递给此任务：\n");
-            if let Ok(entries) = std::fs::read_dir(&files_dir) {
-                for entry in entries.flatten() {
-                    let index = entry.file_name().to_string_lossy().to_string();
-                    prompt.push_str(&format!("- `{}/{}`\n", files_dir.display(), index));
-                }
-            }
-            prompt.push_str("\n使用 `read` 工具检查这些文件的内容——它们包含了你推理所需的前端上下文。\n\n");
-        }
-    }
-
-    // Available tools
-    if !meta_ctx.matched_skills.is_empty() {
-        prompt.push_str("## Available Tools\n");
-        for skill in &meta_ctx.matched_skills {
-            prompt.push_str(&format!(
-                "- `{}` ({}): {}\n",
-                skill.tool_name, skill.name, skill.id
-            ));
-        }
-        prompt.push('\n');
-    }
-
-    // Execution-specific instructions
-    prompt.push_str(
-        "## Instructions\n\
-         You are in **Execution** mode. Your primary tools are the L1 skills above.\n\
-         Use them to directly produce output, artifacts, and results.\n\n\
-         ### 执行优先原则 (Execution-First)\n\
-         1. 🎯 Try to complete the task directly using available tools first.\n\
-            Read files, write code, execute commands — get the work done.\n\n\
-         2. 🔄 Complete the task directly in a single execution pass. You do not\n\
-            have access to recursive_decompose — focus on producing concrete\n\
-            output using the available L1 tools.\n\n\
-         3. ✅ Self-verify your output with `causal_verify` before finishing.\n\
-            Check that your deliverables meet the requirements.\n\n\
-          4. 📦 Produce concrete artifacts in the deliverables directory.\n\
-             Your output should be complete and directly usable.\n\n\
-          Follow all constraints strictly — hard violations cause immediate failure.\n"
+         Follow all constraints strictly — hard violations cause immediate failure.\n"
     );
 
-    // Deliverable path instruction (uses runtime path)
-    let deliv_dir_display = deliverables_dir.display();
-    prompt.push_str(&format!(
-        "\n### 产物路径 (Deliverable Paths)\n\
-         All files written to the deliverables directory will be automatically\n\
-         collected by absolute path.  Ensure you use the full absolute path when\n\
-         calling the `write` tool, e.g. `{deliv_dir_display}/report.md`.\n"
-    ));
+    prompt
 }
 
 // ---------------------------------------------------------------------------
@@ -618,7 +460,7 @@ mod tests {
     use crate::orchestration::constraint_engine::ConstraintEngine;
     use crate::orchestration::trigger_engine::SkillTriggerEngine;
     use crate::orchestration::worker_pool::WorkerPool;
-    use crate::types::agent::{AgentMode, SkillRef, YangPrompt};
+    use crate::types::agent::{SkillRef, YangPrompt};
     use crate::types::verification::TruthConstraint;
 
     fn make_config() -> TaijiConfig {
@@ -691,7 +533,6 @@ mod tests {
                 ],
                 parent_deliverables: vec![],
             },
-            mode: crate::types::agent::AgentMode::Orchestration,
             fitting_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
@@ -705,40 +546,20 @@ mod tests {
             &ctx,
             &std::path::PathBuf::from("./test_data/tasks/prompt-test"),
             None,
-            AgentMode::Orchestration,
         );
         assert!(prompt.contains("你是概率拟合专家"));
-        assert!(prompt.contains("Orchestration"));
         assert!(prompt.contains("Refactor the logging module"));
         assert!(prompt.contains("recursive_decompose"));
         assert!(prompt.contains("产出目录"));
-        // Should NOT contain execution-specific text
-        assert!(!prompt.contains("Execution-First"));
-    }
-
-    #[test]
-    fn test_build_system_prompt_execution_mode() {
-        let ctx = sample_meta_context();
-        let prompt = build_system_prompt(
-            &ctx,
-            &std::path::PathBuf::from("./test_data/tasks/prompt-test"),
-            None,
-            AgentMode::Execution,
-        );
-        assert!(prompt.contains("你是概率拟合专家"));
-        assert!(prompt.contains("Execution"));
-        assert!(prompt.contains("执行优先原则"));
-        assert!(prompt.contains("Refactor the logging module"));
-        assert!(prompt.contains("产出目录"));
-        // Should NOT contain orchestration-specific text
-        assert!(!prompt.contains("子任务模式选择指南"));
-        assert!(!prompt.contains("Plant Growth"));
+        // V26 单模板：融合拆解优先 + 执行优先
+        assert!(prompt.contains("拆解优先"));
+        assert!(prompt.contains("执行优先"));
     }
 
     #[test]
     fn test_build_system_prompt_empty_context() {
         let ctx = MetaContext::empty();
-        let prompt = build_system_prompt(&ctx, &std::path::PathBuf::from("./test_data/tasks/empty-test"), None, AgentMode::Execution);
+        let prompt = build_system_prompt(&ctx, &std::path::PathBuf::from("./test_data/tasks/empty-test"), None);
         // Should still have the role header and instructions.
         assert!(prompt.contains("你是概率拟合专家"));
         assert!(prompt.contains("Instructions"));
@@ -760,7 +581,7 @@ mod tests {
         };
 
         let cancel = tokio_util::sync::CancellationToken::new();
-        let builder = factory.create_fitting_agent(0, AgentMode::Orchestration, &meta_ctx, &engine_ctx, cancel);
+        let builder = factory.create_fitting_agent(0, &meta_ctx, &engine_ctx, cancel);
         assert!(builder.is_ok());
         let builder = builder.unwrap();
         assert_eq!(builder.engine_ctx().task_id, "test-task-1");
@@ -788,7 +609,7 @@ mod tests {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let builder = factory
-            .create_fitting_agent(1, AgentMode::Execution, &meta_ctx, &engine_ctx, cancel)
+            .create_fitting_agent(1, &meta_ctx, &engine_ctx, cancel)
             .expect("builder");
 
         let result = builder.run("Write a test for the logging module", None).await;
@@ -831,7 +652,7 @@ mod tests {
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         let builder = factory
-            .create_fitting_agent(1, AgentMode::Orchestration, &meta_ctx, &engine_ctx, cancel)
+            .create_fitting_agent(1, &meta_ctx, &engine_ctx, cancel)
             .expect("builder");
 
         // run() should NOT return MaxDepthExceeded because 1 <= 2.

@@ -1,58 +1,34 @@
 use serde::{Deserialize, Serialize};
 
-/// Specifies whether a FittingAgent (概率拟合·阳) operates in **Orchestration**
-/// or **Execution** mode.
-///
-/// | depth | mode |谁决定 |
-/// |-------|------|--------|
-/// | `0` (root) | `Orchestration` | Runner 固定 |
-/// | `1..max_depth-1` | 子任务定 | 父 LLM 在 `SubtaskSpec.mode` 中指定 |
-/// | `max_depth` (leaf) | `Execution` | `RecursiveDecomposeTool` 强制覆盖 |
-///
-/// The `from_depth` helper is intentionally *absent* — mode is never derived
-/// from depth alone except at root (hardcoded) and leaf (tool-enforced).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub enum AgentMode {
-    /// Agent acts as a task decomposer/synthesizer — breaks complex tasks into
-    /// subtasks via `recursive_decompose`, delegates, then integrates results.
-    Orchestration,
-    /// Agent acts as a focused executor — uses L1 skills to directly produce
-    /// output, only decomposing when genuinely unable to execute directly.
-    Execution,
-}
-
 /// Context produced by MetaAgent (权重更新·元), injected as reasoning bias
 /// into FittingAgent and CausalAgent.
 ///
 /// MetaAgent queries the 归藏 (cognitive warehouse) and LLM-decides:
 /// - Cognitive context (constraints, skills)
-/// - The optimal [`AgentMode`] for the task
 /// - Composed system prompts for downstream agents
 ///
 /// # Fallback
 /// When 归藏 has no matching prompt assets, `fitting_system_prompt`,
 /// `verify_system_prompt`, and `converge_system_prompt` are `None`, and
 /// downstream agents fall back to their built-in hardcoded templates.
+///
+/// V26 起无 AgentMode（异层同构：任务节点在任意深度完全同构，无模式分化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaContext {
     pub constraints: Vec<crate::types::verification::TruthConstraint>,
     pub matched_skills: Vec<SkillRef>,
     pub yang_prompt: YangPrompt,
 
-    /// AgentMode decided by MetaAgent based on task type + 归藏 assets.
-    /// Defaults to [`AgentMode::Orchestration`] when unset (root task).
-    pub mode: AgentMode,
-
     /// Full system prompt for FittingAgent (概率拟合·阳), LLM-composed by
     /// MetaAgent.  When `None`, FittingAgent uses its built-in template.
     pub fitting_system_prompt: Option<String>,
 
     /// Full system prompt for CausalAgent.verify() (因果验证·阴).
-    /// When `None`, CausalAgent falls back to VERIFY_{ORC,EXEC}_SYSTEM_PROMPT.
+    /// When `None`, CausalAgent falls back to VERIFY_SYSTEM_PROMPT.
     pub verify_system_prompt: Option<String>,
 
     /// Full system prompt for CausalAgent.converge() (收敛判决).
-    /// When `None`, CausalAgent falls back to CONVERGE_{ORC,EXEC}_SYSTEM_PROMPT.
+    /// When `None`, CausalAgent falls back to CONVERGE_SYSTEM_PROMPT.
     pub converge_system_prompt: Option<String>,
 }
 
@@ -60,8 +36,7 @@ impl MetaContext {
     /// Create an empty/degraded `MetaContext` with no cognitive context.
     ///
     /// All optional prompt fields are `None`, causing downstream agents to
-    /// fall back to their built-in hardcoded templates.  Mode defaults to
-    /// [`AgentMode::Orchestration`] (safe for root task).
+    /// fall back to their built-in hardcoded templates.
     pub fn empty() -> Self {
         Self {
             constraints: vec![],
@@ -71,7 +46,6 @@ impl MetaContext {
                 constraint_summaries: vec![],
                 parent_deliverables: vec![],
             },
-            mode: AgentMode::Orchestration,
             fitting_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
@@ -160,6 +134,9 @@ pub struct ExternalToolResult {
 /// ├── orchestration_verify.yaml
 /// └── ...
 /// ```
+///
+/// V26 起 `agent_mode` 字段已删除（serde 默认宽容，旧归藏 YAML 中的
+/// `agent_mode` 键自动忽略，零迁移兼容）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptAsset {
     /// Type discriminator — always `"prompt"`.
@@ -187,8 +164,6 @@ pub struct PromptAsset {
 
     /// Which agent this prompt targets: `"FittingAgent"` or `"CausalAgent"`.
     pub agent_target: String,
-    /// Which mode this prompt is designed for.
-    pub agent_mode: AgentMode,
 
     /// Usage statistics (updated by DMN evolver).
     pub usage_count: u32,
@@ -204,7 +179,6 @@ impl PromptAsset {
         description: &str,
         content: &str,
         agent_target: &str,
-        agent_mode: AgentMode,
         tags: Vec<String>,
     ) -> Self {
         Self {
@@ -218,7 +192,6 @@ impl PromptAsset {
             version: 1,
             content: content.to_string(),
             agent_target: agent_target.to_string(),
-            agent_mode,
             usage_count: 0,
             success_rate: 0.0,
         }

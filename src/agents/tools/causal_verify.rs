@@ -15,7 +15,7 @@ use serde::Deserialize;
 
 use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
-use crate::types::agent::{AgentMode, MetaContext};
+use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 
 /// Arguments for the causal_verify tool.
@@ -32,8 +32,6 @@ pub struct CausalVerifyArgs {
 pub struct CausalVerifyTool {
     factory: Arc<AgentFactory>,
     engine_ctx: EngineContext,
-    /// The mode of the parent FittingAgent — determines which verify prompt to use.
-    mode: AgentMode,
     /// Reasoning bias from MetaAgent, used for prompt selection.
     meta_ctx: MetaContext,
 }
@@ -43,18 +41,15 @@ impl CausalVerifyTool {
     ///
     /// - `factory` — shared `AgentFactory` used to create the CausalAgent builder.
     /// - `engine_ctx` — execution context for traceability.
-    /// - `mode` — the parent FittingAgent's mode.
     /// - `meta_ctx` — reasoning bias from MetaAgent, for prompt selection.
     pub fn new(
         factory: Arc<AgentFactory>,
         engine_ctx: EngineContext,
-        mode: AgentMode,
         meta_ctx: MetaContext,
     ) -> Self {
         Self {
             factory,
             engine_ctx,
-            mode,
             meta_ctx,
         }
     }
@@ -70,7 +65,7 @@ impl CausalVerifyTool {
         tool_results: &[String],
     ) -> Result<String, TaijiError> {
         let builder = self.factory.create_causal_verify_agent(&self.engine_ctx)?;
-        let report = builder.verify(task_output, tool_results, &self.meta_ctx, self.mode).await?;
+        let report = builder.verify(task_output, tool_results, &self.meta_ctx).await?;
         serde_json::to_string(&report).map_err(TaijiError::Serde)
     }
 }

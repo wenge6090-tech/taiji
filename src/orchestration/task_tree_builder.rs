@@ -11,7 +11,6 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::infra::error::TaijiError;
-use crate::types::agent::AgentMode;
 use crate::types::frontend::{
     DmnActivity, EvolutionSummary, NodeStatus, SpindleEdge, SpindleNode, TaskTreeSnapshot, TpnPhase,
 };
@@ -104,7 +103,6 @@ pub fn build_task_tree(data_root: &Path, root_task_id: &str) -> Result<TaskTreeS
             sibling_index,
             total_siblings,
             status,
-            mode: derive_mode(&task),
             phase,
             round,
             cycle,
@@ -196,17 +194,6 @@ fn derive_tpn_state(task: &Task, checkpoint: &Option<Checkpoint>) -> (TpnPhase, 
     };
 
     (phase, round, cycle)
-}
-
-/// AgentMode is not persisted per node; infer from depth (root = Orchestration,
-/// deeper levels are execution-leaning). The frontend uses this only for
-/// decorative borders.
-fn derive_mode(task: &Task) -> AgentMode {
-    if task.depth == 0 {
-        AgentMode::Orchestration
-    } else {
-        AgentMode::Execution
-    }
 }
 
 /// Count files in a directory (non-recursive).

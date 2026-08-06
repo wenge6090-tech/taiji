@@ -16,6 +16,9 @@ enum Command {
     Run {
         /// Task description (space-separated words, joined internally)
         description: Vec<String>,
+        /// Resume an interrupted/failed task by ID (reuses task dir + recovery chain)
+        #[arg(long)]
+        resume: Option<String>,
     },
     /// Initialize workspace (.taiji/ + 理络 knowledge store)
     Init,
@@ -57,7 +60,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { description } => cmd_run(description).await?,
+        Command::Run { description, resume } => cmd_run(description, resume).await?,
         Command::Init => cmd_init().await?,
         Command::Trace {
             task_id,
@@ -77,16 +80,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 // Command implementations
 // ---------------------------------------------------------------------------
 
-async fn cmd_run(description: Vec<String>) -> Result<(), Box<dyn std::error::Error>> {
+async fn cmd_run(
+    description: Vec<String>,
+    resume: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let desc = description.join(" ");
     let config = load_config()?;
 
     // Provider registry (LLM clients).
     let factory = build_engine(&config).await?;
 
-    // Execute task via RecursiveRunner.
+    // Execute task via RecursiveRunner (V26: --resume reuses task dir + recovery chain).
     let runner = taiji::orchestration::runner::RecursiveRunner::new(factory, config);
-    let result = runner.execute(&desc).await?;
+    let result = runner.execute_with_context(&desc, None, resume).await?;
 
     println!("✓ Task completed: {}", result.task_id);
     println!("  Content: {}", result.content);

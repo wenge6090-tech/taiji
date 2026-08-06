@@ -1,89 +1,97 @@
-# 实现计划 — 阶段 B：Meta/Causal 相位「LLM + 收集工具」落地（V25 蓝图对齐）
+# 实现计划 — 阶段 C：异层同构收敛（V26 蓝图对齐）
 
 ## 目标
 
-按用户框架要求「Meta 与 Causal 都需要 LLM 与收集信息的工具，才能更新权重、验证收敛」+「需要能上网查询网络信息核实」，将 MetaAgent / CausalAgent 从「无工具」升级为「LLM + 只读收集工具（read / search / webfetch）+ SafetyHook 挂载」，使蓝图 V25（§1.2 权限面、§8.2 权限同构、§8.5 Hook 安全模型）与代码一致。**webfetch 归入收集工具**（只读网络信息获取，不改变世界），write / bash / recursive_decompose / causal_verify 为仅 Fitting 持有的执行工具。
+删除 `AgentMode` 分裂，使**子任务与根任务完全同构**（代码结构 / 工具面 / prompt 模板 / 参数 / 日志 / 持久化 / 恢复 / 状态管理全部一致），根任务获得恢复入口，WorkerPool permit 语义简化为「并行分解节点上限」，项目回归简单简洁。
 
-**前置状态**：A1 安全验证、A2 WorkerPool 整改已完成并验收（144 passed / 0 failed / 9 ignored）。本计划独立于此，不重复。
+**用户原话**：「为什么异层同构不会生效，所有的子任务应当与根任务一致才对（代码结构、日志工具、持久化等等），我们的项目应该很简单简洁」
+
+**前置状态**：A1/A2/B 阶段完成并提交（151 passed / 0 failed / 9 ignored）。冒烟 + T1-T4 实测完成。
 
 ## 现状事实（已审计确认，2026-08-05）
 
-- **LLM 已存在，注释过时**：`src/agents/causal.rs` `verify()`（L236-277）与 `converge()`（L471-504）**已真实调用 LLM**（`agent.prompt` → serde 解析 `VerificationReport`/`ConvergenceDecision`），但文档注释仍写"degraded mode（跳过 LLM）"——过时注释需修正。`src/agents/meta.rs` `run()`（L126-136）也已调 LLM 做 MetaContext 编排。
-- **真正的缺口 = 收集工具 + 安全钩子**：
-  - MetaAgent：Rig agent 无任何工具注册（`max_turns=1` 单次提取，L129 `.default_max_turns(1)`），LLM 无法主动收集任务上下文/父层 deliverables/归藏资产
-  - CausalAgent：verify/converge 的 agent 均未注册工具（L237-242、L472-477 只有 preamble/max_tokens/max_turns/build），**但系统提示模板明确要求「MUST use the read tool to open each referenced file」**（causal.rs L315/L351/L541/L572）——模板要求与工具注册脱节，LLM 无法真正逐文件验证
-  - 三相位均未挂 SafetyHook（factory 中 `Arc<SafetyHook>` 单例已存在，仅 FittingAgent 挂载）
-- **追踪约束**（§7.2，不改）：元/阴相位用手动 TraceWriter 单条记录，**Meta/Causal 不加 TraceHook**，仅加 SafetyHook。
-- **测试现状**：causal.rs LLM 测试已 `#[ignore]`（L630/L666）；非 ignore 的 `test_verify_empty_summary_triggers_back_to_meta`（L645）走 ConstraintEngine Hard 短路不调 LLM——144 基线无真实 LLM 调用。
-- factory.rs：`safety_hook: Arc<SafetyHook>`（L56），`create_meta_agent`（L111）构造 `MetaAgentBuilder::new(task_id, liluo, providers, model)` 后直接返回——需链式接线。
-- 命名约束（AGENTS.md §1）：新代码用 `GuizangClient`/`guizang`/「归藏」，不改既有 `LiluoClient` 旧名。
+三个断裂点（详见 T4 实测分析）：
 
-## 模块清单
+1. **权限同构断裂**：`AgentMode`（Orchestration / Execution）导致工具面随 depth 分化——Execution 模式 FittingAgent 不注册 `recursive_decompose`（`recursive_decompose.rs:110-114` guard + `fitting.rs` 注册分支），与蓝图 §8.2「权限与 depth 无关」矛盾。58 处 AgentMode 引用（types/agent.rs:15 枚举、MetaContext.mode、PromptAsset.agent_mode、SubtaskSpec.mode、TaskNode.mode、fitting/causal 模板分支、tpn_cycle/runner 参数、ws/types、plan.rs、task_tree_builder）。
+2. **恢复不对称**：根任务 `runner.rs:59` 每次 `Uuid::new_v4()`，恢复链（`resume_history > decompose_result.json > checkpoint.json`，tpn_cycle.rs:104-115）对根任务永不触发；子任务有 children/ 扫描复用 + rerun_of。实测 0f172693 等超时任务变孤儿。
+3. **状态/超时不对称**：`runner.rs:126-133` timeout 路径不更新 task.status、不调 cancel；status 只在成功路径 L135 更新。NodeStatus 已有 Failed/Cancelled 变体（task_tree_builder.rs:166-167），前端协议无需新增。
 
-- [ ] `src/agents/meta.rs` — MetaAgentBuilder 加收集工具 + SafetyHook + max_turns 提升
-- [ ] `src/agents/causal.rs` — CausalVerifyAgentBuilder / CausalConvergeAgentBuilder 加 read 工具 + SafetyHook；修正过时注释
-- [ ] `src/agents/factory.rs` — create_meta_agent / create_causal_verify_agent / create_causal_converge_agent 接线 SafetyHook（与 create_fitting_agent 同一单例 Arc）
-- [ ] `src/agents/meta.rs` / `src/agents/causal.rs` 测试 — 新增 builder 配置断言测试；确认既有非 ignore 测试仍不触发真实 LLM
+附加实测问题（纳入本阶段）：verify/converge `max_turns=3`（causal.rs:91/442）真实任务不足（T4 子任务与父任务均 MaxTurnsError）；exec_timeout 默认 60s（config.rs:104）与蓝图 §8.6 600s 不符。
+
+## 模块清单（按依赖顺序编号）
+
+- [ ] C1 `src/types/agent.rs` — **删除 `AgentMode` 枚举**（L15）与 `MetaContext.mode`（L44）；`PromptAsset.agent_mode`（L191）删除（serde 默认宽容，旧归藏 YAML 自动兼容零迁移）
+- [ ] C2 `src/types/task.rs` — 删除 `SubtaskSpec.mode`（L29）
+- [ ] C3 `src/types/frontend.rs` — 删除 `TaskNode.mode`（L59）
+- [ ] C4 `src/types/plan.rs` — 删除 `agent_mode`（L22）/`mode`（L51）
+- [ ] C5 `src/ws/types.rs` — 删除 `mode`（L45，若 TaskEvent 携带）
+- [ ] C6 `src/agents/tools/recursive_decompose.rs` — 删除 mode guard（L110-114）、`SubtaskMeta.mode`（L212）、强制 Execution（L263）；**permit 语义改造**：工具入口 `acquire()` 1 个 permit 持有到 join 完成，spawn 闭包**不再**捕获 permit（L373-375 drop 移除）——子任务运行不持 permit，任意深度 decompose 在各自入口 acquire，无嵌套持有 → 无死锁
+- [ ] C7 `src/agents/tools/causal_verify.rs` — 删除 `mode` 字段（L36/51）
+- [ ] C8 `src/agents/fitting.rs` — 删除模式分支（L249/L305）：`build_system_prompt` 合并 ORC/EXEC 为单一模板（保留「拆解优先 + 执行优先」融合引导，prompt 中说明「可用 recursive_decompose 拆解，也可直接产出，由你判断」）；FittingAgentBuilder 删 `mode` 字段；工具注册无分支（全工具全层级）
+- [ ] C9 `src/agents/causal.rs` — 模板合并：`VERIFY_ORC/EXEC` → 单一 `VERIFY_SYSTEM_PROMPT`，`CONVERGE_ORC/EXEC` → 单一（L240-241/L514-515）；删 `mode` 参数（L186/L498）；**max_turns 3→6**（L91/L442）
+- [ ] C10 `src/agents/meta.rs` — 编排 prompt 删除 mode 决策指令；`MetaContext::empty()` 等构造适配；删测试中的 mode 断言（L358/382）
+- [ ] C11 `src/agents/factory.rs` — `create_fitting_agent` 删 `mode` 参数（L168）；create_causal_* 同步
+- [ ] C12 `src/orchestration/tpn_cycle.rs` — `execute()` 删 `mode` 参数（L101）；**status 统一管理**：每阶段结束原子写 `meta.json` status（Running→…→Completed/Failed/Cancelled，`save_json_atomic` 模式）；失败/取消路径写 Failed/Cancelled
+- [ ] C13 `src/orchestration/runner.rs` — `execute_with_context` 加 `resume_task_id: Option<String>`：Some 时复用 task_id（跳过 L59 uuid）、从 meta.json 读 depth 恢复 EngineContext；timeout 分支（L126-133）改为 `cancel.cancel()` + 原子写 status=Failed + 返回错误；删 L129 mode 参数；成功路径保留
+- [ ] C14 `src/orchestration/task_tree_builder.rs` — 删 L206-208 mode 分支
+- [ ] C15 `src/infra/config.rs` — `exec_timeout` 默认 60→600（对齐蓝图 §8.6）；max_rounds/max_cycles 默认值与蓝图统一（以 config.rs 为准，蓝图表格更新）
+- [ ] C16 `src/main.rs` — `taiji run` 增加 `--resume <task_id>` 解析，透传 runner
+- [ ] C17 测试 — 适配：fitting/causal/meta/recursive_decompose/knowledge（L975-1021 agent_mode 断言删）/task_tree_builder/worker_pool；新增：根任务 resume 恢复测试、permit 新语义测试（decompose 并发上限）、status 失败写入测试、causal max_turns=6 断言
+- [ ] C18 附带排查 — TraceHook tool_call 事件缺失（T4 问题 2）：确认 rig hook 事件完整性，缺失则补手动记录
+- [ ] C19 前端 — `taiji-web/src/types/index.ts` 删 TaskNode.mode；组件渲染 mode 处清理；确认 NodeStatus.Failed 渲染（失败节点显示）
 
 ## 接口签名（关键变更）
 
 ```rust
-// ── src/agents/meta.rs ──
-pub struct MetaAgentBuilder {
-    task_id: String,
-    liluo: Arc<LiluoClient>,
-    provider: Arc<ProviderRegistry>,
-    model: String,
-    max_turns: u32,                      // 默认 1 → 6（允许工具循环后二次提取）
-    task_dir: Option<PathBuf>,
-    safety_hook: Option<Arc<SafetyHook>>, // 新增
-}
+// tpn_cycle.rs — 删 mode 参数
+pub async fn execute(
+    &self,
+    description: &str,
+    initial_meta_ctx: Option<MetaContext>,
+    engine_ctx: &mut EngineContext,
+    cancel: CancellationToken,
+) -> Result<TPNResult, TaijiError>;
 
-impl MetaAgentBuilder {
-    pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self; // 新增 setter
-    pub fn max_turns(mut self, n: u32) -> Self;                  // 新增 setter（默认值 6）
-    // run() 内 agent 构建：.tool(read).tool(search) + safety_hook 为 Some 时 .hook(...)
-}
+// runner.rs — 恢复入口
+pub async fn execute_with_context(
+    &self,
+    description: &str,
+    external_ctx: Option<ExternalContext>,
+    resume_task_id: Option<String>,   // 新增：Some 时复用 task_id + 恢复链
+) -> Result<TPNResult, TaijiError>;
 
-// ── src/agents/causal.rs ──
-pub struct CausalVerifyAgentBuilder {
-    // ...既有字段
-    safety_hook: Option<Arc<SafetyHook>>, // 新增
-}
-pub struct CausalConvergeAgentBuilder {
-    // ...既有字段
-    safety_hook: Option<Arc<SafetyHook>>, // 新增
-}
-// 两 builder 各新增 pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self
-// verify()/converge() 内 agent 构建：.tool(ReadTool) + safety_hook 为 Some 时 .hook(...)
+// fitting.rs — 单模板单模式
+fn build_system_prompt(meta_ctx: &MetaContext, task_dir: &Path, context_dir: Option<&Path>) -> String;
 
-// ── src/agents/factory.rs（接线，签名不变）──
-create_meta_agent:        MetaAgentBuilder::new(...).max_turns(6).safety_hook(self.safety_hook.clone())
-create_causal_verify_agent:   ...builder.safety_hook(self.safety_hook.clone())
-create_causal_converge_agent: ...builder.safety_hook(self.safety_hook.clone())
+// recursive_decompose.rs — 入口持 permit
+pub async fn execute(&self, subtasks: Vec<SubtaskSpec>) -> Result<DecomposeResult, TaijiError>;
+// 内部：let _permit = self.pool.acquire().await?;  // 工具入口，持有到 join 完成
 ```
 
 ## 依赖顺序
 
-1. **B1 `src/agents/meta.rs`**：新增 `safety_hook` 字段 + setter；`max_turns` 默认 1→6 + setter；`run()` 构建 agent 时注册只读收集工具 read + search + webfetch（复用 `src/agents/tools/skills/` 既有实现），`safety_hook` 为 Some 时挂载。更新 L37 附近 `#[allow(dead_code)]` 注释（若字段不再死代码则移除该 allow，消除既有警告）。
-2. **B2 `src/agents/causal.rs`**：两 builder 新增 `safety_hook` 字段 + setter；`verify()`/`converge()` 构建 agent 时注册 read + webfetch 工具 + 挂 SafetyHook；修正过时注释（L158-162、L442-444「degraded mode」→ 实际 LLM 路径描述：ConstraintEngine 预检 → LLM 逐文件验证 + 联网核实 → 结构化裁决；LLM 失败 → `LLMCallFailed`）。
-3. **B3 `src/agents/factory.rs`**：三个 create_* 方法接线（依赖 B1/B2 的 setter）。
-4. **B4 测试与回归**：新增 builder 配置测试（safety_hook/max_turns 断言）；`cargo test --lib` 全量回归；`cargo build` 检查无新增警告；清理修改文件中的旧 `use` 导入/死字段。
+1. **C1-C5** types 层删枚举/字段（编译错密集期，按此顺序先清）
+2. **C6-C7** 工具层（decompose permit 语义 + causal_verify）
+3. **C8-C11** agent 层（fitting/causal/meta/factory）
+4. **C12-C14** orchestration（tpn_cycle status 统一 → runner resume+timeout → task_tree_builder）
+5. **C15-C16** config + CLI
+6. **C17** 测试适配与新增
+7. **C18** trace 排查（可与 1-6 并行观察）
+8. **C19** 前端同步
 
 ## 验收标准
 
-- [ ] `cargo build` 无新增警告（允许既有 3 个 lib 警告 + vendor cfg 警告）
-- [ ] `cargo test --lib` 全绿：144 基线 + 新增测试，0 failed（LLM 相关测试维持 `#[ignore]`）
-- [ ] 蓝图 V25 与代码一致：MetaAgent 注册 read+search+webfetch、CausalAgent verify/converge 均注册 read+webfetch、三相位（Meta/Fitting/Causal）挂载同一 SafetyHook 单例 Arc
-- [ ] 权限分工符合 §1.2：Meta/Causal 仅只读收集工具（read/search/webfetch），无 write/bash/recursive_decompose 等执行工具；webfetch 受 SafetyHook SSRF 检查约束（check_web_url）
-- [ ] 模板要求与工具注册闭合：causal.rs 系统提示中 read 工具要求（L315/L351/L541/L572）不再悬空；webfetch 供 LLM 按需联网核实（build 可酌情在 verify/converge 模板补充联网核实引导句）
-- [ ] Meta/Causal 不挂 TraceHook（§7.2 手动 TraceWriter 约定不变）
-- [ ] 新代码命名遵守 Guizang/guizang/归藏；修改文件无残留死代码/旧 use
+- [ ] `cargo build` 0 errors、无新增警告（既有 3 个 lib 警告允许）
+- [ ] `cargo test --lib` 全绿：151 基线 + 新增，0 failed（LLM 相关维持 `#[ignore]`）
+- [ ] `grep -rn AgentMode src/` 零命中（注释性历史说明可豁免）；前端 `grep AgentMode taiji-web/src/` 零命中
+- [ ] 根任务与子任务执行同一 `TpnCycle::execute` 路径：工具面、模板、max_turns（Meta 6 / Fitting 30 / Causal 6）、目录布局、恢复链、status 写入全部一致——**无任何 depth 特例**
+- [ ] permit 语义 = 并行分解节点上限：decompose 入口 acquire 1 个、join 后释放，spawn 闭包不持 permit；无死锁路径（持 permit 者不再 acquire）
+- [ ] `taiji run --resume <task_id>` 可恢复超时/失败任务（实测 0f172693 可恢复或正确标记）
+- [ ] 超时/取消/失败任务 `meta.json` status = Failed/Cancelled（前端不再 Running 残留）
+- [ ] 蓝图 V26 与代码一致（§1.1/§1.2/§2/§5.2/§8.1/§8.2/§8.6/§8.8/§8.10 同步）
 
 ## 范围外（明确不做）
 
-- Causal/Meta LLM 调用失败**重试机制**（AGENTS.md §6 提到重试 3 次，但现状代码无重试——既有偏差，本次不扩范围，单独跟进）
-- TraceHook 挂载 Meta/Causal（蓝图 §7.2 明确手动记录）
-- 温度调整（四象温度表不变，Meta 不在表内）
-- PlanBuilder（预演编排，不进 TPN，非目标相位；如内部复用 MetaAgentBuilder 路径则顺带获得工具）
-- 前端 / ChatAgent / DMN 激活
+- LLM 工具错误后重试去重（T4 问题 3：max_turns=6 后缓解，观察）
+- DMN 激活、CI/README/LICENSE、归藏资产 YAML 迁移（serde 宽容自动兼容）
+- AgentMode 删除引起的 PromptAsset 兼容读取测试（旧 YAML 加载，如 knowledge.rs 测试改用无 agent_mode 资产）

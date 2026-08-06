@@ -181,7 +181,6 @@ impl MetaAgentBuilder {
             Ok(ctx) => {
                 tracing::debug!(
                     task_id = %self.task_id,
-                    mode = ?ctx.mode,
                     has_fitting = ctx.fitting_system_prompt.is_some(),
                     has_verify = ctx.verify_system_prompt.is_some(),
                     has_converge = ctx.converge_system_prompt.is_some(),
@@ -233,19 +232,17 @@ const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Upd
 ## 输入
 - task_description：当前任务的完整描述
 - prompt_assets：理络中匹配的提示词资产列表（按置信度降序排列）
-  每项包含：id, name, content, agent_target, agent_mode, confidence
+  每项包含：id, name, content, agent_target, confidence
 
 ## 你需要做的
-1. 分析任务描述，判断任务复杂度：
-   - 复杂/多步骤/需要多 Agent 协作 → Orchestration 模式
-   - 简单/单步骤/可直接执行 → Execution 模式
-2. 从 prompt_assets 中选择置信度最高且与 mode 匹配的资产
+1. 分析任务描述，判断任务复杂度（V26 异层同构：无 Orchestration/Execution
+   模式之分——FittingAgent 在任意深度融合「拆解优先 + 执行优先」）
+2. 从 prompt_assets 中选择置信度最高的资产
 3. 将其 content 字段组合为三份完整的系统提示词
 
 ## 输出格式（严格 JSON，无额外注释）
 
 {
-  "mode": "Orchestration",
   "fitting_system_prompt": "完整的 FittingAgent 系统提示词，包含角色定义、指令和约束",
   "verify_system_prompt": "完整的 verify 系统提示词，以'你是因果验证器'开头",
   "converge_system_prompt": "完整的 converge 系统提示词，以'你是收敛判决器'开头",
@@ -281,14 +278,12 @@ fn build_llm_input(task_description: &str, matched: &[&PromptAsset]) -> String {
              - id: {id}\n\
              - name: {name}\n\
              - agent_target: {target}\n\
-             - agent_mode: {mode:?}\n\
              - confidence: {conf}\n\
              - content:\n```\n{content}\n```",
             idx = i + 1,
             id = asset.id,
             name = asset.name,
             target = asset.agent_target,
-            mode = asset.agent_mode,
             conf = asset.confidence,
             content = asset.content,
         ));
@@ -306,7 +301,6 @@ mod tests {
     use super::*;
     use crate::infra::provider::ProviderRegistry;
     use crate::infra::config::TaijiConfig;
-    use crate::types::agent::AgentMode;
 
     fn make_config() -> TaijiConfig {
         TaijiConfig {
@@ -355,7 +349,6 @@ mod tests {
         assert!(ctx.fitting_system_prompt.is_none());
         assert!(ctx.verify_system_prompt.is_none());
         assert!(ctx.converge_system_prompt.is_none());
-        assert_eq!(ctx.mode, AgentMode::Orchestration);
 
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
@@ -379,7 +372,6 @@ mod tests {
                 "",
                 "You are a test agent",
                 "FittingAgent",
-                AgentMode::Orchestration,
                 vec![],
             ),
         ];
@@ -387,7 +379,7 @@ mod tests {
         assert!(input.contains("Do something"));
         assert!(input.contains("test-prompt"));
         assert!(input.contains("You are a test agent"));
-        assert!(input.contains("Orchestration"));
+        assert!(!input.contains("agent_mode"));
     }
 
     #[tokio::test]

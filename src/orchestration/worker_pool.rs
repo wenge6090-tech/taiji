@@ -229,4 +229,28 @@ mod tests {
             "expected WorkerPoolUnavailable, got {err:?}"
         );
     }
+
+    #[tokio::test]
+    async fn test_permit_at_entry_not_consumed_by_spawned_children() {
+        // V26 permit 语义 = 并行分解节点上限：recursive_decompose 工具入口
+        // acquire 1 个 permit 并持有到 join 完成；spawn 闭包（子任务运行）
+        // **不 acquire permit**——因此 max=1 时入口持满 permit 不影响已
+        // spawn 子任务的运行（无嵌套持有 → 无死锁）。
+        let pool = Arc::new(WorkerPool::new(1));
+        let _permit = pool.acquire().await.unwrap();
+        assert_eq!(pool.available_permits(), 0);
+
+        // 模拟已 spawn 的子任务：运行期间完全不触碰 permit，应正常完成。
+        let child = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            true
+        })
+        .await
+        .unwrap();
+        assert!(child, "子任务运行不依赖 permit，max=1 持满时仍应完成");
+
+        // 入口 permit 释放后恢复。
+        drop(_permit);
+        assert_eq!(pool.available_permits(), 1);
+    }
 }

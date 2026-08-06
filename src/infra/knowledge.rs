@@ -972,7 +972,6 @@ mod tests {
             "Orchestration mode FittingAgent system prompt",
             "你是概率拟合专家（编排模式）...",
             "FittingAgent",
-            crate::types::agent::AgentMode::Orchestration,
             vec!["fitting".into(), "orchestration".into()],
         );
 
@@ -985,7 +984,6 @@ mod tests {
         let p = loaded.unwrap();
         assert_eq!(p.name, "编排拟合提示词");
         assert_eq!(p.agent_target, "FittingAgent");
-        assert_eq!(p.agent_mode, crate::types::agent::AgentMode::Orchestration);
         assert!(p.tags.contains(&"fitting".to_string()));
 
         // Load nonexistent prompt returns None (not error).
@@ -1007,7 +1005,6 @@ mod tests {
             "Execution mode FittingAgent prompt",
             "你是执行专家...",
             "FittingAgent",
-            crate::types::agent::AgentMode::Execution,
             vec!["fitting".into(), "execution".into()],
         );
         client.save_prompt(&mut p1).await.unwrap();
@@ -1018,7 +1015,6 @@ mod tests {
             "Execution mode CausalAgent verify prompt",
             "你是因果验证器（执行模式）...",
             "CausalAgent",
-            crate::types::agent::AgentMode::Execution,
             vec!["verify".into(), "execution".into()],
         );
         client.save_prompt(&mut p2).await.unwrap();

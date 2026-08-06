@@ -49,9 +49,6 @@ export default function SpindleNode({ node, selected, onSelect }: SpindleNodePro
           }}
         >
           <span className="text-sm font-bold tracking-wide">{abbr}</span>
-          {node.mode === "Orchestration" && (
-            <span className="absolute -right-1 -top-1 h-3 w-3 rounded-full border border-bg-deep bg-yang" />
-          )}
         </div>
       </div>
       <span className="mt-1 font-mono text-[10px] leading-none text-slate-400">

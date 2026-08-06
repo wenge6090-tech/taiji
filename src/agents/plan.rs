@@ -171,9 +171,7 @@ const PLAN_COMPOSE_SYSTEM_PROMPT: &str = r#"你是任务规划专家 (Task Plann
 
 ## 你需要做的
 1. 分析任务描述，评估复杂度（simple / moderate / complex）
-2. 确定最佳的 AgentMode（Orchestration 或 Execution）
-   - Orchestration：任务复杂、多步骤、可能需要拆分子任务
-   - Execution：任务简单、可直接执行、不需要拆解
+2. 判断是否需要拆分子任务：复杂任务可拆解，简单任务直接执行
 3. 列出预估的子任务（每个子任务含描述、验证方式、所需技能）
 4. 推荐可能需要的 L1 Skills（read / write / bash / search / webfetch）
 5. 描述预期交付产物
@@ -183,12 +181,10 @@ const PLAN_COMPOSE_SYSTEM_PROMPT: &str = r#"你是任务规划专家 (Task Plann
 
 {
   "task_analysis": "1-2 句话的任务分析",
-  "agent_mode": "Orchestration",
   "estimated_subtasks": [
     {
       "description": "子任务描述",
       "verification_approach": "验证方法说明",
-      "mode": "Orchestration",
       "required_skills": ["read", "write"]
     }
   ],
@@ -223,9 +219,6 @@ fn build_plan_prompt(description: &str, meta_ctx: &MetaContext) -> String {
     parts.push(format!(
         "## Task Description\n\n{description}\n\n## MetaContext\n"
     ));
-
-    // AgentMode
-    parts.push(format!("- AgentMode: {:?}", meta_ctx.mode));
 
     // Constraints
     if !meta_ctx.constraints.is_empty() {
@@ -295,7 +288,8 @@ mod tests {
         let prompt = build_plan_prompt("Do something", &ctx);
         assert!(prompt.contains("Do something"));
         assert!(prompt.contains("MetaContext"));
-        assert!(prompt.contains("Orchestration"));
+        // V26: prompt 不再携带 AgentMode（异层同构）
+        assert!(!prompt.contains("AgentMode"));
         // Empty context should not list constraints
         assert!(!prompt.contains("Constraints:"));
     }

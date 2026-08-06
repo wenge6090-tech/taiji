@@ -101,7 +101,8 @@ impl Default for RuntimeConfig {
             max_rounds: 10,
             max_cycles: 3,
             max_subtasks: 4,
-            exec_timeout: 60,
+            // 蓝图 §8.6: 默认 600s（10 分钟），允许复杂任务完整执行
+            exec_timeout: 600,
         }
     }
 }

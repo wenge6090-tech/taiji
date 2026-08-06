@@ -80,13 +80,9 @@ export default function TpnPopup({
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-slate-400">
               <span
-                className={`rounded border px-1.5 py-0.5 font-medium transition-colors duration-300 ${
-                  node.mode === "Orchestration"
-                    ? "border-yang/40 bg-yang/10 text-yang"
-                    : "border-slate-600 bg-slate-800 text-slate-400"
-                }`}
+                className="rounded border border-yang/40 bg-yang/10 px-1.5 py-0.5 font-medium text-yang transition-colors duration-300"
               >
-                {node.mode === "Orchestration" ? "阳" : "阴"}
+                阳
               </span>
               <span>round {node.round}</span>
               <span className="text-slate-600">·</span>

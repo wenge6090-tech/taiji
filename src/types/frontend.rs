@@ -7,8 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::agent::AgentMode;
-
 // ---------------------------------------------------------------------------
 // Node status & TPN phase
 // ---------------------------------------------------------------------------
@@ -56,7 +54,6 @@ pub struct SpindleNode {
     pub sibling_index: u32,
     pub total_siblings: u32,
     pub status: NodeStatus,
-    pub mode: AgentMode,
     pub phase: TpnPhase,
     pub round: u32,
     pub cycle: u32,

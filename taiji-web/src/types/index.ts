@@ -14,9 +14,6 @@ export type NodeStatus =
 /** TPN 三相位(后端 TpnPhase)。 */
 export type TpnPhase = "Idle" | "Meta" | "Fitting" | "Causal" | "Converged";
 
-/** Agent 模式(后端 AgentMode)。 */
-export type AgentMode = "Orchestration" | "Execution";
-
 /** 纺锤树节点(后端 SpindleNode)。 */
 export interface SpindleNode {
   taskId: string;
@@ -25,7 +22,6 @@ export interface SpindleNode {
   siblingIndex: number;
   totalSiblings: number;
   status: NodeStatus;
-  mode: AgentMode;
   phase: TpnPhase;
   round: number;
   cycle: number;
@@ -121,7 +117,7 @@ export type TaskEvent =
   | { type: "TaskCreated"; data: { taskId: string; description: string; parentId: string | null; depth: number } }
   | { type: "TaskStatusChanged"; data: { taskId: string; oldStatus: NodeStatus; newStatus: NodeStatus } }
   | { type: "PhaseChanged"; data: { taskId: string; phase: TpnPhase } }
-  | { type: "ChildSpawned"; data: { parentTaskId: string; childTaskId: string; description: string; mode: AgentMode; depth: number } }
+  | { type: "ChildSpawned"; data: { parentTaskId: string; childTaskId: string; description: string; depth: number } }
   | { type: "ChildCompleted"; data: { childTaskId: string; status: NodeStatus; deliverables: string[]; rounds: number } }
   | { type: "TpnRouteDecision"; data: { taskId: string; route: string; cycle: number; round: number; verdict: string } }
   | { type: "DeliverableCreated"; data: { taskId: string; path: string; sizeBytes: number } }

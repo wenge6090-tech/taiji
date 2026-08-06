@@ -1,6 +1,5 @@
 use serde::{Deserialize, Serialize};
 
-use crate::types::agent::AgentMode;
 use crate::types::verification::ConvergenceStatus;
 
 /// A recursive work unit in the TPN-DMN engine.
@@ -15,18 +14,14 @@ pub struct Task {
 }
 
 /// Subtask specification emitted by LLM during recursive decomposition.
+///
+/// V26 起无 `mode` 字段（异层同构：子任务与根任务完全同构，无模式分化）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtaskSpec {
     pub description: String,
     pub verification_spec: String,
     #[serde(default)]
     pub context: serde_json::Value,
-    /// Whether this subtask executes in Orchestration (decompose further) or
-    /// Execution (focus on direct output) mode.
-    ///
-    /// The parent LLM sets this value. `RecursiveDecomposeTool` may override
-    /// it to `Execution` when `depth + 1 >= max_depth` (leaf enforcement).
-    pub mode: AgentMode,
     /// Explicit re-run marker: `Some(old_child_index)` means "re-run the
     /// subtask previously at `children/<old_child_index>/`". The `description`
     /// field carries the re-run reason and new requirements.

@@ -345,7 +345,7 @@ impl TaijiMcpServer {
             config,
         );
 
-        match runner.execute_with_context(&description, external_ctx).await {
+        match runner.execute_with_context(&description, external_ctx, None).await {
             Ok(result) => {
                 let payload = serde_json::json!({
                     "task_id": result.task_id,

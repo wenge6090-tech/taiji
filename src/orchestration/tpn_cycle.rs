@@ -35,10 +35,10 @@ use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::trace::{load_json_optional, save_json_atomic};
 use crate::orchestration::event_bus;
-use crate::types::agent::{AgentMode, MetaContext};
+use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 use crate::types::frontend::{TpnPhase, YinIntervention};
-use crate::types::task::{Checkpoint, CyclePhase, DecomposeResult, TPNResult};
+use crate::types::task::{Checkpoint, CyclePhase, DecomposeResult, Task, TaskStatus, TPNResult};
 use crate::types::verification::{ConvergenceStatus, VerificationReport, VerificationRoute};
 use crate::ws::types::TaskEvent;
 
@@ -84,9 +84,15 @@ impl TpnCycle {
     /// - `initial_meta_ctx` — if `Some`, skip the initial MetaAgent run.
     /// - `engine_ctx` — mutable engine context; `round`/`cycle` counters are
     ///   updated in-place for retry tracking.
-    /// - `mode` — Orchestration or Execution mode.
     /// - `resume_history` — if `Some`, skip MetaAgent + checkpoint, use history
     ///   directly (parent-initiated subtask re-run).  `None` for fresh execution.
+    ///
+    /// # Status management (V26 统一)
+    /// 根任务与子任务走同一路径：入口原子写 `meta.json` status=Running，每个
+    /// 阶段结束随 checkpoint 更新 status，PASS 写 Completed，失败/取消写
+    /// Failed/Cancelled（`save_json_atomic`）。`resume_task_id` 恢复复用同一
+    /// `task_id`，恢复链（resume_history > decompose_result.json > checkpoint.json）
+    /// 对根任务同样生效。
     ///
     /// # Returns
     ///
@@ -98,7 +104,53 @@ impl TpnCycle {
         description: &str,
         initial_meta_ctx: Option<MetaContext>,
         engine_ctx: &mut EngineContext,
-        mode: AgentMode,
+        resume_history: Option<Vec<Message>>,
+    ) -> Result<TPNResult, TaijiError> {
+        let result = self
+            .execute_inner(description, initial_meta_ctx, engine_ctx, resume_history)
+            .await;
+
+        // ── 统一 status 终态落盘（V26）：成功路径写 Completed，取消写
+        //    Cancelled，其余失败写 Failed —— 根/子任务共用，runner 纯薄壳 ──
+        match &result {
+            Ok(_) => {
+                let _ = write_task_status(
+                    &engine_ctx.task_dir,
+                    &engine_ctx.task_id,
+                    description,
+                    engine_ctx.depth,
+                    TaskStatus::Completed,
+                );
+            }
+            Err(TaijiError::Cancelled { .. }) => {
+                let _ = write_task_status(
+                    &engine_ctx.task_dir,
+                    &engine_ctx.task_id,
+                    description,
+                    engine_ctx.depth,
+                    TaskStatus::Cancelled,
+                );
+            }
+            Err(_) => {
+                let _ = write_task_status(
+                    &engine_ctx.task_dir,
+                    &engine_ctx.task_id,
+                    description,
+                    engine_ctx.depth,
+                    TaskStatus::Failed,
+                );
+            }
+        }
+
+        result
+    }
+
+    /// Internal implementation of the TPN loop (see [`execute`]).
+    async fn execute_inner(
+        &self,
+        description: &str,
+        initial_meta_ctx: Option<MetaContext>,
+        engine_ctx: &mut EngineContext,
         resume_history: Option<Vec<Message>>,
     ) -> Result<TPNResult, TaijiError> {
         let checkpoint_path = engine_ctx.task_dir.join("checkpoint.json");
@@ -196,6 +248,22 @@ impl TpnCycle {
             (None, false)
         };
 
+        // ── V26 状态统一管理：入口写 Running（根/子同构；子任务目录在
+        //    recursive_decompose 中创建，此处补写 meta.json）──
+        if let Err(e) = write_task_status(
+            &engine_ctx.task_dir,
+            &engine_ctx.task_id,
+            description,
+            engine_ctx.depth,
+            TaskStatus::Running,
+        ) {
+            tracing::warn!(
+                task_id = %engine_ctx.task_id,
+                error = %e,
+                "Failed to write Running status"
+            );
+        }
+
         // ── Phase 1: MetaAgent (权重更新·元) ──
         //
         // Run MetaAgent when ALL of these are true:
@@ -268,7 +336,6 @@ impl TpnCycle {
                             .factory
                             .create_fitting_agent(
                                 engine_ctx.depth,
-                                mode,
                                 &meta_ctx,
                                 engine_ctx,
                                 self.cancel.clone(),
@@ -283,7 +350,6 @@ impl TpnCycle {
                     .factory
                     .create_fitting_agent(
                         engine_ctx.depth,
-                        mode,
                         &meta_ctx,
                         engine_ctx,
                         self.cancel.clone(),
@@ -317,7 +383,7 @@ impl TpnCycle {
                         let verify_agent = self.factory.create_causal_verify_agent(engine_ctx)?;
                         let tool_results = collect_tool_results(&engine_ctx.task_dir);
                         verify_agent
-                            .verify(&fitting_result.content, &tool_results, &meta_ctx, mode)
+                            .verify(&fitting_result.content, &tool_results, &meta_ctx)
                             .await?
                     }
                 }
@@ -325,7 +391,7 @@ impl TpnCycle {
                 let verify_agent = self.factory.create_causal_verify_agent(engine_ctx)?;
                 let tool_results = collect_tool_results(&engine_ctx.task_dir);
                 let report = verify_agent
-                    .verify(&fitting_result.content, &tool_results, &meta_ctx, mode)
+                    .verify(&fitting_result.content, &tool_results, &meta_ctx)
                     .await?;
 
                 // Write checkpoint after Verify.
@@ -542,6 +608,35 @@ fn write_checkpoint(path: &Path, phase: CyclePhase, engine_ctx: &EngineContext, 
     }
 }
 
+/// Atomically write the task status into `task_dir/meta.json` (V26 统一状态管理).
+///
+/// Loads the existing `Task` if present and only updates `status`, preserving
+/// all other fields; creates a fresh `Task` entry when the file is missing
+/// (child task dirs are created by `recursive_decompose` before this runs).
+/// Serialization follows the atomic-write convention (tmp + rename).
+pub(crate) fn write_task_status(
+    task_dir: &Path,
+    task_id: &str,
+    description: &str,
+    depth: u32,
+    status: TaskStatus,
+) -> Result<(), TaijiError> {
+    let meta_path = task_dir.join("meta.json");
+    let mut task = match load_json_optional::<Task>(&meta_path) {
+        Ok(Some(t)) => t,
+        _ => Task {
+            id: task_id.to_string(),
+            description: description.to_string(),
+            depth,
+            status: TaskStatus::Pending,
+            parent_id: None,
+            subtask_ids: vec![],
+        },
+    };
+    task.status = status;
+    save_json_atomic(&task, &meta_path).map_err(TaijiError::IO)
+}
+
 /// Load chat_history from disk, returning empty Vec on any error.
 fn load_chat_history_or_empty(task_dir: &Path) -> Vec<Message> {
     let path = task_dir.join("chat_history.json");
@@ -672,5 +767,182 @@ fn trunc(s: &str, max_len: usize) -> String {
         s.to_string()
     } else {
         chars[..max_len].iter().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agents::factory::AgentFactory;
+    use crate::hooks::safety::SafetyHook;
+    use crate::infra::config::{LlmConfig, RuntimeConfig, SafetyConfig, TaijiConfig};
+    use crate::infra::provider::ProviderRegistry;
+    use crate::types::execution::EngineContext;
+
+    fn make_config() -> TaijiConfig {
+        TaijiConfig {
+            version: "0.1.0".into(),
+            workspace: "default".into(),
+            data_root: "./data".into(),
+            llm: LlmConfig {
+                default_provider: "deepseek".into(),
+                default_model: "deepseek-chat".into(),
+                api_key: "test-key".into(),
+                base_url: None,
+                agent_overrides: std::collections::HashMap::new(),
+                ..Default::default()
+            },
+            runtime: RuntimeConfig::default(),
+            knowledge: crate::infra::config::KnowledgeConfig::default(),
+            safety: SafetyConfig::default(),
+            mcp_servers: vec![],
+        }
+    }
+
+    fn tmp_task_dir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("taiji_tpn_test_{tag}_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create tmp task dir");
+        dir
+    }
+
+    fn make_engine_ctx(task_id: &str, task_dir: std::path::PathBuf) -> EngineContext {
+        EngineContext {
+            task_id: task_id.into(),
+            depth: 0,
+            task_dir,
+            cycle: 1,
+            round: 0,
+            context_dir: None,
+        }
+    }
+
+    async fn build_factory(config: TaijiConfig) -> Arc<AgentFactory> {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "taiji_tpn_factory_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let liluo = Arc::new(
+            crate::infra::knowledge::LiluoClient::new(&tmp_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let providers = ProviderRegistry::new(&config).expect("ProviderRegistry");
+        Arc::new(AgentFactory {
+            liluo,
+            providers: Arc::new(providers),
+            config,
+            safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
+            worker_pool: Arc::new(crate::orchestration::worker_pool::WorkerPool::new(4)),
+            constraint_engine: Arc::new(crate::orchestration::constraint_engine::ConstraintEngine::new()),
+            trigger_engine: Arc::new(crate::orchestration::trigger_engine::SkillTriggerEngine::new()),
+            data_root: std::path::PathBuf::from("./data"),
+        })
+    }
+
+    // ── write_task_status (V26 统一状态管理) ─────────────────────────
+
+    #[test]
+    fn test_write_task_status_creates_missing_meta() {
+        let dir = tmp_task_dir("status_create");
+        let result = write_task_status(&dir, "task-1", "desc", 0, TaskStatus::Running);
+        assert!(result.is_ok());
+
+        let task: Task = load_json_optional(&dir.join("meta.json"))
+            .expect("load meta")
+            .expect("meta exists");
+        assert_eq!(task.id, "task-1");
+        assert_eq!(task.status, TaskStatus::Running);
+        assert_eq!(task.depth, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_write_task_status_preserves_existing_fields() {
+        let dir = tmp_task_dir("status_update");
+        write_task_status(&dir, "task-1", "old desc", 0, TaskStatus::Running).expect("running");
+        write_task_status(&dir, "task-1", "new desc", 99, TaskStatus::Failed).expect("failed");
+
+        let task: Task = load_json_optional(&dir.join("meta.json"))
+            .expect("load meta")
+            .expect("meta exists");
+        // 只更新 status，其余字段保留（V26 统一状态管理契约）
+        assert_eq!(task.status, TaskStatus::Failed);
+        assert_eq!(task.description, "old desc");
+        assert_eq!(task.depth, 0);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // ── TpnCycle status 终态落盘（根/子同构）─────────────────────────
+
+    #[tokio::test]
+    async fn test_execute_writes_cancelled_on_cancelled_token() {
+        let config = make_config();
+        let factory = build_factory(config.clone()).await;
+        let task_id = "cancel-test";
+        let task_dir = tmp_task_dir(task_id);
+        write_task_status(&task_dir, task_id, "desc", 0, TaskStatus::Running).expect("running");
+
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let tpn = TpnCycle::new(factory, config, cancel);
+        let mut ctx = make_engine_ctx(task_id, task_dir.clone());
+        let result = tpn
+            .execute("desc", Some(MetaContext::empty()), &mut ctx, None)
+            .await;
+
+        assert!(matches!(result, Err(TaijiError::Cancelled { .. })));
+        let task: Task = load_json_optional(&task_dir.join("meta.json"))
+            .expect("load meta")
+            .expect("meta exists");
+        assert_eq!(task.status, TaskStatus::Cancelled);
+
+        let _ = std::fs::remove_dir_all(&task_dir);
+    }
+
+    #[tokio::test]
+    async fn test_execute_cached_result_writes_completed() {
+        // checkpoint.json + decompose_result.json 存在 → 返回缓存，不触发 LLM。
+        // 验证根任务恢复链（V26：根/子同一恢复路径）与 Completed 落盘。
+        let config = make_config();
+        let factory = build_factory(config.clone()).await;
+        let task_id = "cached-task";
+        let task_dir = tmp_task_dir(task_id);
+
+        let checkpoint = Checkpoint {
+            phase: CyclePhase::VerifyDone,
+            round: 0,
+            cycle: 0,
+        };
+        save_json_atomic(&checkpoint, &task_dir.join("checkpoint.json")).expect("checkpoint");
+
+        let cached = TPNResult {
+            task_id: task_id.into(),
+            content: "cached output".into(),
+            tools_used: vec![],
+            deliverables: vec![],
+            depth: 0,
+            rounds: 1,
+        };
+        save_json_atomic(&cached, &task_dir.join("decompose_result.json")).expect("decompose");
+        write_task_status(&task_dir, task_id, "desc", 0, TaskStatus::Failed).expect("meta");
+
+        let cancel = CancellationToken::new();
+        let tpn = TpnCycle::new(factory, config, cancel);
+        let mut ctx = make_engine_ctx(task_id, task_dir.clone());
+        let result = tpn.execute("desc", None, &mut ctx, None).await;
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap().task_id, task_id);
+        let task: Task = load_json_optional(&task_dir.join("meta.json"))
+            .expect("load meta")
+            .expect("meta exists");
+        assert_eq!(task.status, TaskStatus::Completed);
+
+        let _ = std::fs::remove_dir_all(&task_dir);
     }
 }

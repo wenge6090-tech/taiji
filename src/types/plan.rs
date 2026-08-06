@@ -7,8 +7,6 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::agent::AgentMode;
-
 /// Pre-execution plan summary: MetaAgent + LLM-composed plan.
 ///
 /// Returned by `taiji_plan` MCP tool.  Contains the task analysis, estimated
@@ -18,8 +16,6 @@ use crate::types::agent::AgentMode;
 pub struct PlanSummary {
     /// Brief (1-2 sentence) analysis of what the task entails.
     pub task_analysis: String,
-    /// AgentMode the MetaAgent recommended for this task.
-    pub agent_mode: AgentMode,
     /// Estimated subtasks the task may decompose into.
     #[serde(default)]
     pub estimated_subtasks: Vec<SubtaskPlan>,
@@ -47,8 +43,6 @@ pub struct SubtaskPlan {
     pub description: String,
     /// How to verify the subtask's output (verification approach).
     pub verification_approach: String,
-    /// Whether this subtask should decompose further or execute directly.
-    pub mode: AgentMode,
     /// Skill names likely needed for this subtask.
     #[serde(default)]
     pub required_skills: Vec<String>,
