@@ -7,7 +7,8 @@
 //!
 //! # Sensitive data
 //! All payloads are run through [`redact_sensitive`] before writing, which
-//! replaces values of keys named `"api_key"` or `"token"` with `"***REDACTED***"`.
+//! replaces values of keys named `"api_key"` or `"token"` with `"***REDACTED***"`,
+//! plus values matching prefixed key patterns (`sk-…`/`ds-…`/`ghp_…`/`AKIA…`).
 
 use crate::infra::trace::{TraceRecord, TraceWriter};
 use crate::types::execution::EngineContext;
@@ -34,6 +35,8 @@ use std::time::Instant;
 /// - `last_completion_input`: cached input for pairing with the response hook.
 /// - `tool_starts`: maps `internal_call_id → (Instant, input_string)` for
 ///   pairing tool-call hooks with their result hooks.
+/// - `tools_called`: de-duplicated, insertion-ordered names of every tool
+///   actually invoked (recorded in [`PromptHook::on_tool_call`]).
 #[derive(Clone)]
 pub struct TraceHook {
     writer: Arc<TraceWriter>,
@@ -42,6 +45,7 @@ pub struct TraceHook {
     completion_start: Arc<Mutex<Option<Instant>>>,
     last_completion_input: Arc<Mutex<Option<String>>>,
     tool_starts: Arc<Mutex<HashMap<String, (Instant, String)>>>,
+    tools_called: Arc<Mutex<Vec<String>>>,
 }
 
 impl TraceHook {
@@ -55,6 +59,21 @@ impl TraceHook {
             completion_start: Arc::new(Mutex::new(None)),
             last_completion_input: Arc::new(Mutex::new(None)),
             tool_starts: Arc::new(Mutex::new(HashMap::new())),
+            tools_called: Arc::new(Mutex::new(Vec::new())),
+        }
+    }
+
+    /// Return the names of every tool actually invoked during this agent run,
+    /// de-duplicated and in first-call order.
+    ///
+    /// Populated by [`PromptHook::on_tool_call`] — this covers both L1 Skills
+    /// and built-in composite tools (`recursive_decompose`, `causal_verify`),
+    /// and does not rely on text-matching the LLM response.
+    pub fn tools_called(&self) -> Vec<String> {
+        if let Ok(guard) = self.tools_called.lock() {
+            guard.clone()
+        } else {
+            Vec::new()
         }
     }
 
@@ -99,18 +118,23 @@ impl TraceHook {
     /// `api_key`, `api-key`, `apikey`, `token`, `secret`, `password`
     ///
     /// # Value-based redaction
-    /// All string values are scanned for patterns that match common API key
-    /// formats:
+    /// All string values are scanned for patterns that match common prefixed
+    /// key formats (V26.3 E3: prefix-only — the generic 40+ char rule was
+    /// removed because it nuked long-but-innocent strings like UUIDs, task ids
+    /// and file bodies, hiding the content the LLM reads):
     /// - `sk-` followed by 20+ alphanumeric chars (OpenAI-style)
     /// - `ds-` followed by 20+ alphanumeric chars (DeepSeek-style)
-    /// - Any 40+ character alphanumeric string (generic key/token)
+    /// - `ghp_` followed by 20+ alphanumeric chars (GitHub PAT)
+    /// - `AKIA` + 16 uppercase alphanumerics (AWS access key id)
     ///
     /// The original value is not mutated; a new `Value` tree is returned.
     pub fn redact_sensitive(value: &Value) -> Value {
         static KEY_VALUE_PATTERN: OnceLock<Regex> = OnceLock::new();
         let key_value_re = KEY_VALUE_PATTERN.get_or_init(|| {
-            Regex::new(r"(?i)(sk-[a-zA-Z0-9]{20,}|ds-[a-zA-Z0-9]{20,}|[a-zA-Z0-9_-]{40,})")
-                .expect("invalid key-value regex")
+            Regex::new(
+                r"(?i)(sk-[a-zA-Z0-9]{20,}|ds-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16})",
+            )
+            .expect("invalid key-value regex")
         });
 
         match value {
@@ -262,13 +286,18 @@ where
     /// [`on_tool_result`](PromptHook::on_tool_result) can pair them up.
     async fn on_tool_call(
         &self,
-        _tool_name: &str,
+        tool_name: &str,
         _tool_call_id: Option<String>,
         internal_call_id: &str,
         args: &str,
     ) -> ToolCallHookAction {
         if let Ok(mut guard) = self.tool_starts.lock() {
             guard.insert(internal_call_id.to_string(), (Instant::now(), args.to_string()));
+        }
+        if let Ok(mut guard) = self.tools_called.lock() {
+            if !guard.iter().any(|n| n == tool_name) {
+                guard.push(tool_name.to_string());
+            }
         }
 
         ToolCallHookAction::cont()
@@ -376,6 +405,50 @@ mod tests {
         assert_eq!(redacted["API_KEY"], "***REDACTED***");
     }
 
+    // ── V26.3 E3: value-based redaction is prefix-only ──────────────────
+
+    #[test]
+    fn redact_sensitive_preserves_long_plain_strings() {
+        // UUID / task ids / file bodies must no longer be nuked by the old
+        // generic 40+ char rule.
+        let uuid = "6f95dacd-d5bb-4b33-8d38-b2b1d5c87c24";
+        let long_code = "fn verify_everything_across_the_entire_codebase() -> Result<(), TaijiError> { /* 40+ chars of innocent text */ }";
+        let input = json!({
+            "task_id": uuid,
+            "content": long_code,
+            "nested": {"body": uuid}
+        });
+        let redacted = TraceHook::redact_sensitive(&input);
+        assert_eq!(redacted["task_id"], uuid);
+        assert_eq!(redacted["content"], long_code);
+        assert_eq!(redacted["nested"]["body"], uuid);
+    }
+
+    #[test]
+    fn redact_sensitive_still_redacts_prefixed_keys() {
+        let input = json!({
+            "openai_key": "sk-abcdefghijklmnopqrstuvwxyz1234567890",
+            "deepseek_key": "ds-abcdefghijklmnopqrstuvwxyz1234567890",
+            "github_token": "ghp_abcdefghijklmnopqrstuvwxyz123456",
+            "aws_key": "AKIAIOSFODNN7EXAMPLE",
+            "plain": "short"
+        });
+        let redacted = TraceHook::redact_sensitive(&input);
+        assert_eq!(redacted["openai_key"], "***REDACTED***");
+        assert_eq!(redacted["deepseek_key"], "***REDACTED***");
+        assert_eq!(redacted["github_token"], "***REDACTED***");
+        assert_eq!(redacted["aws_key"], "***REDACTED***");
+        assert_eq!(redacted["plain"], "short");
+    }
+
+    #[test]
+    fn redact_sensitive_sk_prefix_requires_20_chars() {
+        // `sk-` with fewer than 20 alphanumerics is not a real key pattern.
+        let input = json!({"value": "sk-short"});
+        let redacted = TraceHook::redact_sensitive(&input);
+        assert_eq!(redacted["value"], "sk-short");
+    }
+
     // ── write_record integration (temp file) ─────────────────────────
 
     #[test]
@@ -453,5 +526,41 @@ mod tests {
 
         let _ = std::fs::remove_file(&trace_path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    // ── tools_called (real tool invocation tracking) ───────────────────
+
+    #[tokio::test]
+    async fn tools_called_records_real_tool_names_deduplicated() {
+        use crate::hooks::test_support::TestCompletionModel;
+
+        let dir = std::env::temp_dir().join(format!("trace_tools_test_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let context = EngineContext {
+            task_id: "tools-test".into(),
+            depth: 0,
+            task_dir: dir.clone(),
+            cycle: 0,
+            round: 0,
+            context_dir: None,
+        };
+
+        let hook = TraceHook::new(&context, "test-model");
+
+        // on_tool_call is async in Rig 0.39's PromptHook — await each call.
+        let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "read", None, "call-1", "{}").await;
+        let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "read", None, "call-2", "{}").await;
+        let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "causal_verify", None, "call-3", "{}").await;
+        let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "read", None, "call-4", "{}").await;
+
+        let called = hook.tools_called();
+        assert_eq!(
+            called,
+            vec!["read".to_string(), "causal_verify".to_string()],
+            "tools_called should be de-duplicated and first-call ordered"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

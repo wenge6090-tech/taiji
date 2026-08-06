@@ -1,6 +1,12 @@
 //! ReadTool — read file contents with optional offset/limit windowing.
 //!
 //! Adapted from pi_agent_rust's ReadTool for taiji's tokio runtime.
+//!
+//! # Argument contract (V26.3 E2)
+//! The path may arrive in any of three forms:
+//! - `{"path": "src/lib.rs"}` — canonical keyed form.
+//! - `{"input": "src/lib.rs"}` — plain-string passthrough from `SkillTool::call`.
+//! - `{"input": "{\"path\": \"src/lib.rs\"}"}` — JSON-string-in-input form.
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
@@ -22,7 +28,8 @@ impl BuiltinSkill for ReadTool {
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let path_str = args
             .get("path")
-            .and_then(|v| v.as_str())
+            .and_then(JsonValue::as_str)
+            .or_else(|| args.get("input").and_then(JsonValue::as_str))
             .ok_or_else(|| {
                 TaijiError::Other("read: missing required 'path' argument".into())
             })?;
@@ -118,6 +125,16 @@ mod tests {
         let result = tool.call(&args).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing required 'path'"));
+    }
+
+    #[tokio::test]
+    async fn test_read_tool_accepts_input_key_plain_string() {
+        let tool = ReadTool;
+        // V26.3 E2: SkillTool plain-string passthrough (`{"input": "Cargo.toml"}`).
+        let args = serde_json::json!({"input": "Cargo.toml"});
+        let result = tool.call(&args).await.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert!(result["content"].as_str().unwrap_or("").len() > 0);
     }
 
     #[tokio::test]

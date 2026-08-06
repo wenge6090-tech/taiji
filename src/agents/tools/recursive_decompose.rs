@@ -13,7 +13,7 @@
 //! collected eagerly; any subtask failure short-circuits the entire tool.
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rig::completion::Message;
@@ -26,11 +26,11 @@ use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
 use crate::infra::trace::load_json_optional;
 use crate::orchestration::event_bus;
-use crate::orchestration::tpn_cycle::TpnCycle;
+use crate::orchestration::tpn_cycle::{write_task_status, TpnCycle};
 use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 use crate::types::frontend::NodeStatus;
-use crate::types::task::{ChildResultSummary, DecomposeResult, SubtaskSpec, TPNResult};
+use crate::types::task::{ChildResultSummary, DecomposeResult, SubtaskSpec, Task, TaskStatus, TPNResult};
 use crate::types::verification::ConvergenceStatus;
 use crate::ws::types::TaskEvent;
 
@@ -369,10 +369,12 @@ impl RecursiveDecomposeTool {
                 }
                 Ok((_idx, Err(e))) => {
                     join_set.abort_all();
+                    mark_aborted_children_failed(&children_root);
                     return Err(e);
                 }
                 Err(join_err) => {
                     join_set.abort_all();
+                    mark_aborted_children_failed(&children_root);
                     return Err(TaijiError::Other(format!(
                         "Child agent task panicked: {join_err}"
                     )));
@@ -439,6 +441,71 @@ impl RecursiveDecomposeTool {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Best-effort mark of every aborted child whose `meta.json` still says
+/// `Running` as `Failed` (V26.3, E1).
+///
+/// `tokio::task::JoinSet::abort_all()` kills the child futures without running
+/// their cancellation/status-writing paths, so without this step children
+/// would stay `Running` forever even though they were terminated mid-flight.
+/// Iterates the numeric `children/<idx>/` directories only; skips non-directory
+/// entries and unreadable `meta.json` (warn only). Write failures warn and are
+/// swallowed — this helper must never block error propagation in the caller.
+fn mark_aborted_children_failed(children_root: &Path) {
+    let entries = match std::fs::read_dir(children_root) {
+        Ok(entries) => entries,
+        Err(e) => {
+            tracing::warn!(
+                path = %children_root.display(),
+                error = %e,
+                "Failed to list children/ while marking aborted subtasks Failed"
+            );
+            return;
+        }
+    };
+
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() {
+            continue;
+        }
+        let Some(idx_str) = dir.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if idx_str.parse::<usize>().is_err() {
+            continue;
+        }
+
+        let Some(task) = load_json_optional::<Task>(&dir.join("meta.json"))
+            .ok()
+            .flatten()
+        else {
+            tracing::warn!(
+                path = %dir.display(),
+                "Skipping child with missing/unreadable meta.json during abort marking"
+            );
+            continue;
+        };
+
+        if task.status != TaskStatus::Running {
+            continue;
+        }
+
+        if let Err(e) = write_task_status(
+            &dir,
+            &task.id,
+            &task.description,
+            task.depth,
+            TaskStatus::Failed,
+        ) {
+            tracing::warn!(
+                path = %dir.display(),
+                error = %e,
+                "Failed to mark aborted child subtask as Failed"
+            );
+        }
+    }
+}
 
 /// Map a TPNResult into a DecomposeResult for convergence analysis.
 fn map_tpn_to_decompose(result: &TPNResult) -> DecomposeResult {
@@ -562,5 +629,77 @@ mod tests {
         assert!(result.contains("Do task"));
         assert!(result.contains("Verify"));
         assert!(!result.contains("Additional Context"));
+    }
+
+    // ── mark_aborted_children_failed (V26.3 E1) ─────────────────────────
+
+    fn make_child_meta(dir: &Path, status: TaskStatus) {
+        let task = Task {
+            id: format!("child-{}", dir.file_name().unwrap().to_string_lossy()),
+            description: "child task".into(),
+            depth: 1,
+            status,
+            parent_id: Some("parent".into()),
+            subtask_ids: vec![],
+        };
+        std::fs::write(
+            dir.join("meta.json"),
+            serde_json::to_string_pretty(&task).expect("serialize task"),
+        )
+        .expect("write meta.json");
+    }
+
+    #[test]
+    fn test_mark_aborted_children_failed_flips_running_only() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "recursive_decompose_abort_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let children_root = tmp_dir.join("children");
+
+        let running_dir = children_root.join("1");
+        let completed_dir = children_root.join("2");
+        let missing_meta_dir = children_root.join("3");
+        std::fs::create_dir_all(&running_dir).expect("create children/1");
+        std::fs::create_dir_all(&completed_dir).expect("create children/2");
+        std::fs::create_dir_all(&missing_meta_dir).expect("create children/3");
+        std::fs::create_dir_all(children_root.join("not-a-number")).expect("create non-numeric dir");
+        std::fs::write(children_root.join("stray-file"), b"x").expect("stray file");
+
+        make_child_meta(&running_dir, TaskStatus::Running);
+        make_child_meta(&completed_dir, TaskStatus::Completed);
+
+        mark_aborted_children_failed(&children_root);
+
+        let running_meta: Task =
+            serde_json::from_str(&std::fs::read_to_string(running_dir.join("meta.json")).unwrap())
+                .expect("read running meta");
+        assert_eq!(running_meta.status, TaskStatus::Failed);
+
+        let completed_meta: Task =
+            serde_json::from_str(&std::fs::read_to_string(completed_dir.join("meta.json")).unwrap())
+                .expect("read completed meta");
+        assert_eq!(completed_meta.status, TaskStatus::Completed, "non-Running untouched");
+
+        // Missing meta.json must not panic; non-numeric dirs/files skipped.
+        assert!(!children_root.join("3").join("meta.json").exists());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+    }
+
+    #[test]
+    fn test_mark_aborted_children_failed_missing_root_is_noop() {
+        let tmp_dir = std::env::temp_dir().join(format!(
+            "recursive_decompose_abort_missing_test_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        let children_root = tmp_dir.join("children");
+
+        mark_aborted_children_failed(&children_root);
+
+        assert!(!children_root.exists());
+        let _ = std::fs::remove_dir_all(&tmp_dir);
     }
 }

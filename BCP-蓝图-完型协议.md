@@ -10,6 +10,12 @@
 >
 > **V25 变更摘要（2026-08-05，Meta/Causal 收集工具落地）：** Meta 与 Causal 相位从「无工具」升级为「LLM + 只读收集工具」——MetaAgent 注册 read / search / webfetch（收集任务上下文、父层 deliverables、归藏资产与网络信息后更新权重），CausalAgent 注册 read / webfetch（LLM 逐文件核验 deliverables、联网核实外部事实后裁决路由）。§1.2 权限面列、§8.2 权限同构、§8.5 Hook 安全模型更新：执行工具（write / bash / recursive_decompose / causal_verify）收敛 Fitting 相位，收集工具（read / search / webfetch）三相共有，「带工具必有安全钩子」为硬约束（Meta / Causal 均挂载 SafetyHook，webfetch 的 SSRF 检查由此生效）。§8.9 硬编码保证第 3、4 条（read 逐文件验证）由此从模板要求变为工具注册事实。
 
+> **V26.3 变更摘要（2026-08-07，任务 6f95dacd 深度分析落地）：** 对 E2E 超时任务 6f95dacd（「逐一审计全部 src Rust 文件」）的完成情况与任务描述矛盾分析（结论：无虚假完成，status=Failed 诚实；但三层不一致）落地 4 项修复：① **abort 子任务状态落盘**——RecursiveDecomposeTool 错误路径 `abort_all()` 后统一把 `children/` 下 Running 子任务写 Failed（实测 8 个子任务 7 个停在 Running 且 3 个实际产出了交付物，与「超时/失败/取消正确落盘」宣称不符）；② **L1 Skills 工具参数契约对齐**——SkillTool ToolDefinition 暴露单参 `input` 但 BashTool 读 `command`、ReadTool 读 `path`，LLM 传 `{"input":"ls"}` 永远报 missing 参数，唯一活路是 input 塞 JSON 字符串（纯靠试错，每次 resume 重新踩坑）；修复为 BashTool/ReadTool 支持 `input` 键直读纯字符串 + ToolDefinition description 补用法示例（双保险）；③ **trace 脱敏精确化**——value-based 正则 `[a-zA-Z0-9_-]{40,}` 误伤 UUID/文件正文，LLM 读 config.json 等内容被整段遮蔽；收紧为仅密钥前缀匹配或仅 key-based，read/bash 输出豁免 value-based；④ **Fitting 规模感知引导**——模板提示任务过大时优先拆解分批、预算不足时明确说明覆盖范围。§8.1（子任务状态一致性）、§8.5（工具契约与 description 约定）同步更新。
+
+> **V26.2 变更摘要（2026-08-07，持久化去冗余）：** 持久化文件审计发现 2 个只写不读的死文件并删除：① `meta_conversation.json`（内容四字段全部可推导：task_description→meta.json、llm_input/llm_response→trace.jsonl、meta_ctx→meta_ctx.json），连带删除 `MetaAgentBuilder.task_dir` 字段（仅为写它存在）；② `converge_state.json`（converge 在 RecursiveDecomposeTool 内部调用，其崩溃窗口已被「父任务失败→重跑→children/ 复用→重新 converge」幂等重放天然覆盖）。§8.1 新增任务目录持久化文件清单（唯一事实，新增文件必须先入清单）。
+
+> **V26.1 变更摘要（2026-08-07，E2E 实测修复）：** V26 端到端验收（156 测试全绿 + 真实任务冒烟 Completed + --resume 恢复 + 超时→Failed 验证）暴露 4 个问题并修复：① `tools_used` 统计从 LLM 响应文本 contains 匹配改为 **TraceHook 真实工具调用记录**（`on_tool_call` 收集工具名），消除 LLM 正文提及工具名的伪阳性；② CausalAgent verify/converge `max_turns` 6→10（真实任务首次 causal_verify 在 6 轮上限触发 MaxTurnsError，重试 25s 成功——6 轮不足，10 轮覆盖）；③ **对话历史增量快照**：新增 ChatHistorySnapshotHook，在每次 LLM 调用前将完整对话（history + prompt）原子持久化到 `chat_history.json`——弥补 Rig `chat()` 出错即返回、不回写历史的缺陷，使 `--resume` / 子任务 rerun 可从失败点增量推进而非从空历史重跑整个 Fitting 阶段；④ 修复 `test_fitting_agent_depth_check` 污染已跟踪 `test_data/`（task_dir 改用临时目录）。§7.2、§8.1、§8.2、§8.5 同步更新。
+
 > **V26 变更摘要（2026-08-05，异层同构收敛）：** 删除 `AgentMode`（Orchestration / Execution）分裂——此前 Execution 模式 FittingAgent 不注册 `recursive_decompose`，工具面随 depth 分化，与「权限不随 depth 变化」的异层同构声明自相矛盾。V26 起任务节点在任意深度**完全同构**：同一 FittingAgent 代码（全工具注册、单 prompt 模板、统一 max_turns=30）、同一恢复链（根任务新增 `taiji run --resume <task_id>` 恢复入口，与子任务共享同一恢复代码）、统一状态持久化（TpnCycle 统一原子写 meta.json status，超时/失败/取消正确落盘 Failed/Cancelled）。WorkerPool 信号量语义简化为「并行分解节点上限」（RecursiveDecomposeTool 入口 acquire 1 permit、join 完成后释放，子任务运行不持 permit——持 permit 者不再 acquire，无死锁路径）。CausalAgent verify/converge max_turns 3→6（T4 实测：3 轮不足，LLM 需 read 多文件才能裁决）。§1.1、§2、§4、§5.2、§6.2、§8.1、§8.2、§8.6、§8.8、§8.10 同步更新；`PromptAsset.agent_mode` 字段删除（serde 默认宽容，旧归藏 YAML 自动兼容）。递归终止仅靠 depth guard（§8.6）。
 >
 
@@ -137,7 +143,7 @@ taiji 的智能来自云端 LLM（DeepSeek via Rig）的概率采样能力与归
 | **归藏 (Guizang)** | 认知仓库 | 三层+预留 YAML 存储于 `.taiji/knowledge/`。TPN 执行期间只读，DMN Consumer 单写者 |
 | **MetaAgent** | 权重更新·元 | 瞬态 Rig Agent，查询归藏 Prompts 标签匹配 + LLM 编排 system prompt（fitting/verify/converge），产出 MetaContext，`max_turns=6`（收集→提取工具循环） |
 | **FittingAgent** | 概率拟合·阳 | 瞬态 Rig Agent，内置 5 个 L1 Skills + `recursive_decompose` + `causal_verify`（任意深度全量注册，V26 起无模式分化）；前端通过 MCP ExternalContext 注入额外上下文，`max_turns=30` |
-| **CausalAgent** | 因果验证·阴 | 瞬态 Rig Agent（双模式：verify / converge）。verify 先跑 ConstraintEngine 前置检查（Hard 直接短路），再调 LLM 裁决路由；converge 聚合子结果判决收敛。`max_turns=6` |
+| **CausalAgent** | 因果验证·阴 | 瞬态 Rig Agent（双模式：verify / converge）。verify 先跑 ConstraintEngine 前置检查（Hard 直接短路），再调 LLM 裁决路由；converge 聚合子结果判决收敛。`max_turns=10`（V26 由 3→6 仍不足，V26.1 再升至 10） |
 | **AgentFactory** | 瞬态 Agent 工厂 | 中枢组件，持有基础设施 Arc 引用（ProviderRegistry / GuizangClient / WorkerPool / ConstraintEngine） |
 | **ChatAgent** | 前端内嵌对话 Agent | 长生命周期 Rig Agent（24h 超时），注册 5 个 L1 Skills + SafetyHook，`max_turns=20`。`stream_chat()` 逐 token 推流到 WS 定向通道。聊天历史持久化到 `{data_root}/chat/{session_id}.json`。**与 TPN 循环完全解耦**（不进三相循环，不触发递归拆解） |
 | **DMN Consumer** | 反向传播·调权 | 独立后台任务，轮询 pending 队列执行演化（δ₀ 修剪 → δ₁ 技能调优）。纯符号层 YAML 更新，无需本地模型。代码已实现，可随时激活 |
@@ -795,6 +801,8 @@ data/                               ← 默认 data_root
 
 每层任务目录独立 `trace.jsonl`。`read_tree()` 递归遍历所有 `**/trace.jsonl` 按时间戳合并。单文件超过 10MB 自动轮转，保留最近 5 代。敏感信息（API Key）写入前脱敏。
 
+TraceHook 的 `on_tool_call` 同时收集**真实工具调用名**（V26.1 起）：FittingAgent 的 `tools_used` 统计改读此记录，不再对 LLM 响应文本做 contains 子串匹配（消除 LLM 正文提及工具名的伪阳性）。对话历史快照职责见 §8.1（ChatHistorySnapshotHook）。
+
 ---
 
 ## 8. 关键架构决策
@@ -817,16 +825,36 @@ AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → Age
 
 **恢复链对根任务与子任务同构生效**：子任务恢复由 RecursiveDecomposeTool 扫描 `children/` 时复用旧结果（rerun_of 索引）；根任务恢复由 `taiji run --resume <task_id>` 触发——runner 复用既有 task_id（不生成新 UUID），恢复 EngineContext（depth 从 meta.json 读取）后进入同一 `TpnCycle.execute` 恢复链。根/子共享同一段恢复代码，无特例。
 
+**对话历史增量快照（V26.1）**：Rig `chat()` 在 LLM 调用出错时提前返回、不回写 `chat_history`（仅成功时 `extend`）——仅靠 FittingAgent 成功路径的全量 save 会导致失败任务磁盘上恒为空历史，`--resume` 只能从空历史重跑整个 Fitting 阶段。为此在 FittingAgent 注册 **ChatHistorySnapshotHook**：每次 LLM 调用前（`on_completion_call`，含工具循环内每次调用）将完整对话（调用前 `history` + 本轮 `prompt`，均为 `rig::completion::Message`）按 `save_json_atomic` 原子快照到 `{task_dir}/chat_history.json`。失败/超时任务最多丢失最后一轮 in-flight 请求；成功路径的全量 save 保留作为最终一致性收尾。快照对根任务 `--resume` 与子任务 rerun 恢复同样生效。
+
+**任务目录持久化文件清单（V26.2，唯一事实——新增文件必须先入此清单，只写不读者禁止引入）**：
+
+| 文件 | 内容 | 写者 | 读者 | 用途 |
+|------|------|------|------|------|
+| `meta.json` | Task{id,desc,depth,status,parent_id,subtask_ids} | runner / TpnCycle | 前端、恢复链 | 任务元数据 + 生命周期状态 |
+| `checkpoint.json` | {phase,round,cycle} | TpnCycle 每阶段 | TpnCycle 崩溃恢复 | 循环进度（PASS 后删除） |
+| `meta_ctx.json` | MetaContext | TpnCycle（MetaDone 后） | TpnCycle 崩溃恢复 | 元阶段产出上下文 |
+| `chat_history.json` | Vec\<Message\> | SnapshotHook + Fitting 收尾 | resume 增量恢复 | Fitting 对话（失败点续跑） |
+| `verify_state.json` | {report,round,cycle} | CausalAgent.verify | TpnCycle（VerifyDone 恢复） | 验证报告缓存（路由决策） |
+| `decompose_result.json` | DecomposeResult/TPNResult | TpnCycle（PASS） | 缓存返回、子任务复用 | 完成标记 + 结果缓存 |
+| `deliverables/` | 产物文件 | FittingAgent | 聚合、前端 | 交付物实体 |
+| `children/` | 子任务目录 | RecursiveDecomposeTool | 扫描复用 | 递归树实体 |
+| `trace.jsonl` | 事件审计（脱敏） | TraceHook / 手动 | read_tree | 审计与工具结果提取 |
+
+> V26.2 已删除：`meta_conversation.json`（信息全部可推导）、`converge_state.json`（converge 幂等重放天然覆盖）。恢复链 `resume_history > decompose_result.json > checkpoint.json` 不受影响（死文件本无消费者）。
+
+**子任务状态一致性（V26.3）**：RecursiveDecomposeTool 错误路径 `abort_all()` 终止子任务后，`children/` 下 status=Running 的子任务必须统一落盘为 Failed（写失败仅 warn，不阻断父任务错误传播）——「超时/失败/取消正确落盘」声明覆盖所有任务节点，含被父任务中止的子任务；中止不产生虚假的 Running 残留。
+
 ### 8.2 异层同构（V26：单一模式，无分化）
 
 `depth` 只改变编号，不改变目录布局、TPN 循环结构、工具注册面、prompt 模板、max_turns 与恢复路径。根任务和子任务执行**同一段代码、同一套配置**（V26 起无 AgentMode，此前 Orchestration/Execution 双模式分化已删除——模式分化导致工具面随 depth 变化，与异层同构声明矛盾）。
 
 - 单 FittingAgent 模板：prompt 同时包含「拆解优先 + 执行优先」融合引导（「可用 recursive_decompose 拆解，也可直接产出，由你判断」），是否拆解由 LLM 依据任务描述自主判断
-- 单 max_turns：Meta 6 / Fitting 30 / Causal verify·converge 6（V26 提升，T4 实测 3 轮不足）
+- 单 max_turns：Meta 6 / Fitting 30 / Causal verify·converge 10（V26 提升至 6：T4 实测 3 轮不足；V26.1 再升至 10：真实任务 6 轮仍溢出）
 - 递归层间通过 `MetaContext`（推理偏置注入）和 `ConvergenceDecision`（收敛结果上浮）传递信息
 - 递归终止仅靠 depth guard：`depth >= max_depth` 时 RecursiveDecomposeTool 拒绝拆解（MaxDepthExceeded）
 
-**权限同构（异层同构的权限维度）**：任务节点在任意深度保持相同的三相分工与权限配置——每个子循环节点与根节点一样：Fitting 相位持有全部执行工具（含 recursive_decompose）并受同一 SafetyHook 约束、Meta / Causal 相位持有只读收集工具（read / search / webfetch）且无执行工具。权限与配置不随 depth 变化，不同深度不存在任何梯度。
+**权限同构（异层同构的权限维度）**：任务节点在任意深度保持相同的三相分工与权限配置——每个子循环节点与根节点一样：Fitting 相位持有全部执行工具（含 recursive_decompose）并受同一 SafetyHook 约束、Meta / Causal 相位持有只读收集工具（read / search / webfetch）且无执行工具。**权限模式与配置不随 depth 变化，权限边界随位置（task_dir）变化**（见 §8.9 工作区即权限边界）——不同深度不存在任何权限梯度。
 
 ### 8.3 TPN 只读 / DMN 单写者
 
@@ -851,6 +879,8 @@ SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到带工具的 Ri
 **节点间权限同构**：所有任务节点（任意 depth / round / cycle）共享同一进程级 `SafetyHook` 单例（`build_engine` 创建一次，`Arc` 注入全部带工具的 Agent），规则一致、白名单一致——权限配置在节点间完全同构，不存在按深度 / 轮次 / 层级的权限分化。
 
 **带工具必有安全钩子（硬约束）**：任何相位只要注册工具（含只读收集工具），就必须挂载 SafetyHook——「无工具的相位允许不挂载，带工具的相位必须挂载」是相位权限闭合的底线。CausalAgent 的 LLM 验证路径（verify / converge 真实 LLM 调用 + read 逐文件核验）已在此约束下落地。
+
+**L1 Skills 工具参数契约（V26.3）**：SkillTool 是单参 `input` 包装（Rig ToolDefinition 暴露 `input: string`，`call` 内对 input 值做二级 JSON 解析——JSON 字符串解析为对象，失败保留原文）。各内置工具的参数键必须与 LLM 可用的传参形式兼容：BashTool 读 `command`、ReadTool 读 `path`，**必须同时支持 `input` 键直读**（`args.get("input")` 为纯字符串时直接当命令/路径）——否则 LLM 按 schema 传 `{"input":"ls"}` 永远报 missing 参数，被迫试错摸索 `{"input":"{\"command\":\"ls\"}"}`（每次 resume 重跑重新踩坑，系统性吞噬预算）。ToolDefinition 的 description 必须包含用法示例（双保险：实现容错 + schema 引导）。write/search/webfetch 参数键同理自查。
 
 ### 8.6 递归防护
 
@@ -925,6 +955,8 @@ DecomposeResult.deliverables → 父 CausalAgent.converge() 逐文件检查
 **权限模型：**
 
 > 本节的路径权限与 §8.5 的相位权限分工共同构成节点间权限同构：每个任务节点（任意 depth）都遵循相同的「父→子只读、子→父聚合、兄弟隔离」目录规则——权限同构覆盖工具面（§8.5）与数据面（本节）两个维度。
+>
+> **工作区即权限边界**：节点权限范围 = 其 `task_dir`（根任务为 `{task_id}/`，子任务为 `children/N/`）——位置与权限一体两面：区内自由读写、区外不可达。本节路径规则（父→子只读、兄弟隔离、绝对路径单向传递）正是这一边界的载体。
 
 | 方向 | 规则 | 保证方式 |
 |------|------|---------|

@@ -208,10 +208,16 @@ impl FittingAgentBuilder {
             agent_builder = agent_builder.temperature(v);
         }
 
-        // ── Register hooks (safety + trace) ──
+        // ── Register hooks (safety → trace → chat-history snapshot) ──
         let trace_hook = TraceHook::new(&self.engine_ctx, &self.model);
         let safety_hook = self.factory.safety_hook.as_ref().clone();
-        let agent_builder = agent_builder.hook(safety_hook).hook(trace_hook);
+        let snapshot_hook = crate::hooks::chat_history_snapshot::ChatHistorySnapshotHook::new(
+            &self.engine_ctx.task_dir,
+        );
+        let agent_builder = agent_builder
+            .hook(safety_hook)
+            .hook(trace_hook.clone())
+            .hook(snapshot_hook);
 
         // ── Register built-in composite tools ──
         // V26: 异层同构 — 任意深度注册全部工具（recursive_decompose +
@@ -281,19 +287,12 @@ impl FittingAgentBuilder {
         };
         let response = response?;
 
-        // ── Extract tool call info from response (basic parsing) ──
-        // The LLM response may mention which tools were used; we capture
-        // available tool names from the registered set as a best-effort summary.
-        // V26: 全工具全层级注册，无模式分化。
-        let mut registered_tool_names: Vec<String> =
-            vec!["causal_verify".to_string(), "recursive_decompose".to_string()];
-        registered_tool_names.extend(skill_registry.get_tool_names());
-
-        // Check which tools appear in the response text
-        let tools_used: Vec<String> = registered_tool_names
-            .into_iter()
-            .filter(|name| response.contains(name))
-            .collect();
+        // ── Extract tool call info from real TraceHook records ──
+        // tools_used comes from TraceHook::on_tool_call, which captures every
+        // actual invocation (L1 Skills + recursive_decompose + causal_verify),
+        // instead of text-matching the LLM response (which caused false
+        // positives when the report merely mentioned a tool name).
+        let tools_used = trace_hook.tools_called();
 
         // Deliverables directory exists per BCP — list files if any
         let deliverables_dir = self.engine_ctx.task_dir.join("deliverables");
@@ -431,7 +430,11 @@ fn build_system_prompt(meta_ctx: &MetaContext, task_dir: &std::path::Path, conte
          3. ⚖️ 何时拆解、何时直接执行，由你判断（植物生长原则）：\n\
             只对真正复杂、跨多独立维度的任务拆解；能直接完成就绝不拆。\n\
             过度拆解浪费轮次，宁可先直接执行再修补。\n\n\
-         4. ✅ 用 `causal_verify` 检查中间结果与约束，自检通过后再收尾。\n\
+         4. 📏 规模感知 (Scale-Aware): 任务规模过大（涉及大量文件/大量行数）时，\n\
+            优先用 `recursive_decompose` 按模块分批拆解执行；若单轮预算\n\
+            （轮次/超时）内无法逐一完成全部内容，在最终报告/交付物中\n\
+            明确说明已覆盖范围与未覆盖部分，不要无限重试。\n\n\
+         5. ✅ 用 `causal_verify` 检查中间结果与约束，自检通过后再收尾。\n\
             若调用了 `recursive_decompose`，全部子任务完成后提供综合摘要。\n\n\
          ### 产物路径 (Deliverable Paths)\n\
          Write all output files to the deliverables directory using their\n\
@@ -554,6 +557,9 @@ mod tests {
         // V26 单模板：融合拆解优先 + 执行优先
         assert!(prompt.contains("拆解优先"));
         assert!(prompt.contains("执行优先"));
+        // V26.3 E4：规模感知引导
+        assert!(prompt.contains("规模感知"));
+        assert!(prompt.contains("未覆盖"));
     }
 
     #[test]
@@ -642,10 +648,13 @@ mod tests {
         let meta_ctx = sample_meta_context();
 
         // Depth 1, but max_depth defaults to 2 — should pass the guard.
+        // Task dir must live in tmp_dir (AGENTS.md §10: tests never write
+        // into tracked test_data/).
+        let task_dir = tmp_dir.join("depth-test");
         let engine_ctx = EngineContext {
             task_id: "depth-test".into(),
             depth: 1,
-            task_dir: std::path::PathBuf::from("./test_data/tasks/depth-test"),
+            task_dir,
             cycle: 1,
             round: 0,
             context_dir: None,

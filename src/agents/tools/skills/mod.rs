@@ -215,7 +215,14 @@ impl SkillTool {
 /// Arguments for a `SkillTool` call.
 #[derive(Debug, Deserialize)]
 pub struct SkillToolArgs {
-    /// Raw input arguments for the skill (JSON string or object).
+    /// Raw input arguments for the skill.
+    ///
+    /// Two forms are accepted (see the tool definition description for
+    /// per-skill usage examples):
+    /// - A **plain string** (e.g. `"ls -la"` for bash) — passed through to the
+    ///   skill as-is (mapped to the skill's primary parameter, e.g. `command`).
+    /// - A **JSON object string** (e.g. `'{"command": "ls -la"}'`) — parsed
+    ///   into the skill's parameter keys before the skill is invoked.
     input: Option<String>,
 }
 
@@ -236,15 +243,16 @@ impl Tool for SkillTool {
     }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
+        let desc = input_desc(&self.skill.name);
         ToolDefinition {
             name: self.skill.tool_name.clone(),
-            description: format!("L1 Skill: {} — {}", self.skill.id, self.skill.name),
+            description: format!("L1 Skill: {} — {}. Args: {}", self.skill.id, self.skill.name, desc),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "input": {
                         "type": "string",
-                        "description": "Raw input arguments for the skill"
+                        "description": desc
                     }
                 }
             }),
@@ -252,16 +260,35 @@ impl Tool for SkillTool {
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        let input: JsonValue = args
-            .input
-            .as_deref()
-            .and_then(|s| serde_json::from_str(s).ok())
-            .unwrap_or_default();
+        // Two-form input contract (V26.3 E2):
+        // - JSON object string  → parsed into the skill's parameter keys.
+        // - Plain string        → passed through as `{"input": "<string>"}` so
+        //   single-parameter skills (bash/read/search/webfetch) can consume it
+        //   directly via the `input` key.
+        let input: JsonValue = match args.input {
+            Some(s) if !s.trim().is_empty() => {
+                serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({ "input": s }))
+            }
+            _ => JsonValue::Null,
+        };
 
         self.execute(&input)
             .await
             .map(|v| SkillToolOutput(v.to_string()))
             .map_err(|e| ToolError::ToolCallError(Box::new(e)))
+    }
+}
+
+/// Per-skill usage description for the `input` argument (exposed in the tool
+/// definition so the LLM does not have to guess the argument contract).
+fn input_desc(skill_name: &str) -> &'static str {
+    match skill_name {
+        "bash" => "Shell command. 可传纯字符串命令（如 \"ls -la\"），或 JSON 字符串对象（如 '{\"command\": \"ls -la\"}'，可附 timeout/workdir）。",
+        "read" => "File path. 可传纯字符串路径（如 \"src/lib.rs\"），或 JSON 字符串对象（如 '{\"path\": \"src/lib.rs\"}'，可附 offset/limit）。",
+        "write" => "必须传 JSON 字符串对象（如 '{\"path\": \"out.md\", \"content\": \"hello\"}'），包含 path 与 content 两个键。",
+        "search" => "Search query. 可传纯字符串（如 \"fn main\"），或 JSON 字符串对象（如 '{\"query\": \"fn main\"}'，可附 path/limit）。",
+        "webfetch" => "URL. 可传纯字符串 URL（如 \"https://example.com\"），或 JSON 字符串对象（如 '{\"url\": \"https://example.com\"}'）。",
+        _ => "Raw input arguments for the skill.",
     }
 }
 
@@ -440,6 +467,67 @@ mod tests {
             };
             let result = tool.execute(&args).await;
             assert!(result.is_ok(), "Skill '{}' failed: {:?}", tool.name(), result.err());
+        }
+    }
+
+    // ── V26.3 E2: input contract — plain string / JSON object string ──────
+
+    fn bash_tool() -> SkillTool {
+        SkillTool::new(SkillRef {
+            id: "builtin::bash".into(),
+            name: "bash".into(),
+            tool_name: "bash".into(),
+            match_weight: 1.0,
+        })
+    }
+
+    #[tokio::test]
+    async fn test_skill_tool_accepts_plain_string_input() {
+        use rig::tool::Tool;
+        let tool = bash_tool();
+        // `{"input": "echo hi"}` — plain-string passthrough.
+        let out = tool
+            .call(SkillToolArgs {
+                input: Some("echo hi".into()),
+            })
+            .await
+            .expect("plain string input should work");
+        assert!(out.0.contains("hello") || out.0.contains("hi"), "output: {}", out.0);
+    }
+
+    #[tokio::test]
+    async fn test_skill_tool_accepts_json_string_input() {
+        use rig::tool::Tool;
+        let tool = bash_tool();
+        // `{"input": "{\"command\": \"echo hi\"}"}` — JSON-string-in-input form.
+        let out = tool
+            .call(SkillToolArgs {
+                input: Some(r#"{"command": "echo hi"}"#.into()),
+            })
+            .await
+            .expect("JSON string input should work");
+        assert!(out.0.contains("hello") || out.0.contains("hi"), "output: {}", out.0);
+    }
+
+    #[tokio::test]
+    async fn test_skill_tool_definition_describes_usage() {
+        use rig::tool::Tool;
+        for name in ["read", "write", "bash", "search", "webfetch"] {
+            let tool = SkillTool::new(SkillRef {
+                id: format!("builtin::{name}"),
+                name: name.into(),
+                tool_name: name.into(),
+                match_weight: 1.0,
+            });
+            let def = tool.definition("".into()).await;
+            let desc = def.parameters["properties"]["input"]["description"]
+                .as_str()
+                .unwrap_or_default();
+            assert!(
+                desc.contains("input") || desc.contains("JSON") || desc.contains("纯字符串"),
+                "tool '{name}' input description should explain usage, got: {desc}"
+            );
+            assert!(!desc.contains("Raw input arguments for the skill"), "tool '{name}' should have a per-skill usage description, got: {desc}");
         }
     }
 }

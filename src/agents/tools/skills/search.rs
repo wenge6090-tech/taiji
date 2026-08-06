@@ -94,7 +94,8 @@ impl BuiltinSkill for SearchTool {
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let query = args
             .get("query")
-            .and_then(|v| v.as_str())
+            .and_then(JsonValue::as_str)
+            .or_else(|| args.get("input").and_then(JsonValue::as_str))
             .ok_or_else(|| {
                 TaijiError::Other("search: missing required 'query' argument".into())
             })?;

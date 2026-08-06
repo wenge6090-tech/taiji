@@ -1,6 +1,6 @@
 # AI 行为约束（自动加载）
 
-> taiji Rust 重构规则清单。BCP-蓝图-完型协议.md 是唯一事实，本文件是实施避坑补充。
+> taiji Rust 规则清单。BCP-蓝图-完型协议.md 是唯一事实，本文件是实施避坑补充。
 
 ---
 
@@ -146,7 +146,7 @@ TpnCycle 恢复历史时严格按此顺序：
 - 传入 converge 的 `child_results` = 旧结果 + 新结果合并后的完整列表。
 
 ### 原子写入约定
-- 所有关键状态文件（checkpoint、chat_history、verify_state、converge_state、meta_conversation、decompose_result）必须使用 `save_json_atomic` 写入。
+- 所有关键状态文件（checkpoint、chat_history、verify_state、meta_ctx、decompose_result）必须使用 `save_json_atomic` 写入。
 - 模式：序列化为 JSON 字符串 → 写入 `.tmp` 临时文件 → `fs::rename` 到目标路径，防止部分写入导致文件损坏。
 
 ## 8. 前端 (taiji-web，纯 Web)
@@ -205,3 +205,25 @@ TpnCycle 恢复历史时严格按此顺序：
 - **LLM 响应解析一律走 `src/infra/json_util.rs` 的 `parse_llm_json<T>`**，禁止直接 `serde_json::from_str` 解析 LLM 输出文本（冒烟实测发现 LLM 常在 JSON 前后输出叙述文本或包 ` ```json ` 围栏，直接解析抛 `StructuredOutputParseFailed` 导致 TPN 任务失败）。
 - `parse_llm_json` 四级容错顺序（勿改动）：①直接 `from_str` → ②` ```json ` 围栏提取 + 内容内首尾大括号切片 → ③全文首个 `{` 到最后一个 `}` 切片 → ④返回原始完整文本的解析错误（调用方包装 `StructuredOutputParseFailed` 时保留 Raw 供诊断）。
 - 覆盖范围：MetaAgent（MetaContext）、CausalAgent verify/converge（VerificationReport/ConvergenceDecision）、PlanBuilder（PlanSummary）；新增 LLM 结构化输出解析点必须复用此函数。`serde_json::from_str` 仅允许用于非 LLM 输出（trace/ws/配置文件等本地数据）；causal.rs 文档注释中的旧示例为历史说明可豁免，不得照抄。
+
+## 13. tools_used 真实记录 / 对话快照 / causal max_turns（V26.1 修复轮）
+
+- **tools_used 统计唯一来源是 TraceHook**：FittingAgent 的 `tools_used` 必须读 `TraceHook::tools_called()`（`on_tool_call` 收集的真实工具调用，去重 + 首调顺序），**禁止**对 LLM 响应文本做工具名 contains 匹配——LLM 正文提及工具名会产生伪阳性（V26.1 修复）。
+- **ChatHistorySnapshotHook**：FittingAgent 在 safety → trace 之后挂载（`hook()` 链尾），实现 `PromptHook::on_completion_call`，每次 LLM 调用前将完整对话（调用前 `history` + 本轮 `prompt`，`Vec<Message>` 格式与 `chat_history.json` 一致）经 `save_json_atomic` 原子快照到 `{task_dir}/chat_history.json`——弥补 Rig `chat()` 出错即提前返回、不回写历史的缺陷。快照写失败仅 `warn!`，不得中断 agent 运行。
+- **对话历史可增量恢复**：`--resume` / 子任务 rerun 恢复 Fitting 阶段时，若 `chat_history.json` 非空则从该快照继续（失败点增量推进），而非从空历史重跑整个 Fitting 阶段。
+- **CausalAgent verify/converge `max_turns` 默认 10**（3→6→10 演进：T4 实测 3 轮不足、E2E 实测 6 轮仍溢出 MaxTurnsError），代码默认值与 `.taiji/config.json` 的 `causal.max_turns` 保持一致。
+- **hook 测试用 `src/hooks/test_support.rs` 的 `TestCompletionModel`**：rig 的 `test_utils` 需要 feature 且 vendor 不可改，新增实现 `PromptHook` 的 hook 若要测试 `on_tool_call` / `on_completion_call`，复用该测试模型（`PromptHook::<TestCompletionModel>::on_completion_call(...)` 显式调用）。
+
+## 14. 任务目录持久化文件清单与死文件禁令（V26.2 清理轮）
+
+- **任务目录持久化文件清单唯一事实在 BCP §8.1（9 项）**：`meta.json` / `checkpoint.json` / `meta_ctx.json` / `chat_history.json` / `verify_state.json` / `decompose_result.json` / `deliverables/` / `children/` / `trace.jsonl`。新增持久化文件必须先入清单（含写者/读者/用途），禁止绕过清单直接引入。
+- **禁止引入只写不读的持久化文件**：V26.2 已删 `meta_conversation.json` 与 `converge_state.json`——前者四字段全部可推导（task_description→meta.json、llm_input/llm_response→trace.jsonl、meta_ctx→meta_ctx.json），后者崩溃窗口由「父任务失败→重跑→children/ 复用→重新 converge」幂等重放天然覆盖。写新持久化文件前必须确认存在读者。
+- **`MetaAgentBuilder` 无 `task_dir` 字段**（V26.2 删除，仅为写 meta_conversation.json 存在），不要重新引入。
+- **converge 决策不持久化**；`verify_state.json` 是唯一保留的 Causal 状态文件（CausalAgent.verify 写，TpnCycle VerifyDone 恢复消费），不得随 converge 一起删除。
+
+## 15. V26.3 修复轮（abort 落盘 / 工具契约 / 脱敏精确化 / 规模感知）
+
+- **abort 子任务状态落盘**：`RecursiveDecomposeTool` 错误路径 `abort_all()` 后必须调用 `mark_aborted_children_failed`，把 `children/` 下 Running 子任务原子写 Failed（写失败仅 `warn!`，不阻断父错误传播）——中止不产生虚假 Running 残留。
+- **L1 Skills 参数契约**：SkillTool 暴露单参 `input`，双形式——纯字符串（直通单参工具主参数）或 JSON 对象字符串（`serde_json::from_str` 二级解析后按键分发）；BashTool 读 `command` / ReadTool 读 `path` / SearchTool 读 `query` / WebfetchTool 读 `url`，必须兼容 `input` 键直读；工具 description 必须含用法示例（`input_desc`）。write 是双参（path+content）必须 JSON 对象形式。新增 SkillTool 必须遵守此契约。
+- **trace 脱敏精确化**：value-based 脱敏仅限带前缀密钥模式（`sk-`/`ds-`/`ghp_` + 20 字符、`AKIA` + 16 大写字母数字），禁止通用 `{40,}` 长字符串匹配（误伤正常代码/长文本）；key-based 脱敏（api_key/token/secret/password 键名）保留。
+- **Base 模板规模感知**：FittingAgent Base 模板含规模引导（大任务优先拆解分批、预算不足时明确覆盖范围而非无限重试），归藏资产模板不受影响。

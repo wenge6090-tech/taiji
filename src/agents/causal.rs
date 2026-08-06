@@ -88,7 +88,7 @@ impl CausalVerifyAgentBuilder {
             engine_ctx,
             model: model.to_string(),
             provider,
-            max_turns: 6,
+            max_turns: 10,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
         }
     }
@@ -153,7 +153,7 @@ impl CausalVerifyAgentBuilder {
     /// let agent = client
     ///     .agent(&self.model)
     ///     .preamble(VERIFY_SYSTEM_PROMPT)
-    ///     .max_turns(6)
+    ///     .max_turns(10)
     ///     .build();
     ///
     /// let input = format!(
@@ -401,7 +401,7 @@ impl CausalConvergeAgentBuilder {
             engine_ctx,
             model: model.to_string(),
             provider,
-            max_turns: 6,
+            max_turns: 10,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
         }
     }
@@ -421,8 +421,9 @@ impl CausalConvergeAgentBuilder {
     ///    "你是收敛判决器") registers read-only tools `read` + `webfetch`, mounts
     ///    the SafetyHook, reviews the aggregated subtask results and issues a
     ///    structured [`ConvergenceDecision`] (Converged / Partial / Diverged).
-    /// 3. The decision is persisted to `converge_state.json` (crash recovery)
-    ///    and returned.
+    /// 3. The decision is returned; its crash-recovery window is covered by the
+    ///    parent task rerun (children/ reuse → idempotent reconverge) since
+    ///    V26.2 no longer persists a converge state file.
     ///
     /// # Production wiring (pinned for Rig API verification)
     ///
@@ -434,7 +435,7 @@ impl CausalConvergeAgentBuilder {
     /// let agent = client
     ///     .agent(&self.model)
     ///     .preamble(CONVERGE_SYSTEM_PROMPT)
-    ///     .max_turns(6)
+    ///     .max_turns(10)
     ///     .build();
     ///
     /// let input = serde_json::to_string_pretty(subtask_results)?;
@@ -520,21 +521,6 @@ impl CausalConvergeAgentBuilder {
             status = ?decision.status,
             "CausalConvergeAgent — LLM convergence judgment completed"
         );
-
-        // ── Persist converge state for crash recovery ──
-        let converge_state = serde_json::json!({
-            "decision": decision,
-            "round": self.engine_ctx.round,
-            "cycle": self.engine_ctx.cycle,
-        });
-        let converge_path = self.engine_ctx.task_dir.join("converge_state.json");
-        if let Err(e) = save_json_atomic(&converge_state, &converge_path) {
-            tracing::warn!(
-                path = %converge_path.display(),
-                error = %e,
-                "Failed to save converge_state"
-            );
-        }
 
         Ok(decision)
     }
@@ -812,7 +798,7 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_system_prompt_max_turns_six() {
+    fn test_verify_system_prompt_max_turns_ten() {
         let builder = CausalVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
@@ -820,7 +806,7 @@ mod tests {
             ),
             "deepseek-chat",
         );
-        assert_eq!(builder.max_turns, 6, "V26: verify max_turns 统一 6");
+        assert_eq!(builder.max_turns, 10, "V26.1: verify max_turns 统一 10");
     }
 
     #[test]
@@ -833,7 +819,7 @@ mod tests {
     }
 
     #[test]
-    fn test_converge_system_prompt_max_turns_six() {
+    fn test_converge_system_prompt_max_turns_ten() {
         let builder = CausalConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
@@ -841,7 +827,7 @@ mod tests {
             ),
             "deepseek-chat",
         );
-        assert_eq!(builder.max_turns, 6, "V26: converge max_turns 统一 6");
+        assert_eq!(builder.max_turns, 10, "V26.1: converge max_turns 统一 10");
     }
 
     #[test]

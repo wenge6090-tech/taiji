@@ -85,7 +85,8 @@ impl BuiltinSkill for WebfetchTool {
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let url_str = args
             .get("url")
-            .and_then(|v| v.as_str())
+            .and_then(JsonValue::as_str)
+            .or_else(|| args.get("input").and_then(JsonValue::as_str))
             .ok_or_else(|| {
                 TaijiError::Other("webfetch: missing required 'url' argument".into())
             })?;

@@ -284,10 +284,7 @@ impl TpnCycle {
                 task_id: engine_ctx.task_id.clone(),
                 phase: TpnPhase::Meta,
             });
-            let meta_agent = self
-                .factory
-                .create_meta_agent(&engine_ctx.task_id)?
-                .task_dir(engine_ctx.task_dir.clone());
+            let meta_agent = self.factory.create_meta_agent(&engine_ctx.task_id)?;
             meta_ctx = meta_agent.run(description, &["general"]).await?;
 
             // Persist MetaContext for crash recovery.
@@ -536,10 +533,7 @@ impl TpnCycle {
                         task_id: engine_ctx.task_id.clone(),
                         phase: TpnPhase::Meta,
                     });
-                    let meta_agent = self
-                        .factory
-                        .create_meta_agent(&engine_ctx.task_id)?
-                        .task_dir(engine_ctx.task_dir.clone());
+                    let meta_agent = self.factory.create_meta_agent(&engine_ctx.task_id)?;
                     meta_ctx = meta_agent.run(description, &[]).await?;
 
                     // Persist MetaContext and checkpoint for crash recovery.
@@ -818,9 +812,16 @@ mod tests {
     }
 
     async fn build_factory(config: TaijiConfig) -> Arc<AgentFactory> {
+        // Unique dir per invocation: parallel tests each calling build_factory
+        // must not share a pid-based dir — concurrent remove_dir_all + rename
+        // during LiluoClient init produced a flaky KnowledgeStoreUnavailable
+        // (V26.1-3 verification round, plan blocker 1).
+        static FACTORY_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = FACTORY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp_dir = std::env::temp_dir().join(format!(
-            "taiji_tpn_factory_{}",
-            std::process::id()
+            "taiji_tpn_factory_{}_{}",
+            std::process::id(),
+            n
         ));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         let liluo = Arc::new(

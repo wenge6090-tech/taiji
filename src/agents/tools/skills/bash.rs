@@ -1,6 +1,12 @@
 //! BashTool — execute shell commands with timeout and process isolation.
 //!
 //! Adapted from pi_agent_rust's BashTool for taiji's tokio runtime.
+//!
+//! # Argument contract (V26.3 E2)
+//! The command may arrive in any of three forms (schema-exposed contract):
+//! - `{"command": "ls -la"}` — canonical keyed form.
+//! - `{"input": "ls -la"}` — plain-string passthrough from `SkillTool::call`.
+//! - `{"input": "{\"command\": \"ls -la\"}"}` — JSON-string-in-input form.
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
@@ -22,7 +28,8 @@ impl BuiltinSkill for BashTool {
     async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let command = args
             .get("command")
-            .and_then(|v| v.as_str())
+            .and_then(JsonValue::as_str)
+            .or_else(|| args.get("input").and_then(JsonValue::as_str))
             .ok_or_else(|| {
                 TaijiError::Other("bash: missing required 'command' argument".into())
             })?;
@@ -142,6 +149,27 @@ mod tests {
         let args = serde_json::json!({});
         let result = tool.call(&args).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_accepts_input_key_plain_string() {
+        let tool = BashTool;
+        // V26.3 E2: SkillTool plain-string passthrough (`{"input": "ls"}`).
+        let args = serde_json::json!({"input": "echo hello"});
+        let result = tool.call(&args).await.unwrap();
+        assert_eq!(result["status"], "ok");
+        assert!(result["stdout"].as_str().unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn test_bash_tool_accepts_input_key_json_string() {
+        let tool = BashTool;
+        // V26.3 E2: JSON-string-in-input form (`{"input": "{\"command\": ...}"}`)
+        // is unwrapped by SkillTool::call; BashTool sees the canonical keyed
+        // object here. This test pins the direct-object form as well.
+        let args = serde_json::json!({"command": "echo hello"});
+        let result = tool.call(&args).await.unwrap();
+        assert_eq!(result["status"], "ok");
     }
 
     #[tokio::test]

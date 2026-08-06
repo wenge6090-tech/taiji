@@ -19,7 +19,6 @@
 //!    and returns a [`MetaContext`].
 //! 3. The caller feeds the [`MetaContext`] into `create_fitting_agent`.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use rig::client::CompletionClient;
@@ -32,7 +31,6 @@ use crate::infra::error::TaijiError;
 use crate::infra::json_util::parse_llm_json;
 use crate::infra::knowledge::LiluoClient;
 use crate::infra::provider::ProviderRegistry;
-use crate::infra::trace::save_json_atomic;
 use crate::types::agent::{MetaContext, PromptAsset};
 
 /// Builder for the MetaAgent (权重更新·元).
@@ -54,8 +52,6 @@ pub struct MetaAgentBuilder {
     /// max_turns = 6 — allows tool loops (collect → extract) before the final
     /// structured MetaContext emission.
     max_turns: u32,
-    /// Optional task directory for persisting meta_conversation.json.
-    task_dir: Option<PathBuf>,
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
@@ -78,15 +74,8 @@ impl MetaAgentBuilder {
             provider,
             model: model.to_string(),
             max_turns: 6, // tool-loop headroom: collect → extract
-            task_dir: None,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
         }
-    }
-
-    /// Set an optional task directory for persisting meta_conversation.json.
-    pub fn task_dir(mut self, path: PathBuf) -> Self {
-        self.task_dir = Some(path);
-        self
     }
 
     /// Override the SafetyHook with the shared process-wide singleton.
@@ -196,24 +185,6 @@ impl MetaAgentBuilder {
                 MetaContext::empty()
             }
         };
-
-        // ── 5. Persist meta_conversation.json for crash recovery ──
-        if let Some(ref dir) = self.task_dir {
-            let meta_state = serde_json::json!({
-                "task_description": task_description,
-                "llm_input": llm_prompt,
-                "llm_response": &response,
-                "meta_ctx": ctx,
-            });
-            let meta_path = dir.join("meta_conversation.json");
-            if let Err(e) = save_json_atomic(&meta_state, &meta_path) {
-                tracing::warn!(
-                    path = %meta_path.display(),
-                    error = %e,
-                    "Failed to save meta_conversation"
-                );
-            }
-        }
 
         Ok(ctx)
     }
