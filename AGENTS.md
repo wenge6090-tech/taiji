@@ -227,3 +227,8 @@ TpnCycle 恢复历史时严格按此顺序：
 - **L1 Skills 参数契约**：SkillTool 暴露单参 `input`，双形式——纯字符串（直通单参工具主参数）或 JSON 对象字符串（`serde_json::from_str` 二级解析后按键分发）；BashTool 读 `command` / ReadTool 读 `path` / SearchTool 读 `query` / WebfetchTool 读 `url`，必须兼容 `input` 键直读；工具 description 必须含用法示例（`input_desc`）。write 是双参（path+content）必须 JSON 对象形式。新增 SkillTool 必须遵守此契约。
 - **trace 脱敏精确化**：value-based 脱敏仅限带前缀密钥模式（`sk-`/`ds-`/`ghp_` + 20 字符、`AKIA` + 16 大写字母数字），禁止通用 `{40,}` 长字符串匹配（误伤正常代码/长文本）；key-based 脱敏（api_key/token/secret/password 键名）保留。
 - **Base 模板规模感知**：FittingAgent Base 模板含规模引导（大任务优先拆解分批、预算不足时明确覆盖范围而非无限重试），归藏资产模板不受影响。
+
+## 16. 测试临时目录唯一性（V26.1-3 验证轮实测教训）
+
+- **测试辅助函数使用的临时目录必须每次调用唯一**：并行测试若共享 pid 基路径（如 `taiji_tpn_factory_{pid}`），两个测试并发时一方 `remove_dir_all` 会删除另一方初始化中的目录（`LiluoClient::new` 内部 rename index 文件）→ 偶发 `KnowledgeStoreUnavailable { failed to rename index file }`（全量 `cargo test` 5 次中约 1 次复现，单独跑永远通过）。修复模式：静态 `AtomicUsize` 计数器拼唯一子目录（参考 `tpn_cycle.rs::build_factory`），测试末尾照常 `remove_dir_all` 清理。
+- 新增会创建临时目录/临时文件的测试，先检查目标路径是否被同一进程内其他测试共享；pid 基路径 ≠ 唯一路径。
