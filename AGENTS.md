@@ -232,3 +232,9 @@ TpnCycle 恢复历史时严格按此顺序：
 
 - **测试辅助函数使用的临时目录必须每次调用唯一**：并行测试若共享 pid 基路径（如 `taiji_tpn_factory_{pid}`），两个测试并发时一方 `remove_dir_all` 会删除另一方初始化中的目录（`LiluoClient::new` 内部 rename index 文件）→ 偶发 `KnowledgeStoreUnavailable { failed to rename index file }`（全量 `cargo test` 5 次中约 1 次复现，单独跑永远通过）。修复模式：静态 `AtomicUsize` 计数器拼唯一子目录（参考 `tpn_cycle.rs::build_factory`），测试末尾照常 `remove_dir_all` 清理。
 - 新增会创建临时目录/临时文件的测试，先检查目标路径是否被同一进程内其他测试共享；pid 基路径 ≠ 唯一路径。
+
+## 17. Rig 0.39 hook 单槽语义（V26.4 E2E 冒烟实测：FittingAgent 三个 hook 只有链尾生效）
+
+- **`AgentBuilder::hook()` 是单槽覆盖式**：每次调用直接替换先前注册的 hook（builder 内 `hook: Some(hook)`），`.hook(a).hook(b).hook(c)` 最终只有 `c` 生效——不是追加列表。FittingAgent 必须经 `FittingHookSet`（`src/hooks/fitting_hook_set.rs`，safety → trace → snapshot 组合，一次 `.hook()` 挂载）转发全部 `PromptHook` 方法；禁止再写 `.hook().hook()` 链式挂载。
+- **历史教训（本次修复的隐性 bug）**：V25 起 FittingAgent 链式挂载导致 SafetyHook 从未真正生效（V26.1 加 snapshot 后 TraceHook 也失效）——E2E 冒烟表现为 `trace.jsonl` 缺失 + `tools_used` 为空，单测无法覆盖（rig builder 单槽语义只在真实构建路径暴露）。任何 agent 新增第二个 hook 时，先检查现有挂载点是否单槽。
+- **FittingHookSet 转发语义**：按 safety → trace → snapshot 顺序调用，首个非 Continue 动作短路返回——SafetyHook 拒绝的违规工具调用不会进入 trace 记录（`tools_called()` 不含被拒工具）；`on_invalid_tool_call` 聚合取首个非 Fail。`tools_used` 读外部保留的 `trace_hook.tools_called()`（clone 进 FittingHookSet 共享 Arc 状态）。

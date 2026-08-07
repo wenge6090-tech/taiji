@@ -1,4 +1,5 @@
 pub mod chat_history_snapshot;
+pub mod fitting_hook_set;
 pub mod safety;
 pub mod trace;
 

@@ -10,6 +10,8 @@
 >
 > **V25 变更摘要（2026-08-05，Meta/Causal 收集工具落地）：** Meta 与 Causal 相位从「无工具」升级为「LLM + 只读收集工具」——MetaAgent 注册 read / search / webfetch（收集任务上下文、父层 deliverables、归藏资产与网络信息后更新权重），CausalAgent 注册 read / webfetch（LLM 逐文件核验 deliverables、联网核实外部事实后裁决路由）。§1.2 权限面列、§8.2 权限同构、§8.5 Hook 安全模型更新：执行工具（write / bash / recursive_decompose / causal_verify）收敛 Fitting 相位，收集工具（read / search / webfetch）三相共有，「带工具必有安全钩子」为硬约束（Meta / Causal 均挂载 SafetyHook，webfetch 的 SSRF 检查由此生效）。§8.9 硬编码保证第 3、4 条（read 逐文件验证）由此从模板要求变为工具注册事实。
 
+> **V26.4 变更摘要（2026-08-07，E2E 冒烟实测：hook 单槽语义修复）：** V26.1-3 修复轮收尾冒烟（真实任务 e00d70e7）暴露深层 bug——`trace.jsonl` 缺失 + `tools_used` 为空，回溯根因：Rig 0.39 `AgentBuilder::hook()` 是**单槽覆盖式**，`.hook(a).hook(b).hook(c)` 只有 `c` 生效，导致 V25 起 FittingAgent 的 SafetyHook 从未真正挂载、V26.1 加 ChatHistorySnapshotHook 后 TraceHook 也失效（V26.1-A tools_used 修复随之失效）。新增 `FittingHookSet`（safety → trace → snapshot 组合，首个非 Continue 短路，一次 `.hook()` 挂载）修复；Meta / Causal / Chat 单 hook 不受影响。冒烟复验：`trace.jsonl` 47 行记录、`TPNResult.tools_used = [write, read, causal_verify]` 真实落盘、无密钥明文。§8.5 Hook 安全模型补挂载机制说明；AGENTS.md §17 沉淀。
+
 > **V26.3 变更摘要（2026-08-07，任务 6f95dacd 深度分析落地）：** 对 E2E 超时任务 6f95dacd（「逐一审计全部 src Rust 文件」）的完成情况与任务描述矛盾分析（结论：无虚假完成，status=Failed 诚实；但三层不一致）落地 4 项修复：① **abort 子任务状态落盘**——RecursiveDecomposeTool 错误路径 `abort_all()` 后统一把 `children/` 下 Running 子任务写 Failed（实测 8 个子任务 7 个停在 Running 且 3 个实际产出了交付物，与「超时/失败/取消正确落盘」宣称不符）；② **L1 Skills 工具参数契约对齐**——SkillTool ToolDefinition 暴露单参 `input` 但 BashTool 读 `command`、ReadTool 读 `path`，LLM 传 `{"input":"ls"}` 永远报 missing 参数，唯一活路是 input 塞 JSON 字符串（纯靠试错，每次 resume 重新踩坑）；修复为 BashTool/ReadTool 支持 `input` 键直读纯字符串 + ToolDefinition description 补用法示例（双保险）；③ **trace 脱敏精确化**——value-based 正则 `[a-zA-Z0-9_-]{40,}` 误伤 UUID/文件正文，LLM 读 config.json 等内容被整段遮蔽；收紧为仅密钥前缀匹配或仅 key-based，read/bash 输出豁免 value-based；④ **Fitting 规模感知引导**——模板提示任务过大时优先拆解分批、预算不足时明确说明覆盖范围。§8.1（子任务状态一致性）、§8.5（工具契约与 description 约定）同步更新。
 
 > **V26.2 变更摘要（2026-08-07，持久化去冗余）：** 持久化文件审计发现 2 个只写不读的死文件并删除：① `meta_conversation.json`（内容四字段全部可推导：task_description→meta.json、llm_input/llm_response→trace.jsonl、meta_ctx→meta_ctx.json），连带删除 `MetaAgentBuilder.task_dir` 字段（仅为写它存在）；② `converge_state.json`（converge 在 RecursiveDecomposeTool 内部调用，其崩溃窗口已被「父任务失败→重跑→children/ 复用→重新 converge」幂等重放天然覆盖）。§8.1 新增任务目录持久化文件清单（唯一事实，新增文件必须先入清单）。
@@ -879,6 +881,8 @@ SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到带工具的 Ri
 **节点间权限同构**：所有任务节点（任意 depth / round / cycle）共享同一进程级 `SafetyHook` 单例（`build_engine` 创建一次，`Arc` 注入全部带工具的 Agent），规则一致、白名单一致——权限配置在节点间完全同构，不存在按深度 / 轮次 / 层级的权限分化。
 
 **带工具必有安全钩子（硬约束）**：任何相位只要注册工具（含只读收集工具），就必须挂载 SafetyHook——「无工具的相位允许不挂载，带工具的相位必须挂载」是相位权限闭合的底线。CausalAgent 的 LLM 验证路径（verify / converge 真实 LLM 调用 + read 逐文件核验）已在此约束下落地。
+
+**Rig 0.39 hook 挂载机制（V26.4 实测修正）**：`AgentBuilder::hook()` 是单槽覆盖式——链式 `.hook(a).hook(b).hook(c)` 只有 `c` 生效，多 hook 必须组合为一次挂载。FittingAgent 的 safety / trace / snapshot 三个 hook 经 `FittingHookSet` 组合（safety 优先、首个非 Continue 短路，违规工具不进入 trace 记录）；Meta / Causal / Chat 单 hook 直接挂载。任何相位新增第二个 hook 必须先查现有挂载点是否单槽。
 
 **L1 Skills 工具参数契约（V26.3）**：SkillTool 是单参 `input` 包装（Rig ToolDefinition 暴露 `input: string`，`call` 内对 input 值做二级 JSON 解析——JSON 字符串解析为对象，失败保留原文）。各内置工具的参数键必须与 LLM 可用的传参形式兼容：BashTool 读 `command`、ReadTool 读 `path`，**必须同时支持 `input` 键直读**（`args.get("input")` 为纯字符串时直接当命令/路径）——否则 LLM 按 schema 传 `{"input":"ls"}` 永远报 missing 参数，被迫试错摸索 `{"input":"{\"command\":\"ls\"}"}`（每次 resume 重跑重新踩坑，系统性吞噬预算）。ToolDefinition 的 description 必须包含用法示例（双保险：实现容错 + schema 引导）。write/search/webfetch 参数键同理自查。
 

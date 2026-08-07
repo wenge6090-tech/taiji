@@ -127,8 +127,10 @@ impl FittingAgentBuilder {
     /// let trace_hook = TraceHook::new(&task_dir, &self.engine_ctx, &self.model);
     /// let safety_hook = self.factory.safety_hook.clone();
     ///
-    /// // Wire hooks via builder .hook() method (Rig 0.39)
-    /// // agent = agent.hook(safety_hook).hook(trace_hook);
+    /// // Wire hooks via one .hook() call — Rig 0.39 AgentBuilder::hook() is a
+    /// // SINGLE slot, so multiple hooks must be composed via FittingHookSet
+    /// // (safety → trace → snapshot) instead of chaining .hook().hook().
+    /// // agent = agent.hook(FittingHookSet::new(safety_hook, trace_hook, snapshot_hook));
     ///
     /// let agent = agent.build();
     ///
@@ -208,16 +210,24 @@ impl FittingAgentBuilder {
             agent_builder = agent_builder.temperature(v);
         }
 
-        // ── Register hooks (safety → trace → chat-history snapshot) ──
+        // ── Register hooks: single-slot composite (safety → trace → snapshot) ──
+        // Rig 0.39 AgentBuilder::hook() is a SINGLE slot — each call replaces
+        // the previous hook, so chaining .hook(a).hook(b).hook(c) keeps only c.
+        // V26.1-3 E2E smoke caught this: missing trace.jsonl + empty tools_used
+        // (and, retroactively, the FittingAgent SafetyHook had never actually
+        // been mounted since V25). All three hooks must go through
+        // FittingHookSet and be mounted in ONE .hook() call.
         let trace_hook = TraceHook::new(&self.engine_ctx, &self.model);
         let safety_hook = self.factory.safety_hook.as_ref().clone();
         let snapshot_hook = crate::hooks::chat_history_snapshot::ChatHistorySnapshotHook::new(
             &self.engine_ctx.task_dir,
         );
-        let agent_builder = agent_builder
-            .hook(safety_hook)
-            .hook(trace_hook.clone())
-            .hook(snapshot_hook);
+        let hook_set = crate::hooks::fitting_hook_set::FittingHookSet::new(
+            safety_hook,
+            trace_hook.clone(),
+            snapshot_hook,
+        );
+        let agent_builder = agent_builder.hook(hook_set);
 
         // ── Register built-in composite tools ──
         // V26: 异层同构 — 任意深度注册全部工具（recursive_decompose +
