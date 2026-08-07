@@ -176,6 +176,15 @@ impl RecursiveRunner {
                 //    written here (V26 统一状态管理).
                 cancel.cancel();
                 tracing::error!(task_id = %task_id, "Task execution timed out");
+                // V26.5-P3-F1: the timeout drops the TpnCycle future, which
+                // drops the RecursiveDecomposeTool JoinSet → tokio aborts all
+                // in-flight subtasks WITHOUT running their status-writing
+                // paths, so `children/<idx>/meta.json` would stay `Running`
+                // forever. Flip any still-Running children to Failed here
+                // (best-effort; warn-only on failure).
+                crate::agents::tools::recursive_decompose::mark_aborted_children_failed(
+                    &task_dir.join("children"),
+                );
                 let _ = write_task_status(
                     &task_dir,
                     &task_id,

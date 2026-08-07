@@ -534,7 +534,10 @@ impl TpnCycle {
                         phase: TpnPhase::Meta,
                     });
                     let meta_agent = self.factory.create_meta_agent(&engine_ctx.task_id)?;
-                    meta_ctx = meta_agent.run(description, &[]).await?;
+                    // V26.5-P5: same tags as first run — empty tags matched nothing
+                    // in the knowledge store, so BACK_TO_META re-runs never
+                    // injected fresh reasoning bias.
+                    meta_ctx = meta_agent.run(description, &["general"]).await?;
 
                     // Persist MetaContext and checkpoint for crash recovery.
                     persist_meta_ctx(&meta_ctx, &engine_ctx.task_dir);

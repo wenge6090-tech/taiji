@@ -93,7 +93,6 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Cancelled,
-    Decomposed,
 }
 
 // ---------------------------------------------------------------------------

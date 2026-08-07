@@ -457,7 +457,7 @@ impl RecursiveDecomposeTool {
 /// Iterates the numeric `children/<idx>/` directories only; skips non-directory
 /// entries and unreadable `meta.json` (warn only). Write failures warn and are
 /// swallowed — this helper must never block error propagation in the caller.
-fn mark_aborted_children_failed(children_root: &Path) {
+pub(crate) fn mark_aborted_children_failed(children_root: &Path) {
     let entries = match std::fs::read_dir(children_root) {
         Ok(entries) => entries,
         Err(e) => {

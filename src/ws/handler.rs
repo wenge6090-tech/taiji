@@ -138,7 +138,6 @@ pub fn handle_get_tpn_state(
             if matches!(
                 task.status,
                 crate::types::task::TaskStatus::Completed
-                    | crate::types::task::TaskStatus::Decomposed
             ) {
                 current_phase = crate::types::frontend::TpnPhase::Converged;
             }

@@ -41,7 +41,6 @@ rmcp = { version = "0.8", features = ["server", "client", "transport-child-proce
 
 # Rate limiting
 tokio-util = "0.7"
-governor = "0.6"
 
 # L1 Skills
 memchr = "2"

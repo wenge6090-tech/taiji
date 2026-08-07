@@ -252,3 +252,10 @@ TpnCycle 恢复历史时严格按此顺序：
 - **task_id 格式 `{简述slug}-{YYYYMMDD-HHMMSS}`**（如 `分析源码-20260807-061530`），唯一生成点在 `src/infra/task_id.rs`：slug 取描述前 24 字符路径安全化（非字母数字→`-`，含 `/ \ : . " * ?` 与空格，杜绝 `..` 穿越；空描述→`task`），时间戳本地时间秒级。**禁止在 runner/recursive_decompose/mcp 等处直接拼 task_id 或重新引入 UUID**；`generate_task_id` 本身不保证唯一，根任务必须经 `ensure_unique`（查 `tasks/` 目录，同秒同名追加 `-2/-3`），子任务追加 `-{index}`（同父并行不撞）。
 - **chat session_id 保持 UUID**：`{data_root}/chat/{session_id}.json` 会话文件已持久化，session_id 不属任务 ID，`ws/handler.rs` 的 `Uuid::new_v4()` 勿改。
 - task_id 为纯字符串、无 UUID 格式假设（已排查无 `len()==36`/`parse_str` 校验）；新增代码读 task_id 时按不透明字符串处理。前端 `taskId: string` 与 CLI `--resume`/`trace <id>` 自动兼容可读 ID。
+
+## 20. 死代码甄别 / 归藏资产对齐 / 超时子任务落盘（V26.7 续修轮）
+
+- **死代码甄别三分类**：① 真死代码（无任何引用）→ 删（V26.7 已删 `rate_limiter.rs` + governor 依赖——governor 仅 rate_limiter 使用；`TaskStatus::Decomposed` 变体无写者仅 3 处匹配 → 删变体+匹配）；② 规划未激活（BCP §8.3 承诺的架构设计）→ **保留不删**（`dmn_consumer`/`cognition_evolver`，DMN 单写者激活后使用）；③ 误判在用 → 不动（`trigger_engine`/`match_skills` 被 main/factory/tpn_cycle/chat 全部构造）。删变体前先确认无写者（grep 构造点而非匹配点）。
+- **归藏 prompts 资产必须与当前 Agent 架构对齐**：V26.7 发现 6 个 prompts 资产仍是 V25 AgentMode 分裂内容（教 LLM 设置已删除的 `mode: "Execution"/"Orchestration"`、按模式差异化裁决）——资产被 MetaAgent 按标签加载后由 LLM 编排注入，过时指令会真实污染 Fitting/Causal 行为。资产更新后 `version++`；**tags 保持不变**（index.yaml 是衍生缓存，改 tags 需重建索引）。新增/修改资产前对照 `src/agents/fitting.rs::build_system_prompt` / `causal.rs::VERIFY_SYSTEM_PROMPT`/`CONVERGE_SYSTEM_PROMPT` 的 V26 语义。
+- **BACK_TO_META 分支的 MetaAgent 调用标签必须与首次运行一致**（`&["general"]`）：V26.7 修复 tpn_cycle.rs BACK_TO_META 分支的 `&[]` 空标签——空标签 `search_prompts` 零匹配 → 降级空 MetaContext，元相循环永远无法注入新鲜推理偏置。
+- **超时路径子任务落盘**：runner 超时分支（`tokio::timeout` Err）drop TpnCycle → JoinSet drop 隐式 abort 子任务（不走状态写路径）→ 必须在超时分支调用 `mark_aborted_children_failed(&task_dir.join("children"))`（V26.7 接线，函数在 recursive_decompose.rs 为 `pub(crate)`）。V26.3 的主动错误路径覆盖不了 timeout drop，两条路径都要落盘。

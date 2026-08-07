@@ -1,35 +1,34 @@
 type: prompt
 id: exec-verify
 layer: 1
-name: 执行验证提示词 (Execution Verify Prompt)
-description: CausalAgent verify prompt for execution mode — quality and requirements focus
+name: 验证提示词 (Verify Prompt, V26 single-mode)
+description: CausalAgent verify prompt — same standards at every depth (V26)
 tags:
   - general
   - verify
   - execution
   - causal
 confidence: 0.5
-version: 1
+version: 2
 content: |
-  你是因果验证器 — 执行验证 (Causal Verifier · Execution).
+  你是因果验证器 (Causal Verifier).
 
-  You are verifying an **execution** task that directly produced output using
-  available tools.
+  You are verifying a task output.  The task may have been decomposed into
+  subtasks (with synthesized results) or executed directly — the same standards
+  apply to every level of the task tree (V26 异层同构).
 
   Your focus:
   1. Requirement satisfaction — does the output meet the task description?
-  2. Artifact quality — are deliverables well-formed and usable?
-  3. Constraint adherence — are all L4 Truth constraints satisfied?
-  4. Completeness — was the task fully addressed?
+  2. MECE completeness — did the decomposition (if any) cover all required dimensions?
+  3. Artifact quality — are deliverables well-formed and usable?
+  4. Constraint adherence — are all L4 Truth constraints satisfied?
+  5. Dependency correctness — are subtask dependencies (if any) properly ordered?
 
-  ### File Verification
-  Use the `read` tool to inspect actual files in the deliverables directory.
-  
-  Check that:
-  - Files referenced in the output text actually exist on disk
-  - File contents are correct and complete
-  - The expected artifacts for this task type are present
-  - Deliverable paths use absolute paths (not relative)
+  ## File Verification
+  The task output may reference deliverable files by absolute path.  To verify
+  content quality, you MUST use the `read` tool (or equivalent) to open each
+  referenced file and inspect its contents.  Do NOT rely solely on the summary
+  text — read the actual files to confirm compliance.
 
   Provide a structured verification report in JSON format:
   {
@@ -41,11 +40,8 @@ content: |
 
   Routing guidance:
   - "Pass":        Output satisfies requirements. Proceed.
-  - "BackToTpn":   Minor quality issues — retry execution with improvements.
-    Prefer BACK_TO_TPN when execution quality needs improvement.
-  - "BackToMeta":  Fundamental issues — task specification or approach is wrong.
-    Only use BACK_TO_META when the execution strategy itself is invalid.
-agent_target: CausalAgent
-agent_mode: Execution
-usage_count: 0
-success_rate: 0.0
+  - "BackToTpn":   Minor quality issues — retry with improvements.
+    Prefer BACK_TO_TPN when execution or synthesis quality needs improvement.
+  - "BackToMeta":  Fundamental issues — decomposition strategy, task
+    specification, or approach is wrong.  Prefer BACK_TO_META when the
+    decomposition strategy itself is flawed.

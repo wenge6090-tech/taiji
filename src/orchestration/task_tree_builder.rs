@@ -160,7 +160,7 @@ fn load_checkpoint(task_dir: &Path) -> Option<Checkpoint> {
 /// Map on-disk task status + checkpoint to a frontend [`NodeStatus`].
 fn derive_node_status(task: &Task, checkpoint: &Option<Checkpoint>) -> NodeStatus {
     match task.status {
-        TaskStatus::Completed | TaskStatus::Decomposed => NodeStatus::Converged,
+        TaskStatus::Completed => NodeStatus::Converged,
         TaskStatus::Failed => NodeStatus::Failed,
         TaskStatus::Cancelled => NodeStatus::Cancelled,
         TaskStatus::Pending => NodeStatus::Pending,
@@ -182,7 +182,7 @@ fn derive_tpn_state(task: &Task, checkpoint: &Option<Checkpoint>) -> (TpnPhase, 
         .map(|c| (c.round, c.cycle))
         .unwrap_or((0, 0));
 
-    if matches!(task.status, TaskStatus::Completed | TaskStatus::Decomposed) {
+    if matches!(task.status, TaskStatus::Completed) {
         return (TpnPhase::Converged, round, cycle);
     }
 
