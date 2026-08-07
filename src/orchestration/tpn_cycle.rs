@@ -188,7 +188,7 @@ impl TpnCycle {
         //      → jump to the last persisted phase.
         //   3. Fresh execution (no resume_history, no checkpoint) → full pipeline.
 
-        let (mut resume_phase, mut is_crash_recovery) = if resume_history_is_some {
+        let (mut resume_phase, is_crash_recovery) = if resume_history_is_some {
             // Parent-initiated re-run: history already loaded above.
             tracing::debug!(
                 task_id = %engine_ctx.task_id,
@@ -320,14 +320,15 @@ impl TpnCycle {
             let fitting_result = if resume_phase == Some(CyclePhase::FittingDone)
                 || resume_phase == Some(CyclePhase::VerifyDone)
             {
-                // Crash recovery: FittingAgent already ran, load last result from trace.
+                // Crash recovery: FittingAgent already ran, reconstruct its
+                // result from persisted state (chat_history + trace + deliverables).
                 // If we can't reconstruct, re-run.
-                match construct_tpn_result_from_trace(&engine_ctx.task_dir) {
+                match construct_tpn_result_from_state(&engine_ctx) {
                     Ok(Some(result)) => result,
                     _ => {
                         tracing::warn!(
                             task_id = %engine_ctx.task_id,
-                            "Could not reconstruct FittingAgent result from trace — re-running"
+                            "Could not reconstruct FittingAgent result from state — re-running"
                         );
                         let fitting_agent = self
                             .factory
@@ -399,7 +400,6 @@ impl TpnCycle {
 
             // Reset resume_phase so subsequent iterations run all phases normally.
             resume_phase = None;
-            is_crash_recovery = false;
 
             // ── Phase 4: Route decision ──
             match report.route {
@@ -648,36 +648,96 @@ fn load_chat_history_or_empty(task_dir: &Path) -> Vec<Message> {
     }
 }
 
-/// Try to reconstruct a TPNResult from the trace file.
-fn construct_tpn_result_from_trace(task_dir: &Path) -> Result<Option<TPNResult>, TaijiError> {
+/// Reconstruct a TPNResult from persisted state after a crash at/after
+/// FittingDone, without re-running the FittingAgent LLM.
+///
+/// V26.5 (P2): the old trace-based reconstruction matched
+/// `phase == "output" | "result"` records that no code ever writes
+/// (TraceHook only emits `completion_call` / `completion_response` /
+/// `tool_call::*`), so crash recovery always fell back to re-running Fitting
+/// — wasting tokens and potentially changing the result. Sources used here:
+/// 1. `content`      ← last assistant text message in `chat_history.json`
+/// 2. `tools_used`   ← deduped `tool_call::*` phases in `trace.jsonl` (first-call order)
+/// 3. `deliverables` ← files listed under `deliverables/`
+fn construct_tpn_result_from_state(
+    engine_ctx: &EngineContext,
+) -> Result<Option<TPNResult>, TaijiError> {
+    let task_dir = &engine_ctx.task_dir;
+
+    // 1. Content: last assistant text in the persisted conversation.
+    let history = load_chat_history_or_empty(task_dir);
+    let content = assistant_text_from_history(&history);
+    let Some(content) = content else {
+        tracing::warn!(
+            task_id = %engine_ctx.task_id,
+            "chat_history has no assistant text — cannot reconstruct FittingAgent result"
+        );
+        return Ok(None);
+    };
+
+    Ok(Some(TPNResult {
+        task_id: engine_ctx.task_id.clone(),
+        content,
+        tools_used: collect_tools_used_from_trace(task_dir),
+        deliverables: list_deliverables(task_dir),
+        depth: engine_ctx.depth,
+        rounds: engine_ctx.round + 1,
+    }))
+}
+
+/// Extract the text of the last assistant message that contains any text
+/// content (skipping tool-only assistant turns).
+fn assistant_text_from_history(history: &[Message]) -> Option<String> {
+    use rig::completion::AssistantContent;
+
+    history.iter().rev().find_map(|m| match m {
+        Message::Assistant { content, .. } => content
+            .iter()
+            .find_map(|c| match c {
+                AssistantContent::Text(t) => Some(t.text.clone()),
+                _ => None,
+            }),
+        _ => None,
+    })
+}
+
+/// Deduplicated, first-call-ordered tool names from `tool_call::*` records.
+fn collect_tools_used_from_trace(task_dir: &Path) -> Vec<String> {
     use crate::infra::trace::TraceRecord;
 
     let trace_path = task_dir.join("trace.jsonl");
-    let content = match std::fs::read_to_string(&trace_path) {
-        Ok(c) => c,
-        Err(_) => return Ok(None),
+    let Ok(content) = std::fs::read_to_string(&trace_path) else {
+        return Vec::new();
     };
 
-    // Read last record that is a task output (not a tool call).
-    for line in content.lines().rev() {
+    let mut tools: Vec<String> = Vec::new();
+    for line in content.lines() {
         if let Ok(record) = serde_json::from_str::<TraceRecord>(line) {
-            if record.phase == "output" || record.phase == "result" {
-                let content = match &record.output {
-                    serde_json::Value::String(s) => s.to_string(),
-                    other => other.to_string(),
-                };
-                return Ok(Some(TPNResult {
-                    task_id: record.task_id,
-                    content,
-                    tools_used: vec![],
-                    deliverables: vec![],
-                    depth: record.depth,
-                    rounds: 0,
-                }));
+            if let Some(name) = record.phase.strip_prefix("tool_call::") {
+                if !tools.iter().any(|t| t == name) {
+                    tools.push(name.to_string());
+                }
             }
         }
     }
-    Ok(None)
+    tools
+}
+
+/// List absolute paths of files under `deliverables/` (empty if none).
+fn list_deliverables(task_dir: &Path) -> Vec<String> {
+    let dir = task_dir.join("deliverables");
+    if !dir.exists() {
+        return Vec::new();
+    }
+    std::fs::read_dir(&dir)
+        .ok()
+        .map(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path().to_string_lossy().to_string())
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Load the cached verification report from verify_state.json.
@@ -945,5 +1005,105 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Completed);
 
         let _ = std::fs::remove_dir_all(&task_dir);
+    }
+
+    // ── V26.5 (P2): crash recovery rebuilds FittingAgent result from
+    //    persisted state (chat_history + trace + deliverables) instead of
+    //    matching `phase == "output"|"result"` records that are never written.
+
+    static RECONSTRUCT_SEQ: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[test]
+    fn construct_tpn_result_from_state_reconstructs_from_persisted_files() {
+        let seq = RECONSTRUCT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "taiji_tpn_reconstruct_{}_{}",
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        // chat_history.json: last assistant message carries the final output.
+        let history = vec![
+            Message::user("task description"),
+            Message::assistant("early thinking with a tool call"),
+            Message::user(""),
+            Message::assistant("final answer: the report is done"),
+        ];
+        save_json_atomic(&history, &dir.join("chat_history.json"))
+            .expect("chat_history");
+
+        // trace.jsonl: tool_call records out of first-call order.
+        let trace_path = dir.join("trace.jsonl");
+        let mut lines = String::new();
+        for (i, phase) in [
+            "tool_call::read",
+            "tool_call::causal_verify",
+            "tool_call::read",
+            "tool_call::write",
+        ]
+        .iter()
+        .enumerate()
+        {
+            let record = crate::infra::trace::TraceRecord {
+                ts: format!("2026-08-07T00:00:{i:02}Z"),
+                cycle: 0,
+                depth: 0,
+                task_id: "reconstruct-test".into(),
+                phase: phase.to_string(),
+                provider_model: "test-model".into(),
+                duration_ms: 0,
+                input: serde_json::json!({}),
+                output: serde_json::json!({}),
+                degraded: false,
+                constraint_violations: None,
+            };
+            lines.push_str(&serde_json::to_string(&record).unwrap());
+            lines.push('\n');
+        }
+        std::fs::write(&trace_path, lines).unwrap();
+
+        // deliverables/: one file.
+        std::fs::create_dir_all(dir.join("deliverables")).unwrap();
+        std::fs::write(dir.join("deliverables").join("report.md"), "x").unwrap();
+
+        let ctx = make_engine_ctx("reconstruct-test", dir.clone());
+        let result = construct_tpn_result_from_state(&ctx)
+            .expect("no IO error")
+            .expect("must reconstruct");
+
+        assert_eq!(result.task_id, "reconstruct-test");
+        assert_eq!(result.content, "final answer: the report is done");
+        // Deduplicated, first-call order — not file order.
+        assert_eq!(result.tools_used, vec!["read", "causal_verify", "write"]);
+        assert_eq!(result.depth, 0);
+        assert_eq!(result.rounds, 1);
+        assert!(
+            result
+                .deliverables
+                .iter()
+                .any(|p| p.ends_with("deliverables/report.md")),
+            "deliverables should list the report file"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn construct_tpn_result_from_state_returns_none_without_chat_history() {
+        let seq = RECONSTRUCT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "taiji_tpn_reconstruct_none_{}_{}",
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let ctx = make_engine_ctx("reconstruct-none", dir.clone());
+        let result = construct_tpn_result_from_state(&ctx).expect("no IO error");
+        assert!(result.is_none(), "empty chat_history must yield None (fallback to re-run)");
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

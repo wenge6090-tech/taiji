@@ -295,8 +295,14 @@ impl RecursiveDecomposeTool {
             let child_index = meta.index;
             let child_description = meta.description;
 
-            // ── Generate independent UUID for child (嵌套 task_id) ──
-            let child_task_id = uuid::Uuid::new_v4().to_string();
+            // ── Generate readable nested task_id: {slug}-{timestamp}-{index} ──
+            // index is unique within this parent, so parallel children spawned
+            // in the same second cannot collide (V26.6).
+            let child_task_id = format!(
+                "{}-{}",
+                crate::infra::task_id::generate_task_id(&child_description),
+                child_index
+            );
 
             // Broadcast child spawn to frontend (frontend tree sync).
             event_bus::emit_event(TaskEvent::ChildSpawned {

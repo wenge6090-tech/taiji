@@ -10,6 +10,10 @@
 >
 > **V25 变更摘要（2026-08-05，Meta/Causal 收集工具落地）：** Meta 与 Causal 相位从「无工具」升级为「LLM + 只读收集工具」——MetaAgent 注册 read / search / webfetch（收集任务上下文、父层 deliverables、归藏资产与网络信息后更新权重），CausalAgent 注册 read / webfetch（LLM 逐文件核验 deliverables、联网核实外部事实后裁决路由）。§1.2 权限面列、§8.2 权限同构、§8.5 Hook 安全模型更新：执行工具（write / bash / recursive_decompose / causal_verify）收敛 Fitting 相位，收集工具（read / search / webfetch）三相共有，「带工具必有安全钩子」为硬约束（Meta / Causal 均挂载 SafetyHook，webfetch 的 SSRF 检查由此生效）。§8.9 硬编码保证第 3、4 条（read 逐文件验证）由此从模板要求变为工具注册事实。
 
+> **V26.6 变更摘要（2026-08-07，任务 ID 可读化）：** `task_id` 从纯 UUID 改为**人类可读格式 `{简述slug}-{YYYYMMDD-HHMMSS}`**（如 `分析源码架构-20260807-061530`），新增 `src/infra/task_id.rs`（slugify 路径安全化：非字母数字→`-`、去首尾破折号、空描述→`task`；本地时间秒级时间戳；`ensure_unique` 目录已存在则追加 `-2/-3`）。根任务（runner）用 `generate_task_id(description)` + `ensure_unique`（查 `tasks/` 目录）；子任务（recursive_decompose）追加 `-{index}` 保证同父并行不撞；MCP taiji_plan 同步改用。**chat session_id（ws/handler）保持 UUID**（会话文件已持久化，不属任务 ID）。task_id 仍为纯字符串类型：任务目录路径、meta.json、trace、WS 事件、前端树、`--resume`/`taiji trace` CLI 全部兼容，无格式假设代码。§8.1 任务目录布局与 ID 生成说明同步。
+
+> **V26.5 变更摘要（2026-08-07，自我分析任务 57a31b8f 落地 P1/P2）：** 让 taiji 以架构评审者身份分析自身源码（交付 `analysis_report.md`），随后按报告修复两个高严重度问题：① **P1 trace 脱敏双实现版本分裂**——`infra/trace.rs` 仍保留旧 `{40,}` 通用正则，`TraceWriter::write` 二次脱敏抵消 V26.3 E3 修复，长 UUID/文件正文被误伤。修复：`infra/trace.rs` 正则收敛为前缀型（`sk-`/`ds-`/`ghp_`/`AKIA`），`hooks/trace.rs` 的 `redact_sensitive` 改为薄转发 `TraceWriter::redact_sensitive`（单一实现，消除漂移），新增端到端回归测试 `write_record_preserves_long_plain_strings_end_to_end`。② **P2 崩溃恢复重构函数恒失败**——`construct_tpn_result_from_trace` 匹配 `phase=="output"/"result"`（TraceHook 从不写这两种 phase），FittingDone 恢复恒重跑 LLM。修复：改为 `construct_tpn_result_from_state`（`tpn_cycle.rs`），从 `chat_history.json` 最后一条 assistant 文本重建 content + trace 的 `tool_call::*` 聚合 tools_used（首调顺序）+ deliverables 目录列出；新增 2 个回归测试。验证：全量 175 passed；冒烟任务 trace 中 46 个 40+ 字符长字符串完整保留（修复前全被遮蔽）；FittingDone 崩溃场景 resume 经 RUST_LOG 确认无 re-running、trace 零 Fitting 重跑记录。附带清理 `is_crash_recovery` 死赋值警告。§8.1 持久化清单与恢复链语义不变（纯内部实现修复，无接口契约变更）。
+
 > **V26.4 变更摘要（2026-08-07，E2E 冒烟实测：hook 单槽语义修复）：** V26.1-3 修复轮收尾冒烟（真实任务 e00d70e7）暴露深层 bug——`trace.jsonl` 缺失 + `tools_used` 为空，回溯根因：Rig 0.39 `AgentBuilder::hook()` 是**单槽覆盖式**，`.hook(a).hook(b).hook(c)` 只有 `c` 生效，导致 V25 起 FittingAgent 的 SafetyHook 从未真正挂载、V26.1 加 ChatHistorySnapshotHook 后 TraceHook 也失效（V26.1-A tools_used 修复随之失效）。新增 `FittingHookSet`（safety → trace → snapshot 组合，首个非 Continue 短路，一次 `.hook()` 挂载）修复；Meta / Causal / Chat 单 hook 不受影响。冒烟复验：`trace.jsonl` 47 行记录、`TPNResult.tools_used = [write, read, causal_verify]` 真实落盘、无密钥明文。§8.5 Hook 安全模型补挂载机制说明；AGENTS.md §17 沉淀。
 
 > **V26.3 变更摘要（2026-08-07，任务 6f95dacd 深度分析落地）：** 对 E2E 超时任务 6f95dacd（「逐一审计全部 src Rust 文件」）的完成情况与任务描述矛盾分析（结论：无虚假完成，status=Failed 诚实；但三层不一致）落地 4 项修复：① **abort 子任务状态落盘**——RecursiveDecomposeTool 错误路径 `abort_all()` 后统一把 `children/` 下 Running 子任务写 Failed（实测 8 个子任务 7 个停在 Running 且 3 个实际产出了交付物，与「超时/失败/取消正确落盘」宣称不符）；② **L1 Skills 工具参数契约对齐**——SkillTool ToolDefinition 暴露单参 `input` 但 BashTool 读 `command`、ReadTool 读 `path`，LLM 传 `{"input":"ls"}` 永远报 missing 参数，唯一活路是 input 塞 JSON 字符串（纯靠试错，每次 resume 重新踩坑）；修复为 BashTool/ReadTool 支持 `input` 键直读纯字符串 + ToolDefinition description 补用法示例（双保险）；③ **trace 脱敏精确化**——value-based 正则 `[a-zA-Z0-9_-]{40,}` 误伤 UUID/文件正文，LLM 读 config.json 等内容被整段遮蔽；收紧为仅密钥前缀匹配或仅 key-based，read/bash 输出豁免 value-based；④ **Fitting 规模感知引导**——模板提示任务过大时优先拆解分批、预算不足时明确说明覆盖范围。§8.1（子任务状态一致性）、§8.5（工具契约与 description 约定）同步更新。
@@ -777,7 +781,7 @@ data/                               ← 默认 data_root
 │   │   └── dead/                   ← 死信队列
 │   ├── knowledge/                  ← 归藏 认知仓库 (§6)
 │   └── tasks/
-│       └── {root_uuid}/            ← 根任务
+│       └── {task_id}/            ← 根任务（V26.6 起：`{简述slug}-{YYYYMMDD-HHMMSS}`，见 §8.1）
 │           ├── meta.json           ← Task { id, depth:0, status }
 │           ├── trace.jsonl         ← 根层执行轨迹
 │           ├── deliverables/       ← LLM 产出
@@ -844,6 +848,8 @@ AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → Age
 | `trace.jsonl` | 事件审计（脱敏） | TraceHook / 手动 | read_tree | 审计与工具结果提取 |
 
 > V26.2 已删除：`meta_conversation.json`（信息全部可推导）、`converge_state.json`（converge 幂等重放天然覆盖）。恢复链 `resume_history > decompose_result.json > checkpoint.json` 不受影响（死文件本无消费者）。
+
+**任务 ID 格式（V26.6）**：`{简述slug}-{YYYYMMDD-HHMMSS}`（如 `分析源码架构-20260807-061530`），由 `src/infra/task_id.rs` 生成——slug 取描述前 24 字符路径安全化（非字母数字→`-`、折叠连续破折号、去首尾破折号、空描述→`task`），时间戳为本地时间秒级。唯一性：根任务经 `ensure_unique` 检查 `tasks/` 目录已存在则追加 `-2/-3`；子任务追加 `-{index}`（同父并行不撞，跨父碰撞概率可忽略且无文件冲突——子任务目录在 `children/<idx>/`，task_id 仅作标识）。**chat session_id 保持 UUID**（`{data_root}/chat/{session_id}.json`，会话文件已持久化，不属任务 ID）。task_id 为纯字符串，无任何代码假设其 UUID 格式，`--resume`/`taiji trace` 输入与前端树显示同步可读化。
 
 **子任务状态一致性（V26.3）**：RecursiveDecomposeTool 错误路径 `abort_all()` 终止子任务后，`children/` 下 status=Running 的子任务必须统一落盘为 Failed（写失败仅 warn，不阻断父任务错误传播）——「超时/失败/取消正确落盘」声明覆盖所有任务节点，含被父任务中止的子任务；中止不产生虚假的 Running 残留。
 

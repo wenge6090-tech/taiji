@@ -78,7 +78,13 @@ impl RecursiveRunner {
                 (id.clone(), dir, depth)
             }
             None => {
-                let id = uuid::Uuid::new_v4().to_string();
+                // V26.6: human-readable id `{slug}-{YYYYMMDD-HHMMSS}`;
+                // ensure_unique appends `-2/-3` when the tasks/ dir collides
+                // (same second + same slug).
+                let id = crate::infra::task_id::generate_task_id(description);
+                let id = crate::infra::task_id::ensure_unique(id, |candidate| {
+                    self.factory.task_dir(candidate).exists()
+                });
                 let dir = self.factory.task_dir(&id);
                 tracing::info!(task_id = %id, "Starting task execution with context");
                 (id, dir, 0)

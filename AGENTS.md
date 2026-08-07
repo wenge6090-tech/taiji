@@ -238,3 +238,17 @@ TpnCycle 恢复历史时严格按此顺序：
 - **`AgentBuilder::hook()` 是单槽覆盖式**：每次调用直接替换先前注册的 hook（builder 内 `hook: Some(hook)`），`.hook(a).hook(b).hook(c)` 最终只有 `c` 生效——不是追加列表。FittingAgent 必须经 `FittingHookSet`（`src/hooks/fitting_hook_set.rs`，safety → trace → snapshot 组合，一次 `.hook()` 挂载）转发全部 `PromptHook` 方法；禁止再写 `.hook().hook()` 链式挂载。
 - **历史教训（本次修复的隐性 bug）**：V25 起 FittingAgent 链式挂载导致 SafetyHook 从未真正生效（V26.1 加 snapshot 后 TraceHook 也失效）——E2E 冒烟表现为 `trace.jsonl` 缺失 + `tools_used` 为空，单测无法覆盖（rig builder 单槽语义只在真实构建路径暴露）。任何 agent 新增第二个 hook 时，先检查现有挂载点是否单槽。
 - **FittingHookSet 转发语义**：按 safety → trace → snapshot 顺序调用，首个非 Continue 动作短路返回——SafetyHook 拒绝的违规工具调用不会进入 trace 记录（`tools_called()` 不含被拒工具）；`on_invalid_tool_call` 聚合取首个非 Fail。`tools_used` 读外部保留的 `trace_hook.tools_called()`（clone 进 FittingHookSet 共享 Arc 状态）。
+
+## 18. 脱敏单实现与崩溃恢复数据源（V26.5 自我分析修复轮）
+
+- **trace 脱敏唯一实现是 `infra/trace.rs::TraceWriter::redact_sensitive`**（V26.3 前缀型规则：`sk-`/`ds-`/`ghp_`/`AKIA`，无 `{40,}` 通用匹配）；`hooks/trace.rs::TraceHook::redact_sensitive` 必须保持薄转发，禁止再复制实现（复制必然漂移，旧 `{40,}` 正则经 `TraceWriter::write` 二次脱敏会整段遮蔽 UUID/文件正文，V26.3 修复被完全抵消——V26.5 P1 实证）。改动脱敏规则时两端同步检查。
+- **崩溃恢复的 Fitting 结果重建数据源是 `chat_history.json`，不是 trace**：TraceHook 只写 `completion_call`/`completion_response`/`tool_call::*`，任何匹配 `phase=="output"/"result"` 的恢复逻辑恒失败（V26.5 P2 实证：FittingDone 恢复恒重跑 LLM 浪费 token）。重建走 `construct_tpn_result_from_state`（tpn_cycle.rs）：content 取 chat_history 最后一条含文本的 assistant 消息，tools_used 正序遍历 trace 的 `tool_call::*` 去重（首调顺序，勿用 rev+reverse——那会变成末次出现顺序）。
+- **CausalAgent verify/converge 不挂 TraceHook**（只挂 SafetyHook），其 LLM 调用与 read/webfetch 不进 trace.jsonl——崩溃恢复的 verify 行为天然不可审计，勿据此推断 Fitting 未执行；判断 Fitting 是否重跑以 RUST_LOG 日志（`Could not reconstruct ... re-running`）或 Fitting 工具调用记录（read/bash/write/recursive_decompose）为准。
+- **JoinSet 超时语义**：`tokio::task::JoinSet` 被 Drop 时自动 abort 全部子任务（tokio 保证），runner 超时路径 `TpnCycle` drop 即中止子树；残余问题是 abort 不执行子任务状态落盘（meta.json 滞留 Running），Fitting 内错误路径的 `abort_all() + mark_aborted_children_failed`（V26.3）只覆盖主动错误路径，覆盖不了 timeout drop。判断"孤儿子任务"时先区分：join_next 主动收集 vs JoinSet drop 隐式 abort。
+- **verify 对超大重构 content 有 MaxTurnsError 边界**：FittingDone 崩溃恢复后 verify 重新跑，若 task_output 极大（如含旧上下文的长报告）10 轮可能超限（V26.5 人工场景实证）。真实同 task_id 恢复（01:06 案例）verify 单轮通过；大输出任务建议描述控制输出规模。
+
+## 19. 任务 ID 可读化（V26.6）
+
+- **task_id 格式 `{简述slug}-{YYYYMMDD-HHMMSS}`**（如 `分析源码-20260807-061530`），唯一生成点在 `src/infra/task_id.rs`：slug 取描述前 24 字符路径安全化（非字母数字→`-`，含 `/ \ : . " * ?` 与空格，杜绝 `..` 穿越；空描述→`task`），时间戳本地时间秒级。**禁止在 runner/recursive_decompose/mcp 等处直接拼 task_id 或重新引入 UUID**；`generate_task_id` 本身不保证唯一，根任务必须经 `ensure_unique`（查 `tasks/` 目录，同秒同名追加 `-2/-3`），子任务追加 `-{index}`（同父并行不撞）。
+- **chat session_id 保持 UUID**：`{data_root}/chat/{session_id}.json` 会话文件已持久化，session_id 不属任务 ID，`ws/handler.rs` 的 `Uuid::new_v4()` 勿改。
+- task_id 为纯字符串、无 UUID 格式假设（已排查无 `len()==36`/`parse_str` 校验）；新增代码读 task_id 时按不透明字符串处理。前端 `taskId: string` 与 CLI `--resume`/`trace <id>` 自动兼容可读 ID。

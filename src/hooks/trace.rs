@@ -13,12 +13,11 @@
 use crate::infra::trace::{TraceRecord, TraceWriter};
 use crate::types::execution::EngineContext;
 use chrono::Utc;
-use regex::Regex;
 use rig::agent::{HookAction, PromptHook, ToolCallHookAction};
 use rig::completion::{CompletionModel, CompletionResponse, Message};
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 /// Hook that records agent execution steps to a JSONL trace file.
@@ -112,65 +111,17 @@ impl TraceHook {
 
     /// Recursively walk a JSON value and redact sensitive information.
     ///
-    /// # Key-based redaction
-    /// Keys (case-insensitive) containing any of the following trigger a full
-    /// value replacement with `"***REDACTED***"`:
-    /// `api_key`, `api-key`, `apikey`, `token`, `secret`, `password`
+    /// Single-source-of-truth implementation lives in [`TraceWriter::redact_sensitive`]
+    /// (`infra/trace.rs`) — this is a thin re-export so hooks and callers share
+    /// one rule set and cannot drift (V26.3 E3 + V26.5: removed the duplicate
+    /// copy that still carried the generic `{40,}` rule and nuked innocent long
+    /// strings during `TraceWriter::write`'s second pass).
     ///
-    /// # Value-based redaction
-    /// All string values are scanned for patterns that match common prefixed
-    /// key formats (V26.3 E3: prefix-only — the generic 40+ char rule was
-    /// removed because it nuked long-but-innocent strings like UUIDs, task ids
-    /// and file bodies, hiding the content the LLM reads):
-    /// - `sk-` followed by 20+ alphanumeric chars (OpenAI-style)
-    /// - `ds-` followed by 20+ alphanumeric chars (DeepSeek-style)
-    /// - `ghp_` followed by 20+ alphanumeric chars (GitHub PAT)
-    /// - `AKIA` + 16 uppercase alphanumerics (AWS access key id)
-    ///
-    /// The original value is not mutated; a new `Value` tree is returned.
+    /// # Rules (see infra for details)
+    /// - Key-based: `api_key` / `token` / `secret` / `password` (case-insensitive)
+    /// - Value-based: prefixed key patterns only (`sk-…`/`ds-…`/`ghp_…`/`AKIA…`)
     pub fn redact_sensitive(value: &Value) -> Value {
-        static KEY_VALUE_PATTERN: OnceLock<Regex> = OnceLock::new();
-        let key_value_re = KEY_VALUE_PATTERN.get_or_init(|| {
-            Regex::new(
-                r"(?i)(sk-[a-zA-Z0-9]{20,}|ds-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16})",
-            )
-            .expect("invalid key-value regex")
-        });
-
-        match value {
-            Value::Object(map) => {
-                let mut redacted = serde_json::Map::with_capacity(map.len());
-                for (k, v) in map {
-                    let key_lower = k.to_lowercase();
-                    if key_lower.contains("api_key")
-                        || key_lower.contains("api-key")
-                        || key_lower.contains("apikey")
-                        || key_lower == "token"
-                        || key_lower.ends_with("_token")
-                        || key_lower.ends_with("-token")
-                        || key_lower.contains("secret")
-                        || key_lower.contains("password")
-                    {
-                        redacted.insert(k.clone(), Value::String("***REDACTED***".into()));
-                    } else {
-                        redacted.insert(k.clone(), Self::redact_sensitive(v));
-                    }
-                }
-                Value::Object(redacted)
-            }
-            Value::Array(arr) => {
-                let redacted: Vec<Value> = arr.iter().map(Self::redact_sensitive).collect();
-                Value::Array(redacted)
-            }
-            Value::String(s) => {
-                if key_value_re.is_match(s) {
-                    Value::String("***REDACTED***".into())
-                } else {
-                    Value::String(s.clone())
-                }
-            }
-            other => other.clone(),
-        }
+        TraceWriter::redact_sensitive(value)
     }
 
     // ── Private helpers ───────────────────────────────────────────────
@@ -526,6 +477,63 @@ mod tests {
 
         let _ = std::fs::remove_file(&trace_path);
         let _ = std::fs::remove_dir(&dir);
+    }
+
+    // ── V26.5: end-to-end regression for double-redaction ──────────────
+    //
+    // TraceHook redacts with the prefix-only rule, then TraceWriter::write
+    // must NOT re-redact innocent long strings (UUIDs, file bodies) with the
+    // old generic {40,} rule — the V26.3 E3 fix used to be nullified by the
+    // second pass in infra/trace.rs.
+
+    static TRACE_E2E_SEQ: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[test]
+    fn write_record_preserves_long_plain_strings_end_to_end() {
+        let seq = TRACE_E2E_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "trace_e2e_test_{}_{}",
+            std::process::id(),
+            seq
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+
+        let context = EngineContext {
+            task_id: "6f95dacd-d5bb-4b33-8d38-b2b1d5c87c24".into(),
+            depth: 0,
+            task_dir: dir.clone(),
+            cycle: 0,
+            round: 0,
+            context_dir: None,
+        };
+
+        let hook = TraceHook::new(&context, "test-model");
+        let long_body = "fn verify_everything_across_the_entire_codebase() -> Result<(), TaijiError> { /* 40+ chars of innocent text that must survive */ }";
+        hook.write_record(
+            "tool_call::read",
+            json!({
+                "path": "src/lib.rs",
+                "task_id": "6f95dacd-d5bb-4b33-8d38-b2b1d5c87c24"
+            }),
+            json!({"content": long_body}),
+        );
+
+        let trace_path = dir.join("trace.jsonl");
+        let contents = std::fs::read_to_string(&trace_path)
+            .expect("trace file should exist");
+        let record: TraceRecord = serde_json::from_str(contents.trim())
+            .expect("valid JSON");
+
+        // Innocent long strings survive the full write path.
+        assert_eq!(record.input["path"], "src/lib.rs");
+        assert_eq!(
+            record.input["task_id"],
+            "6f95dacd-d5bb-4b33-8d38-b2b1d5c87c24"
+        );
+        assert_eq!(record.output["content"], long_body);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // ── tools_called (real tool invocation tracking) ───────────────────

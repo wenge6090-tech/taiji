@@ -34,7 +34,8 @@ ls target/debug/taiji >/dev/null 2>&1 && echo "二进制 OK" || cargo build 2>/d
 ## 2. 跑任务（核心操作）
 
 ```bash
-# 新任务（task_id 是自动生成的 UUID，从输出捕获）
+# 新任务（task_id 格式：{简述slug}-{YYYYMMDD-HHMMSS}，如 分析源码-20260807-061530；
+# 从 run 输出捕获，同秒同名自动追加 -2/-3）
 timeout 620 ./target/debug/taiji run "任务描述" 2>&1 | tee /tmp/taiji_run.log
 ```
 
@@ -91,7 +92,7 @@ for d in .taiji/tasks/$ID/children/*/; do echo "$d: $(python3 -c "import json;pr
 ## 7. 陷阱清单
 
 - `taiji run` 是长任务：bash 一律 `timeout 620`，不要默认 30s。
-- 新任务 ID 是 UUID：从 `run` 输出捕获，不要猜测。
+- 新任务 ID 是 `{简述slug}-{YYYYMMDD-HHMMSS}`（V26.6 起，非 UUID）：从 `run` 输出捕获，不要猜测；同秒同名任务自动追加 `-2/-3`，子任务追加 `-{index}`。
 - 不要用 `taiji mcp`（阻塞式 MCP 服务器，pi 场景用本 skill 的 CLI 路径替代）。
 - 诊断前先 `cargo build` 确保二进制与源码一致。
 - 任务描述模糊会导致 LLM 反复试错烧预算：描述里给足路径、格式、规模约束。

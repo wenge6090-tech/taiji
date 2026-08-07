@@ -75,16 +75,21 @@ impl TraceWriter {
     /// `api_key`, `api-key`, `apikey`, `token`, `secret`, `password`
     ///
     /// # Value-based redaction
-    /// All string values are scanned for patterns that match common API key
-    /// formats:
+    /// All string values are scanned for patterns that match common prefixed
+    /// key formats (V26.3 E3: prefix-only — the generic 40+ char rule was
+    /// removed because it nuked long-but-innocent strings like UUIDs, task ids
+    /// and file bodies, hiding the content the LLM reads):
     /// - `sk-` followed by 20+ alphanumeric chars (OpenAI-style)
     /// - `ds-` followed by 20+ alphanumeric chars (DeepSeek-style)
-    /// - Any 40+ character alphanumeric string (generic key/token)
+    /// - `ghp_` followed by 20+ alphanumeric chars (GitHub PAT)
+    /// - `AKIA` + 16 uppercase alphanumerics (AWS access key id)
     pub fn redact_sensitive(value: &Value) -> Value {
         static KEY_VALUE_PATTERN: OnceLock<Regex> = OnceLock::new();
         let key_value_re = KEY_VALUE_PATTERN.get_or_init(|| {
-            Regex::new(r"(?i)(sk-[a-zA-Z0-9]{20,}|ds-[a-zA-Z0-9]{20,}|[a-zA-Z0-9_-]{40,})")
-                .expect("invalid key-value regex")
+            Regex::new(
+                r"(?i)(sk-[a-zA-Z0-9]{20,}|ds-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{20,}|AKIA[0-9A-Z]{16})",
+            )
+            .expect("invalid key-value regex")
         });
 
         match value {

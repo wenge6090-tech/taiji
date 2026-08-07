@@ -270,7 +270,8 @@ impl TaijiMcpServer {
 
         info!(description = %description, "MCP taiji_plan called");
 
-        let task_id = uuid::Uuid::new_v4().to_string();
+        // V26.6: readable id for plan context (not persisted as a task dir).
+        let task_id = crate::infra::task_id::generate_task_id(&description);
         let plan_agent = match self.factory.create_plan_agent(&task_id) {
             Ok(agent) => agent,
             Err(e) => {
