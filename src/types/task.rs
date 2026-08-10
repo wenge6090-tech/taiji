@@ -54,6 +54,15 @@ pub struct ChildResultSummary {
     pub tools_used: Vec<String>,
     #[serde(default)]
     pub deliverables: Vec<String>,
+    /// V31 失败汇报（BCP §8.18）：任务级失败的子任务原因文本（供父阳再指导）。
+    /// 成功子任务为 None。失败子任务的 deliverables 含 handoff.md 交接产物路径
+    /// （残缺产出，父阳可读后精准 rerun_of + 修正指导）。
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+    /// V31 失败分类（§8.18 词汇表扩展）：context_overflow / hard_cutoff /
+    /// llm_failed / io / cognitive / constraint_violation / other。
+    #[serde(default)]
+    pub failure_kind: Option<String>,
 }
 
 /// Result returned by the recursive_decompose tool.

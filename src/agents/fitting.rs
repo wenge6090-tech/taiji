@@ -789,6 +789,15 @@ fn build_orchestration_prompt(
             下一轮拆解时协调注入（兄弟间不直连通信）。\n\
          3. 📮 通信经父层 — 子任务间的信息往来统一由父层汇总（聚合 → 收敛 →\n\
             下一轮注入），子任务不应尝试向兄弟写入反馈。\n\n\
+         ### 失败汇报与再指导 (V31 收敛树)\n\
+         `recursive_decompose` 返回的 `child_results` 可能含 **Diverged 失败条目**\n\
+         （`failure_reason`/`failure_kind` + handoff 交接产物路径）——子任务失败\n\
+         **不会中断分解**，失败原因与交接产物已向上汇报。收到失败汇报时：\n\
+         1. 🔁 可恢复失败（llm_failed / io / context_overflow 已写交接产物）→\n\
+            再次调用 `recursive_decompose` 并给失败子任务设置 `rerun_of`（索引），\n\
+            description 中注入上次失败原因与修正指导；\n\
+         2. 📉 不可恢复 / 预算已尽 → 接受残缺产出综合（在最终报告中说明覆盖范围）；\n\
+         3. 🛑 全部子任务失败且无法进展 → 综合阶段明确上报失败原因。\n\n\
          ### 关键原则 (Plant Growth Principle)\n\
          1. 🌱 自然分叉 — 只在真正需要处拆解。任务树应像植物：主干 → 分支 → 叶。\n\
          2. ⚖️ 拿不准就 Execution — 过度拆解浪费轮次。能直接完成的子任务\n\

@@ -400,6 +400,8 @@ impl RecursiveDecomposeTool {
 
         // --- Collect results (streaming — fastest-first, short-circuit on error) ---
         let mut result_map: BTreeMap<usize, TPNResult> = BTreeMap::new();
+        // V31 失败汇报：失败子任务索引 → failure_kind 分类（child_results 映射用）。
+        let mut failure_kinds: BTreeMap<usize, String> = BTreeMap::new();
         let mut success_count = 0usize;
         let total = join_set.len();
 
@@ -416,12 +418,21 @@ impl RecursiveDecomposeTool {
                     result_map.insert(idx, tpn_result);
                     success_count += 1;
                 }
-                Ok((_idx, Err(e))) => {
-                    join_set.abort_all();
-                    mark_aborted_children_failed(&children_root);
-                    return Err(e);
+                Ok((idx, Err(e))) => {
+                    // V31 失败汇报（BCP §8.18）：取消 → 硬中止（收敛树整体放弃）；
+                    // 任务级失败 → Diverged 失败条目进 prior_results，**不整体上抛**——
+                    // 成功兄弟继续收集（不 abort_all），converge 收到完整汇报。
+                    if self.cancel.is_cancelled() {
+                        join_set.abort_all();
+                        mark_aborted_children_failed(&children_root);
+                        return Err(e);
+                    }
+                    let child_dir = children_root.join(idx.to_string());
+                    failure_kinds.insert(idx, classify_failure(&e));
+                    prior_results.insert(idx, build_failure_entry(&child_dir, &e));
                 }
                 Err(join_err) => {
+                    // 进程级异常（panic）仍硬中止——不吞。
                     join_set.abort_all();
                     mark_aborted_children_failed(&children_root);
                     return Err(TaijiError::Other(format!(
@@ -447,15 +458,20 @@ impl RecursiveDecomposeTool {
             .await?;
 
         // Build child_results summary for parent LLM.
-        let child_results: Vec<ChildResultSummary> = all_decompose_results
+        // V31：Diverged 条目带 failure_reason/failure_kind（父阳再指导依据）。
+        let child_results: Vec<ChildResultSummary> = prior_results
             .iter()
-            .map(|r| ChildResultSummary {
+            .map(|(idx, r)| ChildResultSummary {
                 task_id: r.task_id.clone(),
                 summary: r.summary.clone(),
                 status: r.status.clone(),
                 rounds: r.rounds,
                 tools_used: r.tools_used.clone(),
                 deliverables: r.deliverables.clone(),
+                failure_reason: failure_kinds
+                    .get(idx)
+                    .map(|_| r.summary.clone()),
+                failure_kind: failure_kinds.get(idx).cloned(),
             })
             .collect();
 
@@ -526,6 +542,77 @@ fn collect_sibling_deliverables(
         }
     }
     Ok(venues.into_values().map(|p| p.to_string_lossy().to_string()).collect())
+}
+
+/// V31 失败汇报（BCP §8.18）：TaijiError 变体 → failure_kind 分类
+///（§8.18 词汇表扩展）。纯函数，可单测。
+fn classify_failure(e: &TaijiError) -> String {
+    match e {
+        TaijiError::ContextOverflow { .. } => "context_overflow",
+        TaijiError::HardCutoff { .. } => "hard_cutoff",
+        TaijiError::LLMCallFailed { .. } => "llm_failed",
+        TaijiError::StructuredOutputParseFailed { .. } => "cognitive",
+        TaijiError::MaxDepthExceeded { .. } => "cognitive",
+        TaijiError::MaxRoundsExceeded { .. } => "cognitive",
+        TaijiError::MaxCyclesExceeded { .. } => "cognitive",
+        TaijiError::MaxSubtasksExceeded { .. } => "cognitive",
+        TaijiError::ConstraintViolation { .. } => "constraint_violation",
+        TaijiError::SafetyViolation { .. } => "constraint_violation",
+        TaijiError::IO(_) | TaijiError::Serde(_) => "io",
+        TaijiError::Config { .. } => "config",
+        TaijiError::KnowledgeStoreUnavailable { .. } => "io",
+        TaijiError::WorkerPoolUnavailable { .. } => "io",
+        TaijiError::Cancelled { .. } => "cancelled",
+        TaijiError::Other(_) => "other",
+    }
+    .to_string()
+}
+
+/// V31 失败汇报（BCP §8.18）：任务级失败子任务 → Diverged 条目。
+///
+/// summary = `[{kind}] {reason}`（converge LLM 可读）；deliverables = 子任务
+/// deliverables/ 现存文件（含 handoff.md 交接产物——V28 失败一律先写）。
+/// 交接产物收集失败仅 warn（**有意例外**：原始失败原因必须优先传播，
+/// 叠加 IO 错误会掩盖根因，BCP §8.18 声明）。
+fn build_failure_entry(child_dir: &Path, e: &TaijiError) -> DecomposeResult {
+    let del_dir = child_dir.join("deliverables");
+    let mut deliverables = Vec::new();
+    match std::fs::read_dir(&del_dir) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                deliverables.push(entry.path().to_string_lossy().to_string());
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                child_dir = %child_dir.display(),
+                error = %err,
+                "failure entry: 无法读取子任务 deliverables/（交接产物收集失败，仅告警）"
+            );
+        }
+    }
+    let kind = classify_failure(e);
+    let reason = e.to_string();
+    let task_id = crate::infra::trace::load_json_optional::<Task>(&child_dir.join("meta.json"))
+        .ok()
+        .flatten()
+        .map(|t| t.id)
+        .unwrap_or_else(|| {
+            child_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| "child".to_string())
+        });
+    DecomposeResult {
+        task_id,
+        summary: format!("[{kind}] {reason}"),
+        status: ConvergenceStatus::Diverged,
+        subtask_count: 0,
+        deliverables,
+        rounds: 0,
+        tools_used: vec![],
+        child_results: vec![],
+    }
 }
 
 /// Best-effort mark of every aborted child whose `meta.json` still says
@@ -783,6 +870,89 @@ mod tests {
         assert!(siblings[0].contains("0/deliverables"));
 
         std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_classify_failure_mapping() {
+        // V31：TaijiError 变体 → failure_kind 分类（§8.18 词汇表）。
+        assert_eq!(classify_failure(&TaijiError::ContextOverflow { threshold: 1 }), "context_overflow");
+        assert_eq!(classify_failure(&TaijiError::HardCutoff { threshold: 1 }), "hard_cutoff");
+        assert_eq!(classify_failure(&TaijiError::LLMCallFailed { context: "x".into() }), "llm_failed");
+        assert_eq!(classify_failure(&TaijiError::StructuredOutputParseFailed { context: "x".into() }), "cognitive");
+        assert_eq!(classify_failure(&TaijiError::MaxRoundsExceeded { max: 3 }), "cognitive");
+        assert_eq!(classify_failure(&TaijiError::ConstraintViolation { context: "x".into() }), "constraint_violation");
+        assert_eq!(classify_failure(&TaijiError::IO(std::io::Error::new(std::io::ErrorKind::Other, "e"))), "io");
+        assert_eq!(classify_failure(&TaijiError::Cancelled { context: "x".into() }), "cancelled");
+        assert_eq!(classify_failure(&TaijiError::Other("x".into())), "other");
+    }
+
+    #[test]
+    fn test_build_failure_entry_with_handoff() {
+        // V31：失败条目 = Diverged + failure kind 前缀 + handoff 交接产物路径。
+        let tmp = std::env::temp_dir().join(format!(
+            "decompose_failure_entry_{}_{}",
+            std::process::id(),
+            SIBLING_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("deliverables")).unwrap();
+        std::fs::write(tmp.join("deliverables/handoff.md"), "# 交接").unwrap();
+        std::fs::write(
+            tmp.join("meta.json"),
+            serde_json::to_string(&Task {
+                id: "child-9".into(),
+                description: "子任务".into(),
+                depth: 1,
+                status: crate::types::task::TaskStatus::Failed,
+                parent_id: Some("root".into()),
+                subtask_ids: vec![],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let err = TaijiError::ContextOverflow { threshold: 250_000 };
+        let entry = build_failure_entry(&tmp, &err);
+        assert_eq!(entry.status, ConvergenceStatus::Diverged);
+        assert!(entry.summary.contains("[context_overflow]"), "summary: {}", entry.summary);
+        assert_eq!(entry.task_id, "child-9", "task_id 应从身份册读取");
+        assert_eq!(entry.deliverables.len(), 1, "应含 handoff 交接产物");
+        assert!(entry.deliverables[0].ends_with("handoff.md"));
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_build_failure_entry_missing_deliverables_warns_and_continues() {
+        // 无 deliverables 目录（异常路径）→ 条目仍构造（deliverables 空，仅 warn）。
+        let tmp = std::env::temp_dir().join(format!(
+            "decompose_failure_entry_empty_{}_{}",
+            std::process::id(),
+            SIBLING_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+        let entry = build_failure_entry(&tmp, &TaijiError::Other("boom".into()));
+        assert_eq!(entry.status, ConvergenceStatus::Diverged);
+        assert!(entry.summary.contains("[other] boom"));
+        assert!(entry.deliverables.is_empty());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_child_result_summary_failure_fields_serde_compat() {
+        // V31：旧 decompose_result.json（无 failure 字段）反序列化 → None。
+        let legacy = serde_json::json!({
+            "task_id": "t1",
+            "summary": "s",
+            "status": "Converged",
+            "rounds": 2,
+            "tools_used": ["read"],
+            "deliverables": []
+        });
+        let parsed: ChildResultSummary = serde_json::from_value(legacy).expect("legacy parse");
+        assert_eq!(parsed.failure_reason, None);
+        assert_eq!(parsed.failure_kind, None);
     }
 
     #[test]

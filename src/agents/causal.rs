@@ -600,6 +600,17 @@ produced files.  You MUST use the `read` tool to open each file and verify:
 - Completeness — are all required artifacts present?
 - Quality — do the files meet the required standards?
 
+## Failed Subtask Reporting (V31)
+Some subtask results may have `status: "Diverged"` with a `summary` like
+`[failure_kind] reason` — the subtask failed (context overflow / llm failure /
+IO / etc.) and its `deliverables` (if any) contain the handoff artifact it
+wrote before failing. Treat these as **partial progress reports**:
+- Judge `Partial` when failures are recoverable and most subtasks succeeded.
+- Judge `Diverged` when the failure is fundamental or no progress was made.
+- In `task_summary`, **state which subtask failed, why, and whether re-running
+  it with adjusted guidance is worthwhile** — the parent orchestrator reads
+  this to decide re-decomposition (rerun_of) vs. accepting partial output.
+
 Produce a convergence decision in JSON format:
 {
   "status": "Converged" | "Partial" | "Diverged",
