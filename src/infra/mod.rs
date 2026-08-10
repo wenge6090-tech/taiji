@@ -1,5 +1,6 @@
 pub mod config;
 pub mod error;
+pub mod handoff;
 pub mod json_util;
 pub mod knowledge;
 pub mod provider;

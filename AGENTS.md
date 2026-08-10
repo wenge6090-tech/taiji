@@ -40,12 +40,12 @@
 
 ## 3. Agent 关键约束
 
-### AgentMode（重要）
-- `AgentMode` 是 `Orchestration` | `Execution`，**不由 depth 自动推导**，由父 LLM 在 `SubtaskSpec.mode` 中显式分配。
-- depth=0 固定 Orchestration；depth+1 >= max_depth 时 `RecursiveDecomposeTool` 强制覆盖为 Execution。
-- `TpnCycle.execute()` 必须接收 `mode: AgentMode`，并逐层向下传播到 FittingAgent 和 CausalAgent。
-- FittingAgentBuilder 构造时接收 mode，据此选择 system prompt 模板——不允许运行时动态切换。
-- **`RecursiveDecomposeTool` 仅在 Orchestration 模式下注册**：Execution 模式 FittingAgent 不注册此工具，LLM 不可调用。工具内部同时有 mode guard 兜底（belt-and-suspenders）。这同时也防止了 WorkerPool 信号量死锁（Execution 模式持有 permit 不应再尝试获取更多 permit）。
+### AgentMode（V27 阴阳配对模式，重要）
+- `AgentMode` 是 `Orchestration` | `Execution`，**不由 depth 自动推导**：由 MetaAgent 权重更新时按**递归层数规则 + 任务难易程度**决策（BCP §8.8）——根节点与 BACK_TO_META 重跑时 MetaAgent LLM 决策；子节点由父 LLM 在 `SubtaskSpec.mode` 中按难度分配（编排模板教学）。
+- 深度规则兑底：`depth+1 >= max_depth` 时 `RecursiveDecomposeTool` 强制子任务为 Execution；`TpnCycle.apply_leaf_depth_rule()` 对根任务/崩溃恢复/BACK_TO_META 路径同样强制 Execution（两条路径互为镜像）。
+- **阴阳配对**：Orchestration 节点——阳 Agent 编排模板（拆解+综合）、阴 Agent 收敛模板（converge）；Execution 节点——阳 Agent 执行模板（直接产出）、阴 Agent 验证模板（verify）。降级模板按 `MetaContext.mode` 选：`VERIFY_ORC/EXEC_SYSTEM_PROMPT`、`CONVERGE_ORC/EXEC_SYSTEM_PROMPT`。
+- `TpnCycle.execute()` 逐层传播 `MetaContext.mode`（不再有独立 mode 参数）：FittingAgentBuilder 构造时读 meta_ctx.mode 选模板，CausalAgent verify/converge 读 meta_ctx.mode 选配对模板。
+- **`RecursiveDecomposeTool` 仅在 Orchestration 模式注册**：Execution 模式 FittingAgent 不注册此工具，LLM 不可调用。工具内部同时有 mode guard 兜底（belt-and-suspenders，Execution 模式调用直接拒绝）。这同时也防止了 WorkerPool 信号量死锁（Execution 模式持有 permit 不应再尝试获取更多 permit）。
 - `registered_tool_names` 用于从 LLM 响应中提取 `tools_used`，必须与工具的实际注册状态一致：Execution 模式不包含 "recursive_decompose"。
 
 ### System Prompt 动态编排
@@ -55,8 +55,8 @@
 ### 四象温度默认值
 | 模板 | 默认 temperature |
 |------|:---:|
-| FittingAgent Orchestration | 0.8 |
-| FittingAgent Execution | 0.5 |
+| FittingAgent Orchestration（编排） | 0.8 |
+| FittingAgent Execution（执行） | 0.5 |
 | CausalAgent verify | 0.2 |
 | CausalAgent converge | 0.2 |
 
@@ -122,11 +122,13 @@
 ## 7. 状态持久化与崩溃恢复
 
 ### 恢复优先级链
-TpnCycle 恢复历史时严格按此顺序：
-`resume_history`（显式传入） > `decompose_result.json` > `checkpoint.json`
-- `resume_history` 非 None 时直接使用，忽略文件。
-- 无 resume_history 时尝试从 `children/<idx>/decompose_result.json` 恢复。
+TpnCycle 恢复历史时严格按此顺序（V28 产出继承，BCP §1.4 / §8.18）：
+`deliverables/（含 handoff.md）` > `decompose_result.json` > 重跑
+- 有交接文件（`deliverables/handoff.md`）时从产出重建（执行事实是唯一记忆），**不再从 chat_history 重放作为结果事实来源**。
+- `resume_history`（显式传入）仅作本节点断点续聊的最终兜底（省 token），不跨层传播。
+- 无交接文件时尝试从 `children/<idx>/decompose_result.json` 恢复子任务结果。
 - 仅有 `checkpoint.json` 时走崩溃恢复逻辑：加载检查点，skip 已完成阶段。
+- 旧语义（resume_history > decompose_result > checkpoint 全链重放）已废弃。
 
 ### 检查点生命周期
 - 每个阶段（MetaDone / FittingDone / VerifyDone）完成后原子写入 `checkpoint.json`。
@@ -259,3 +261,40 @@ TpnCycle 恢复历史时严格按此顺序：
 - **归藏 prompts 资产必须与当前 Agent 架构对齐**：V26.7 发现 6 个 prompts 资产仍是 V25 AgentMode 分裂内容（教 LLM 设置已删除的 `mode: "Execution"/"Orchestration"`、按模式差异化裁决）——资产被 MetaAgent 按标签加载后由 LLM 编排注入，过时指令会真实污染 Fitting/Causal 行为。资产更新后 `version++`；**tags 保持不变**（index.yaml 是衍生缓存，改 tags 需重建索引）。新增/修改资产前对照 `src/agents/fitting.rs::build_system_prompt` / `causal.rs::VERIFY_SYSTEM_PROMPT`/`CONVERGE_SYSTEM_PROMPT` 的 V26 语义。
 - **BACK_TO_META 分支的 MetaAgent 调用标签必须与首次运行一致**（`&["general"]`）：V26.7 修复 tpn_cycle.rs BACK_TO_META 分支的 `&[]` 空标签——空标签 `search_prompts` 零匹配 → 降级空 MetaContext，元相循环永远无法注入新鲜推理偏置。
 - **超时路径子任务落盘**：runner 超时分支（`tokio::timeout` Err）drop TpnCycle → JoinSet drop 隐式 abort 子任务（不走状态写路径）→ 必须在超时分支调用 `mark_aborted_children_failed(&task_dir.join("children"))`（V26.7 接线，函数在 recursive_decompose.rs 为 `pub(crate)`）。V26.3 的主动错误路径覆盖不了 timeout drop，两条路径都要落盘。
+
+## 21. 阴阳配对模式（V27，用户框架恢复）
+
+- **模式决策链**：MetaAgent 权重更新时按 ① 递归层数规则（builder 注入 `depth()`/`max_depth()`，LLM prompt 含 depth/max_depth 与叶节点规则）② 任务难易程度（LLM 评估）决策 `MetaContext.mode`。根节点与 BACK_TO_META 重跑由 MetaAgent 决策；子节点由父 LLM 在 `SubtaskSpec.mode` 按难度分配（编排模板教学）；`RecursiveDecomposeTool` 与 `TpnCycle.apply_leaf_depth_rule()` 按深度规则兜底强制叶节点 Execution（两条路径互为镜像，缺一不可）。
+- **配对模板**：Orchestration = 阳编排模板（拆解+综合，注册 recursive_decompose）+ 阴收敛模板（CONVERGE_ORC）；Execution = 阳执行模板（直接产出，不注册 recursive_decompose）+ 阴验证模板（VERIFY_EXEC）。Fitting 降级模板按 mode 分支（`build_orchestration_prompt`/`build_execution_prompt`）；Causal verify/converge 降级模板按 `meta_ctx.mode` 选 ORC/EXEC 常量。
+- **`MetaContext.mode` 是模式唯一载体**：`#[serde(default)]` = Orchestration（旧 meta_ctx.json 零迁移兼容）；`SubtaskSpec.mode` 同理默认 Orchestration。禁止重新引入独立 mode 参数链（V25 方式已废弃）——mode 随 MetaContext 传播，TpnCycle 无需逐层传参。
+- **MetaAgent 降级路径（无归藏资产）仍返回 `MetaContext::empty()`（mode 默认 Orchestration）**：不做额外的 LLM 模式决策调用，叶节点强制由 `apply_leaf_depth_rule` 覆盖；若未来需要无资产也决策模式，需先入 BCP §8.8 再改。
+- **归藏资产 V27 已重写为配对语义（version→3，tags 不动）**：资产按 name/tags/description 与所选模式匹配（`orchestration_*` ↔ 编排、`execution_*` ↔ 执行），PromptAsset 无 `agent_mode` 字段（勿恢复，否则需重建 index.yaml）。修改资产前对照 fitting.rs 双模板 / causal.rs 四常量的 V27 语义。
+- **提示词教学 vs 注册面是双保险**：执行模板明示「你没有 recursive_decompose」是教学层；工具不注册 + 工具内 mode guard 是注册面层——LLM 结构化输出解析失败/编排异常时注册面兜底，教学层只降低 LLM 尝试调用未注册工具的频率。
+
+## 22. 交接文件机制与上下文预算（V28/V29 实现轮）
+
+- **交接文件 = `deliverables/handoff.md`，产出物之一**：写者 Fitting 错误路径（ContextOverflow / HardCutoff / LLMCallFailed），读者父层/verify/Meta 校准/恢复链均经 deliverables/ 既有路径发现。**禁止**引入 deliverables/ 外的独立交接文件（可发现性问题）。写失败仅 `warn!`，不阻断错误传播。
+- **ContextLimiter 挂在 FittingHookSet 转发链末尾**：`on_completion_response` 累计 `response.usage.input_tokens`（provider 报告真实请求 token，含历史重放与工具结果），≥ handoff_tokens → `Terminate("context_overflow")`，≥ hard_cutoff_tokens → `Terminate("hard_cutoff")`。阈值默认 250k/300k，config `runtime.context_limits` 可覆盖。
+- **Rig `HookAction::Terminate` 是 struct variant**：`Terminate { reason: String }`，不是函数调用；`HookAction` derive PartialEq 可直接断言。
+- **`AgentFactory::create_fitting_agent` receiver 是 `self: &Arc<Self>`**：帮助函数/闭包接收 `&Arc<AgentFactory>`（`&self.factory` 直接传），传 `&AgentFactory` 编译失败。
+- **max_turns 降级为防死循环兜底（200）**：不再承担上下文管理（V29）；Meta/Causal 同样挂 ContextLimiter 预算。`agent_overrides[*].max_turns` 配置仍可覆盖。
+- **BACK_TO_TPN（含 verify 驱动与 ContextOverflow 驱动）一律清空 chat_history**：下一轮基于验证报告 + 产出文件（`build_handoff_description` 注入 deliverables/ + handoff.md）继续，禁止重放中间记忆。
+- **`MetaAgentBuilder.run(description, tags, handoff)` 三参**：BACK_TO_META 时注入 `read_handoff` 内容作产出校准；首次运行/PlanBuilder 传 None。改签名需同步调用点（tpn_cycle ×2、plan.rs ×1、测试）。
+- **崩溃恢复重建 Fitting 结果优先读 handoff**（`construct_tpn_result_from_state`）：有 handoff.md → content=交接全文；无 → chat_history 兜底；再无 → 重跑。
+- **冒烟验证交接路径**：`runtime.context_limits` 调小（如 1200/3000）跑 `taiji run` 简单任务，观察 BACK_TO_TPN 日志 + `deliverables/handoff.md` 生成；每轮 `Current conversation depth: 1/N` 证明 chat_history 未重放。冒烟后必须恢复 config.json。
+- **上限是保险丝，不是配额（用户框架）**：整个系统方向是 token 高效——少消耗、高质量。`context_limits` 是护栏：LLM 必须感知预算并主动收敛，禁止设计成"让 agent 消费到阈值才交接"。落地 = `build_budget_discipline` 把阈值数字 + 保险丝语义 + 高效引导（少工具调用/控制篇幅/完成即止/残缺产出兜底）追加进 Fitting system prompt，对归藏资产与 Base 模板两条路径统一生效（在 `build_system_prompt` 返回值后 push_str）。Causal/Meta 不注入（输入不可控/单次小调用，无操作空间）。
+- **模型窗口**：deepseek-v4-flash 原生 1M tokens 上下文（2026-04 发布），250k/300k 默认阈值在窗口内有效；换模型时须确认 `context_limits` < 模型窗口，否则护栏永不触发（死配置）。
+- **交接 = 压缩产物 + 编排失败证据（用户框架，V29+）**：`deliverables/handoff.md` 是上下文压缩的产物（与 Prime Agent compaction 同构：结构化摘要 + 保留执行状态），但消费方向不同（摘要跨层传给下一瞬态 agent 作恢复，而非回注入同会话）且多了失败语义（超限触发本身就是任务粒度错误 = 编排失败的硬证据，Prime Agent 无此信号——其压缩是常规操作）。**交接正文 = LLM 压缩收尾**（`compress_history_to_handoff`）：chat_history 序列化（`[User]/[Assistant]/[Tool result]`，工具结果截断 2000 字符）→ 截断到 `compress_input_tokens`（默认 20k，首部 ≤2k 保留目标 + 尾部最新状态，中间省略标记）→ 一次聚焦瞬态调用（max_turns 1 / max_tokens 2048 / temperature 0.2 / 30s 超时）→ 结构化正文（## 进度 / ## 剩余工作 / ## 决策 / ## 约束状态 / ## 已产出文件）→ `write_handoff(..., Some(body))`。**降级链**：压缩失败 / 超时 / 空输出 → `write_handoff(..., None)` 静态正文，仅 warn 不阻断。**llm_failed 路径不压缩**（同一 provider 刚失败，压缩大概率同样失败；对话通常短，静态正文 + output_refs 足够）。压缩输入构建纯函数在 `handoff.rs`（serialize_history / truncate_compress_input / build_compress_prompt，可单测）；LLM 调用在 fitting.rs（agents 层持有 provider）。
+- **Rig chat() 在 hook Terminate 时不追加消息到内存 history（冒烟实证）**：ContextLimiter 超限 Terminate 早于首次 completion 时，`agent.chat()` 传入的 `&mut history` 保持空 Vec。因此：① fitting.rs 保存历史必须 `if !history.is_empty()` 才 `save_json_atomic`，否则空数组覆盖 ChatHistorySnapshotHook 已写的磁盘快照，LLM 压缩收尾输入变空（本次冒烟 debug 2 小时的根因）；② 压缩收尾输入一律读磁盘 `chat_history.json`（快照），禁用内存 history。
+
+## 23. 分封制：任务自我认知与无降级原则（V30 实现轮）
+
+- **任务自我认知（身份 + 地位）注入阳 Agent**：`build_identity_section(engine_ctx, meta_ctx, max_depth)`（fitting.rs 同步函数）把「身份与地位（分封制）」段 push 到 system_prompt 末尾（预算纪律后，归藏资产与 Base 模板统一生效）——身份五要素：内容（meta.json.description）、类别（meta_ctx.mode：编排/执行，元权重更新阶段确定，禁止 LLM 分类）、兄弟（会盟陈列室）、父（parent_id + 父册 description，根任务注明「根任务（天子）」）、子（subtask_ids）；地位二要素：层级（depth/max_depth）、权限（可读写本任务 deliverables/；父产出与兄弟贡品只读；中间记忆仅本节点可见）。Causal/Meta 不注入。
+- **会盟 = 贡品陈列室目录注入（冒烟实证修正）**：`collect_sibling_deliverables` 注入的是兄弟任务 **deliverables/ 目录绝对路径**（BTreeMap 有序、排除自身），不是文件清单——同批并行兄弟在分封时点无产出，文件级快照恒空（冒烟实证会盟失效）；目录路径 = 动态发现入口（子任务执行中 read 随时发现陆续陈列的贡品，跨轮/rerun 同样有效）。身份段教学文案含「贡品陆续陈列，需要时用 read 工具查看」。
+- **无降级原则（V30 起新代码）**：禁止降级兜底——新代码读身份册失败 / 会盟扫描失败一律 `TaijiError` 上抛（错误信息必须携带路径，诊断性），禁止 `unwrap_or_default()` / `.ok().flatten()` 吞错。「无父（根任务 parent_id=None）」与「无兄弟（children/ 不存在或空）」是**状态分支**非降级。既有降级点（MetaContext::empty、Base 模板、压缩静态正文、load_json_optional、LLM 重试）维持现状，改造另立章节——**新增代码一律先问：这个失败要不要暴露？**
+- **父任务目录推导**：子 task_dir = `{父task_dir}/children/{idx}` → 父目录 = `task_dir.parent().parent()`（同构目录树保证，BCP §7.1）；推导失败（如 task_dir 畸形）→ Err 上抛。
+- **`parse_task_roll`**（fitting.rs）：身份册读取/解析错误包装为 `TaijiError::Other` 携带路径（`TaijiError::IO` 是裸 io::Error 无路径，诊断性不足）。
+- **身份册（meta.json）零 schema 变更**：身份五要素全部来自既有字段（description/parent_id/subtask_ids）+ MetaContext.mode——V30 不新增 Task/SubtaskSpec 字段，只加 `YangPrompt.sibling_deliverables`（serde default，meta_ctx.json 旧文件兼容）。
+- **冒烟验证会盟**：跑拆解任务后检查子任务 `meta_ctx.json` 的 `yang_prompt.sibling_deliverables` 应含兄弟 `children/<idx>/deliverables` 目录（互指）。身份段本身不进 trace.jsonl（completion_call 只记本轮 user 消息），单测覆盖身份段内容。
+- **能看不能写（V30 执行层强制，BCP §8.20）**：兄弟关系 = 单向观摩——read 开放（贡品公开陈列：父产出 + 兄弟贡品可读），write 封闭（封地自治：写入必须落在本任务 `task_dir` 内）。执行层 = `FittingHookSet` 的 `check_write_domain`（on_tool_call 内 safety 之后、trace 之前）：write 工具目标路径经 `normalize_path`（词法解析 `.`/`..`，不碰文件系统——目标可能尚不存在）后必须 `starts_with(task_dir)`，越界 → `ToolCallHookAction::skip` + warn，**不进 trace**（tools_called 不含被拒调用）。相对路径按 task_dir 解析（sandbox 语义永不出封地）。SafetyHook 黑名单只拦 `..`/`~`/`/etc`——绝对路径直写兄弟目录（无 `..`）不触发，域校验是唯一强制（SafetyHook 全局单例无 task_dir，域校验放 FittingHookSet 持有 per-agent task_dir）。`FittingHookSet::new` 第 5 参 task_dir；改动同步 fitting.rs 构造点与测试 make_hook_set。
+- **兄弟通信汇总经父层**：子任务不直连通信——聚合 → converge → BACK_TO_TPN 下一轮注入；编排模板教学（Base `build_orchestration_prompt` + 归藏 `orchestration_fitting.yaml` version→4，tags 不动）：兄弟封地自治/拆解弱耦合/通信经父层三原则。

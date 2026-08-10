@@ -21,12 +21,14 @@ use rig::agent::{
 };
 use rig::completion::{CompletionModel, CompletionResponse, Message};
 use std::marker::PhantomData;
+use std::path::{Component, Path, PathBuf};
 
 use super::chat_history_snapshot::ChatHistorySnapshotHook;
+use super::context_limiter::ContextLimiter;
 use super::safety::SafetyHook;
 use super::trace::TraceHook;
 
-/// Composite hook: safety → trace → chat-history snapshot.
+/// Composite hook: safety → trace → chat-history snapshot → context limiter.
 ///
 /// `M` mirrors the agent's completion model so the set satisfies
 /// `PromptHook<M>` exactly like each inner hook would. It is `Clone`
@@ -37,26 +39,82 @@ pub struct FittingHookSet<M> {
     safety: SafetyHook,
     trace: TraceHook,
     snapshot: ChatHistorySnapshotHook,
+    /// V29 上下文窗口预算（BCP §8.19）：最后执行——Terminate 前 trace 与
+    /// snapshot 已完整记录本轮 LLM 调用，不丢审计。
+    limiter: ContextLimiter,
+    /// V30 封地边界（BCP §8.20 能看不能写）：write 工具目标路径必须落在
+    /// 本任务 task_dir 内（兄弟/父/无关路径写入拒绝）——SafetyHook 黑名单
+    /// 只拦 `..`/`~`/`/etc`，绝对路径直写兄弟目录不触发，域校验兜底。
+    task_dir: PathBuf,
     _marker: PhantomData<fn(M) -> M>,
 }
 
 impl<M> FittingHookSet<M> {
-    /// Compose the three FittingAgent hooks into a single Rig hook.
+    /// Compose the FittingAgent hooks into a single Rig hook.
     ///
     /// Order matters: safety first (rejections short-circuit), then trace
-    /// (real tool-call recording), then chat-history snapshot (last writer).
+    /// (real tool-call recording), then chat-history snapshot (last writer),
+    /// then context limiter (V29 token budget — terminate as the final gate).
     pub fn new(
         safety: SafetyHook,
         trace: TraceHook,
         snapshot: ChatHistorySnapshotHook,
+        limiter: ContextLimiter,
+        task_dir: PathBuf,
     ) -> Self {
         Self {
             safety,
             trace,
             snapshot,
+            limiter,
+            task_dir,
             _marker: PhantomData,
         }
     }
+}
+
+/// V30 封地边界（BCP §8.20 能看不能写）：write 工具目标路径归一化后必须
+/// 落在本任务 task_dir 内（词法级，无需文件系统访问——目标文件可能尚不存在）。
+/// 相对路径按 task_dir 解析（sandbox 语义：相对路径永不出封地）。
+/// 非 write 工具放行；args 非 JSON 或缺 path → 拒绝（工具契约 §15 违反）。
+pub(crate) fn check_write_domain(
+    task_dir: &Path,
+    tool_name: &str,
+    args: &str,
+) -> Result<(), String> {
+    if tool_name != "write" {
+        return Ok(());
+    }
+    let value: serde_json::Value = serde_json::from_str(args)
+        .map_err(|e| format!("write args 非 JSON（工具契约违反）: {e}"))?;
+    let path = value
+        .get("path")
+        .and_then(|p| p.as_str())
+        .ok_or_else(|| "write args 缺 path 字段（工具契约违反）".to_string())?;
+    let target = normalize_path(&task_dir.join(path));
+    if !target.starts_with(task_dir) {
+        return Err(format!(
+            "写路径越出封地: {}（task_dir={}）",
+            target.display(),
+            task_dir.display()
+        ));
+    }
+    Ok(())
+}
+
+/// 词法归一化：解析 `.`/`..`，不访问文件系统（目标可能尚不存在）。
+pub(crate) fn normalize_path(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
 }
 
 /// Forward one method to all three hooks in order; the first non-continue
@@ -88,6 +146,8 @@ impl<M: CompletionModel> PromptHook<M> for FittingHookSet<M> {
         fwd!(SafetyHook, self.safety, on_completion_response, HookAction::Continue, prompt, response);
         fwd!(TraceHook, self.trace, on_completion_response, HookAction::Continue, prompt, response);
         fwd!(ChatHistorySnapshotHook, self.snapshot, on_completion_response, HookAction::Continue, prompt, response);
+        // V29: token 预算最后执行——超限 Terminate 前，trace/snapshot 已完整记录
+        fwd!(ContextLimiter, self.limiter, on_completion_response, HookAction::Continue, prompt, response);
         HookAction::cont()
     }
 
@@ -124,6 +184,17 @@ impl<M: CompletionModel> PromptHook<M> for FittingHookSet<M> {
         args: &str,
     ) -> ToolCallHookAction {
         fwd!(SafetyHook, self.safety, on_tool_call, ToolCallHookAction::Continue, tool_name, tool_call_id.clone(), internal_call_id, args);
+        // V30 封地边界（BCP §8.20 能看不能写）：safety 黑名单后追加 write
+        // 域校验——write 目标必须在 task_dir 内，兄弟/父/无关路径写入拒绝。
+        if let Err(e) = check_write_domain(&self.task_dir, tool_name, args) {
+            tracing::warn!(
+                tool_name,
+                args_len = args.len(),
+                task_dir = %self.task_dir.display(),
+                "{e}"
+            );
+            return ToolCallHookAction::skip(format!("封地边界: {e}"));
+        }
         fwd!(TraceHook, self.trace, on_tool_call, ToolCallHookAction::Continue, tool_name, tool_call_id.clone(), internal_call_id, args);
         fwd!(ChatHistorySnapshotHook, self.snapshot, on_tool_call, ToolCallHookAction::Continue, tool_name, tool_call_id, internal_call_id, args);
         ToolCallHookAction::cont()
@@ -207,7 +278,8 @@ mod tests {
         let safety = SafetyHook::new(&SafetyConfig::default());
         let trace = TraceHook::new(ctx, "test-model");
         let snapshot = ChatHistorySnapshotHook::new(&ctx.task_dir);
-        FittingHookSet::new(safety, trace, snapshot)
+        let limiter = ContextLimiter::new(250_000, 300_000);
+        FittingHookSet::new(safety, trace, snapshot, limiter, ctx.task_dir.clone())
     }
 
     #[tokio::test]
@@ -281,6 +353,148 @@ mod tests {
         let hook_set = make_hook_set::<TestCompletionModel>(&ctx);
         // Clones share the Arc-backed trace state.
         let _cloned = hook_set.clone();
+        let _ = std::fs::remove_dir_all(&ctx.task_dir);
+    }
+
+    #[test]
+    fn test_write_domain_allows_inside_task_dir() {
+        // V30 封地边界：write 落在 task_dir 内（绝对与相对路径）→ 放行。
+        let ctx = make_context("domain_allow");
+        let dir = ctx.task_dir.clone();
+        let inner_abs = dir.join("deliverables/report.md");
+        assert!(check_write_domain(&dir, "write", &serde_json::json!({
+            "path": inner_abs.to_string_lossy(),
+            "content": "x"
+        }).to_string()).is_ok());
+        // 相对路径按 task_dir 解析（sandbox 语义）
+        assert!(check_write_domain(&dir, "write", &serde_json::json!({
+            "path": "deliverables/a.md",
+            "content": "x"
+        }).to_string()).is_ok());
+        // 非 write 工具放行
+        assert!(check_write_domain(&dir, "read", r#"{"path": "/etc/passwd"}"#).is_ok());
+        let _ = std::fs::remove_dir_all(&ctx.task_dir);
+    }
+
+    #[test]
+    fn test_write_domain_rejects_sibling_and_escape() {
+        // V30 封地边界：写兄弟目录（绝对路径直写，无 `..`）→ 拒绝；
+        // `..` 逃逸 → 拒绝；args 缺 path → 拒绝。
+        let ctx = make_context("domain_deny");
+        let dir = ctx.task_dir.clone();
+        let sibling = dir.parent().unwrap().join("1/deliverables/pollute.md");
+        let err = check_write_domain(&dir, "write", &serde_json::json!({
+            "path": sibling.to_string_lossy(),
+            "content": "pollute"
+        }).to_string()).unwrap_err();
+        assert!(err.contains("越出封地"), "错误信息: {err}");
+
+        let err = check_write_domain(&dir, "write", &serde_json::json!({
+            "path": "../../etc/passwd",
+            "content": "x"
+        }).to_string()).unwrap_err();
+        assert!(err.contains("越出封地"), "`..` 逃逸必须拒绝: {err}");
+
+        let err = check_write_domain(&dir, "write", "{}").unwrap_err();
+        assert!(err.contains("缺 path"), "缺 path 必须拒绝: {err}");
+        let _ = std::fs::remove_dir_all(&ctx.task_dir);
+    }
+
+    #[tokio::test]
+    async fn test_fitting_hook_set_write_domain_short_circuits_tool_call() {
+        // V30 封地边界：hook 链上 write 越出 task_dir → Skip，且不进 trace。
+        let ctx = make_context("domain_hook");
+        let hook_set = make_hook_set::<TestCompletionModel>(&ctx);
+        let sibling = ctx
+            .task_dir
+            .parent()
+            .unwrap()
+            .join("9/deliverables/pollute.md");
+        let args = serde_json::json!({"path": sibling.to_string_lossy(), "content": "x"}).to_string();
+        let action = hook_set
+            .on_tool_call("write", None, "call-1", &args)
+            .await;
+        assert!(
+            matches!(action, ToolCallHookAction::Skip { .. }),
+            "越界 write 必须 Skip, got {action:?}"
+        );
+        assert_eq!(
+            hook_set.trace.tools_called(),
+            Vec::<String>::new(),
+            "越界 write 不得进 trace"
+        );
+
+        // 域内 write 放行并记录
+        let ok_args = serde_json::json!({
+            "path": ctx.task_dir.join("deliverables/ok.md").to_string_lossy(),
+            "content": "x"
+        }).to_string();
+        let action = hook_set
+            .on_tool_call("write", None, "call-2", &ok_args)
+            .await;
+        assert_eq!(action, ToolCallHookAction::Continue);
+        assert_eq!(
+            hook_set.trace.tools_called(),
+            vec!["write".to_string()],
+            "域内 write 必须进 trace"
+        );
+        let _ = std::fs::remove_dir_all(&ctx.task_dir);
+    }
+
+    #[test]
+    fn test_normalize_path_resolves_dots() {
+        assert_eq!(
+            normalize_path(Path::new("/a/b/../c/./d")),
+            PathBuf::from("/a/c/d")
+        );
+        assert_eq!(
+            normalize_path(Path::new("/a/../../b")),
+            PathBuf::from("/b")
+        );
+        assert_eq!(normalize_path(Path::new("a/b")), PathBuf::from("a/b"));
+    }
+
+    #[tokio::test]
+    async fn test_fitting_hook_set_limiter_terminates_on_budget_exceeded() {
+        // V29 上下文预算：hook 链尾的 ContextLimiter 超限时 Terminate
+        // （safety → trace → snapshot 已记录，最后 gate 生效）。
+        let ctx = make_context("limiter");
+        let safety = SafetyHook::new(&SafetyConfig::default());
+        let trace = TraceHook::new(&ctx, "test-model");
+        let snapshot = ChatHistorySnapshotHook::new(&ctx.task_dir);
+        let limiter = ContextLimiter::new(10, 100); // 小阈值便于触发
+        let hook_set = FittingHookSet::<TestCompletionModel>::new(
+            safety,
+            trace,
+            snapshot,
+            limiter.clone(),
+            ctx.task_dir.clone(),
+        );
+
+        // 一次响应 input_tokens=60 >= 10 → Terminate + triggered=Handoff
+        let mut usage = rig::completion::Usage::new();
+        usage.input_tokens = 60;
+        let response = CompletionResponse {
+            choice: rig::OneOrMany::one(rig::completion::AssistantContent::text("ok")),
+            usage,
+            raw_response: TestCompletionModel,
+            message_id: None,
+        };
+        let action = hook_set
+            .on_completion_response(&Message::user("u"), &response)
+            .await;
+        assert_eq!(
+            action,
+            HookAction::Terminate {
+                reason: "context_overflow".into()
+            },
+            "budget exceed must terminate the agent loop"
+        );
+        assert_eq!(
+            limiter.triggered(),
+            Some(crate::hooks::context_limiter::LimitKind::Handoff)
+        );
+
         let _ = std::fs::remove_dir_all(&ctx.task_dir);
     }
 }

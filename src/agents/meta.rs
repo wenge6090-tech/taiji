@@ -49,6 +49,12 @@ pub struct MetaAgentBuilder {
     liluo: Arc<LiluoClient>,
     provider: Arc<ProviderRegistry>,
     model: String,
+    /// Recursion depth of the current node (root = 0) — injected into the
+    /// mode-decision prompt (递归层数规则, V27).
+    depth: u32,
+    /// Max recursion depth from RuntimeConfig — depth rule floor for the
+    /// mode decision (leaf nodes must be Execution).
+    max_depth: u32,
     /// max_turns = 6 — allows tool loops (collect → extract) before the final
     /// structured MetaContext emission.
     max_turns: u32,
@@ -73,9 +79,26 @@ impl MetaAgentBuilder {
             liluo,
             provider,
             model: model.to_string(),
+            depth: 0,
+            max_depth: 2, // RuntimeConfig::default().max_depth
             max_turns: 6, // tool-loop headroom: collect → extract
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
         }
+    }
+
+    /// Inject the current recursion depth (root = 0) — part of the
+    /// 递归层数规则 input for the mode decision (V27).
+    pub fn depth(mut self, depth: u32) -> Self {
+        self.depth = depth;
+        self
+    }
+
+    /// Inject the max recursion depth — the depth-rule floor for the mode
+    /// decision: `depth + 1 >= max_depth` forces Execution (leaf nodes
+    /// cannot decompose).
+    pub fn max_depth(mut self, max_depth: u32) -> Self {
+        self.max_depth = max_depth;
+        self
     }
 
     /// Override the SafetyHook with the shared process-wide singleton.
@@ -104,10 +127,13 @@ impl MetaAgentBuilder {
     /// - `task_description` — the task the downstream agents will execute.
     /// - `task_type_tags` — tags for 理络 prompt search.  Empty tags produce no
     ///   matches, triggering the fallback path.
+    /// - `handoff` — V28 前一瞬态产出（交接文件内容，§8.18）：BACK_TO_META 重跑时
+    ///   注入作产出校准（基于失败产物调整权重与资产）；首次运行传 None。
     pub async fn run(
         &self,
         task_description: &str,
         task_type_tags: &[&str],
+        handoff: Option<&str>,
     ) -> Result<MetaContext, TaijiError> {
         // ── 1. Query 理絡 for prompt assets ──
         let prompt_assets = self.liluo.search_prompts(task_type_tags).await?;
@@ -127,14 +153,29 @@ impl MetaAgentBuilder {
             return Ok(MetaContext::empty());
         }
 
-        // ── 3. LLM call to compose MetaContext ──
+        // ── 3. LLM call to compose MetaContext (mode-paired, V27) ──
         tracing::debug!(
             task_id = %self.task_id,
+            depth = self.depth,
+            max_depth = self.max_depth,
             matched_count = matched.len(),
             "Calling LLM to compose MetaContext from 理络 prompt assets"
         );
 
-        let llm_prompt = build_llm_input(task_description, &matched);
+        let llm_prompt = build_llm_input(
+            task_description,
+            self.depth,
+            self.max_depth,
+            &matched,
+        );
+        // V28 产出校准：注入前一瞬态产出（handoff.md 全文）——元基于失败产物
+        // 校准权重与认知资产，不再空手重跑（BCP §8.18 BACK_TO_META 语义）。
+        let llm_prompt = match handoff {
+            Some(h) if !h.trim().is_empty() => format!(
+                "{llm_prompt}\n\n## 前一瞬态产出（V28 产出校准）\n{h}"
+            ),
+            _ => llm_prompt,
+        };
 
         let client = self.provider.client("deepseek").map_err(|e| {
             TaijiError::LLMCallFailed {
@@ -170,6 +211,7 @@ impl MetaAgentBuilder {
             Ok(ctx) => {
                 tracing::debug!(
                     task_id = %self.task_id,
+                    mode = ?ctx.mode,
                     has_fitting = ctx.fitting_system_prompt.is_some(),
                     has_verify = ctx.verify_system_prompt.is_some(),
                     has_converge = ctx.converge_system_prompt.is_some(),
@@ -192,31 +234,50 @@ impl MetaAgentBuilder {
 
 /// System prompt for the MetaAgent's LLM composition call.
 ///
-/// Instructs the LLM to compose system prompts for downstream agents from
-/// 理络 prompt assets.  The Chinese prefix anchors the agent's role per
-/// project convention (see AGENTS.md §2).
+/// Instructs the LLM to decide the node's 阴阳配对模式 (Orchestration |
+/// Execution) from recursion depth rules + task difficulty, then compose
+/// mode-paired system prompts for downstream agents from 理络 prompt assets
+/// (V27).  The Chinese prefix anchors the agent's role per project
+/// convention (see AGENTS.md §2).
 const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Update · Meta Agent)。
 
-你的职责是根据任务描述和认知仓库（理络）中的提示词资产，编排下游 Agent
-（FittingAgent 概率拟合·阳 和 CausalAgent 因果验证·阴）的系统提示词。
+你的职责是根据任务描述、递归层数规则与认知仓库（理络）中的提示词资产，
+先决策当前节点的**阴阳配对模式**，再编排下游 Agent（FittingAgent 概率拟合·阳
+和 CausalAgent 因果验证·阴）与该模式**配对**的系统提示词。
 
 ## 输入
 - task_description：当前任务的完整描述
+- depth / max_depth：当前递归层数与最大递归深度
 - prompt_assets：理络中匹配的提示词资产列表（按置信度降序排列）
-  每项包含：id, name, content, agent_target, confidence
+  每项包含：id, name, content, agent_target, tags, confidence
+
+## 模式决策（依据两条规则）
+1. **递归层数规则**：若 depth+1 >= max_depth（当前节点是叶子，无法再拆解），
+   必须选 "Execution"；深度越浅，越有空间拆解，复杂任务倾向 "Orchestration"。
+2. **任务难易程度**：分析任务描述——复杂/多步骤/跨多个独立维度/需要多 Agent
+   协作 → "Orchestration"（编排拆解 + 综合）；原子/单步/可直接用 L1 工具
+   完成 → "Execution"（直接执行）。
+
+## 阴阳配对
+- "Orchestration"：阳 Agent 用**编排**提示词（recursive_decompose 拆解 + 综合），
+  阴 Agent 用**收敛**提示词（converge 判决子结果聚合）。
+- "Execution"：阳 Agent 用**执行**提示词（L1 工具直接产出，无 recursive_decompose），
+  阴 Agent 用**验证**提示词（verify 判决直接产出）。
 
 ## 你需要做的
-1. 分析任务描述，判断任务复杂度（V26 异层同构：无 Orchestration/Execution
-   模式之分——FittingAgent 在任意深度融合「拆解优先 + 执行优先」）
-2. 从 prompt_assets 中选择置信度最高的资产
-3. 将其 content 字段组合为三份完整的系统提示词
+1. 按上述两条规则决策 "mode"
+2. 从 prompt_assets 中选择**与所选模式匹配**的资产（按 name/tags/description
+   判断：orchestration_* 资产对应编排模式，execution_* 资产对应执行模式）
+3. 将其 content 字段组合为与该模式配对的三份完整系统提示词（配对外的
+   提示词可设为 null，下游不会使用）
 
 ## 输出格式（严格 JSON，无额外注释）
 
 {
-  "fitting_system_prompt": "完整的 FittingAgent 系统提示词，包含角色定义、指令和约束",
-  "verify_system_prompt": "完整的 verify 系统提示词，以'你是因果验证器'开头",
-  "converge_system_prompt": "完整的 converge 系统提示词，以'你是收敛判决器'开头",
+  "mode": "Orchestration",
+  "fitting_system_prompt": "完整的 FittingAgent 系统提示词，与所选模式配对（编排或执行）",
+  "verify_system_prompt": "Execution 模式：完整的 verify 系统提示词，以'你是因果验证器'开头；Orchestration 模式可设为 null",
+  "converge_system_prompt": "Orchestration 模式：完整的 converge 系统提示词，以'你是收敛判决器'开头；Execution 模式可设为 null",
   "constraints": [],
   "matched_skills": [],
   "yang_prompt": {
@@ -226,20 +287,25 @@ const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Upd
 }
 
 ## 降级规则
-当 prompt_assets 为空或不适用时，将所有 system_prompt 字段设为 null。
-下游 Agent 将自动使用内置硬编码模板。
+当 prompt_assets 为空或不适用时，将所有 system_prompt 字段设为 null，
+但 mode 仍按上述两条规则给出。下游 Agent 将自动使用内置硬编码模板。
 
 注意：strict JSON，不要包含 markdown 代码块标记或额外解释。
 "#;
 
 /// Build the user message for MetaAgent's LLM composition call.
 ///
-/// Formats task description and ranked prompt assets into a structured
-/// prompt that the LLM can process to produce a [`MetaContext`].
-fn build_llm_input(task_description: &str, matched: &[&PromptAsset]) -> String {
+/// Formats task description, depth rules and ranked prompt assets into a
+/// structured prompt that the LLM can process to produce a [`MetaContext`].
+fn build_llm_input(
+    task_description: &str,
+    depth: u32,
+    max_depth: u32,
+    matched: &[&PromptAsset],
+) -> String {
     let mut parts = Vec::new();
     parts.push(format!(
-        "## Task Description\n\n{}\n\n## Prompt Assets (ranked by confidence)\n",
+        "## Task Description\n\n{}\n\n## Recursion Depth Rules\n\n- current depth: {depth}\n- max depth: {max_depth}\n- leaf rule: depth+1 >= max_depth → mode must be Execution\n\n## Prompt Assets (ranked by confidence)\n",
         task_description
     ));
 
@@ -312,11 +378,16 @@ mod tests {
 
         let builder = MetaAgentBuilder::new("test-task", liluo, provider, "deepseek-chat");
         // Empty tags → fallback path → empty MetaContext.
-        let ctx = builder.run("test task description", &[]).await.expect("MetaAgent run");
+        let ctx = builder
+            .run("test task description", &[], None)
+            .await
+            .expect("MetaAgent run");
 
         assert!(ctx.constraints.is_empty());
         assert!(ctx.matched_skills.is_empty());
         assert!(ctx.yang_prompt.task_description.is_empty());
+        // V27: 降级路径 mode 默认 Orchestration（安全默认）。
+        assert_eq!(ctx.mode, crate::types::agent::AgentMode::Orchestration);
         assert!(ctx.fitting_system_prompt.is_none());
         assert!(ctx.verify_system_prompt.is_none());
         assert!(ctx.converge_system_prompt.is_none());
@@ -332,6 +403,11 @@ mod tests {
         assert!(META_COMPOSE_SYSTEM_PROMPT.contains("verify_system_prompt"));
         assert!(META_COMPOSE_SYSTEM_PROMPT.contains("converge_system_prompt"));
         assert!(META_COMPOSE_SYSTEM_PROMPT.contains("你是权重更新专家"));
+        // V27: 模式决策（递归层数规则 + 任务难易程度）与阴阳配对引导。
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("递归层数规则"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("任务难易程度"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("阴阳配对"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("\"mode\": \"Orchestration\""));
     }
 
     #[test]
@@ -346,10 +422,13 @@ mod tests {
                 vec![],
             ),
         ];
-        let input = build_llm_input("Do something", &assets.iter().collect::<Vec<_>>());
+        let input = build_llm_input("Do something", 1, 2, &assets.iter().collect::<Vec<_>>());
         assert!(input.contains("Do something"));
         assert!(input.contains("test-prompt"));
         assert!(input.contains("You are a test agent"));
+        // V27: 深度规则注入。
+        assert!(input.contains("current depth: 1"));
+        assert!(input.contains("max depth: 2"));
         assert!(!input.contains("agent_mode"));
     }
 
@@ -376,17 +455,25 @@ mod tests {
         );
 
         let builder = MetaAgentBuilder::new("test-task", liluo, provider, "deepseek-chat");
-        // 默认值：max_turns=6，且 safety_hook 恒有值（默认配置实例）。
+        // 默认值：max_turns=6，depth=0，max_depth=2，且 safety_hook 恒有值（默认配置实例）。
         assert_eq!(builder.max_turns, 6);
+        assert_eq!(builder.depth, 0);
+        assert_eq!(builder.max_depth, 2);
 
-        // setter 生效：注入进程级单例后指针一致。
+        // setter 生效：注入进程级单例后指针一致；depth/max_depth 注入递归层数规则。
         let hook = Arc::new(SafetyHook::new(&SafetyConfig {
             enabled: false,
             trusted_mcp_servers: vec![],
         }));
-        let builder = builder.safety_hook(hook.clone()).max_turns(8);
+        let builder = builder
+            .safety_hook(hook.clone())
+            .max_turns(8)
+            .depth(1)
+            .max_depth(3);
         assert!(Arc::ptr_eq(&builder.safety_hook, &hook));
         assert_eq!(builder.max_turns, 8);
+        assert_eq!(builder.depth, 1);
+        assert_eq!(builder.max_depth, 3);
 
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }

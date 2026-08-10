@@ -12,6 +12,16 @@ pub enum TaijiError {
     #[error("LLM call failed: {context}")]
     LLMCallFailed { context: String },
 
+    #[error("context overflow: threshold={threshold}")]
+    /// V29 上下文预算超限（BCP §8.19）：累计 input_tokens >= handoff_tokens。
+    /// 语义：任务粒度错误信号 → BACK_TO_TPN → 阳基于产出递归分解。
+    ContextOverflow { threshold: u64 },
+
+    #[error("hard cutoff: threshold={threshold}")]
+    /// V29 硬截止（BCP §8.19）：累计 input_tokens >= hard_cutoff_tokens。
+    /// 语义：预算保护 → 直接上报 FAIL，不进 BACK_TO_* 循环。
+    HardCutoff { threshold: u64 },
+
     #[error("structured output parse failed: {context}")]
     StructuredOutputParseFailed { context: String },
 

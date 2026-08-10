@@ -27,7 +27,7 @@ use crate::infra::error::TaijiError;
 use crate::infra::trace::load_json_optional;
 use crate::orchestration::event_bus;
 use crate::orchestration::tpn_cycle::{write_task_status, TpnCycle};
-use crate::types::agent::MetaContext;
+use crate::types::agent::{AgentMode, MetaContext};
 use crate::types::execution::EngineContext;
 use crate::types::frontend::NodeStatus;
 use crate::types::task::{ChildResultSummary, DecomposeResult, SubtaskSpec, Task, TaskStatus, TPNResult};
@@ -51,6 +51,9 @@ pub struct RecursiveDecomposeTool {
     factory: Arc<AgentFactory>,
     engine_ctx: EngineContext,
     depth: u32,
+    /// 当前节点的阴阳配对模式（V27）：仅 Orchestration 模式注册本工具，
+    /// 内部 mode guard 兑底（Execution 模式调用直接拒绝）。
+    mode: AgentMode,
     /// Cancellation token propagated to all subtasks.
     /// See AGENTS.md §1 (TPN loop rules) and §9 (concurrency rules).
     cancel: CancellationToken,
@@ -65,12 +68,16 @@ impl RecursiveDecomposeTool {
     /// - `factory` — shared `AgentFactory` used to spawn child agents.
     /// - `engine_ctx` — execution context of the parent task.
     /// - `depth` — current recursion depth (root = 0).
+    /// - `mode` — the parent node's 阴阳配对模式 (V27). Execution-mode agents
+    ///   never see this tool (not registered); the guard here is a
+    ///   belt-and-suspenders second line.
     /// - `cancel` — cancellation token checked before/during subtask spawning.
     /// - `parent_meta_ctx` — reasoning bias from the parent's MetaAgent run.
     pub fn new(
         factory: Arc<AgentFactory>,
         engine_ctx: EngineContext,
         depth: u32,
+        mode: AgentMode,
         cancel: CancellationToken,
         parent_meta_ctx: MetaContext,
     ) -> Self {
@@ -85,6 +92,7 @@ impl RecursiveDecomposeTool {
             factory,
             engine_ctx,
             depth,
+            mode,
             cancel,
             parent_meta_ctx,
         }
@@ -101,6 +109,14 @@ impl RecursiveDecomposeTool {
     /// 5. Converges via `CausalAgent.converge()`.
     /// 6. Returns a `DecomposeResult`.
     pub async fn execute(&self, subtasks: Vec<SubtaskSpec>) -> Result<DecomposeResult, TaijiError> {
+        // ── Mode guard (V27 配对模式兑底) ──
+        // 工具仅编排模式注册；若因 bug 或未来路径在 Execution 模式被调用，直接拒绝。
+        if self.mode == AgentMode::Execution {
+            return Err(TaijiError::Other(
+                "recursive_decompose is not available in Execution mode (V27 阴阳配对)".into(),
+            ));
+        }
+
         // ── Permit acquisition: tool entry, held until join completes ──
         // V26 permit 语义：permit = 并行分解节点上限。入口 acquire 1 个并持有
         // 到函数返回，spawn 闭包不再捕获 permit。持 permit 者只等待子任务 join
@@ -210,6 +226,7 @@ impl RecursiveDecomposeTool {
             child_dir: PathBuf,
             child_deliverables: Vec<String>,
             description: String,
+            mode: AgentMode,
             resume_history: Option<Vec<Message>>,
         }
 
@@ -256,18 +273,30 @@ impl RecursiveDecomposeTool {
                     (new_idx, dir, None)
                 };
 
-            // V26 起子任务与父任务完全同构：无 mode 分化（异层同构，BCP §1.1）。
+            // V27 阴阳配对：子任务模式由父 LLM 在 SubtaskSpec.mode 中按难度
+            // 分配（编排模板教学）；深度规则在下方子任务 MetaContext 注入处
+            // 兑底（depth+1 >= max_depth 强制 Execution）。
             let enriched_description = assemble_child_description(
                 &subtask.description,
                 &subtask.verification_spec,
                 &subtask.context,
             );
 
+            // ── 子模式决策（V27）：SubtaskSpec.mode（父 LLM 难度判断）＋
+            //    深度规则兑底（叶节点无法再拆解 → 强制 Execution）──
+            let child_depth = self.depth + 1;
+            let actual_mode = if child_depth >= self.factory.config.runtime.max_depth {
+                AgentMode::Execution
+            } else {
+                subtask.mode
+            };
+
             subtask_metas.push(SubtaskMeta {
                 index: child_index,
                 child_dir,
                 child_deliverables: parent_deliverables.clone(),
                 description: enriched_description,
+                mode: actual_mode,
                 resume_history,
             });
         }
@@ -294,8 +323,14 @@ impl RecursiveDecomposeTool {
             let resume_history = meta.resume_history;
             let child_index = meta.index;
             let child_description = meta.description;
+            let child_mode = meta.mode;
 
-            // ── Generate readable nested task_id: {slug}-{timestamp}-{index} ──
+            // ── V30 会盟：收集兄弟贡品陈列室（分封时快照目录，排除自身）──
+        // 无降级原则（BCP §8.20）：扫描失败 → Err 上抛，中止 decompose。
+        let sibling_deliverables =
+            collect_sibling_deliverables(&children_root, child_index)?;
+
+        // ── Generate readable nested task_id: {slug}-{timestamp}-{index} ──
             // index is unique within this parent, so parallel children spawned
             // in the same second cannot collide (V26.6).
             let child_task_id = format!(
@@ -333,6 +368,14 @@ impl RecursiveDecomposeTool {
                 // ── Inject parent deliverables into child MetaContext ──
                 let mut child_meta_ctx = parent_meta_ctx;
                 child_meta_ctx.yang_prompt.parent_deliverables = child_deliverables;
+                // ── V30 会盟：兄弟贡品陈列室目录（只读，贡品公开陈列语义 §8.20）──
+                // 注入目录而非文件快照：同批并行兄弟的贡品在分封时点尚未产出，
+                // 子任务执行中可经 read 工具随时发现陆续陈列的兄弟贡品。
+                child_meta_ctx.yang_prompt.sibling_deliverables = sibling_deliverables;
+                // ── Inject child 配对模式 (V27)：SubtaskSpec.mode（父 LLM 难度
+                //    判断）或深度规则兑底后的 Execution。子 TpnCycle 的阳 Agent
+                //    据此选模板与工具注册面 ──
+                child_meta_ctx.mode = child_mode;
 
                 // ── Create CancellationToken child linked to parent ──
                 let child_cancel = cancel.child_token();
@@ -447,6 +490,43 @@ impl RecursiveDecomposeTool {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// V30 会盟（BCP §8.20）：收集兄弟子任务的**贡品陈列室**目录（绝对路径）。
+///
+/// BTreeMap 有序扫描 `children/` 下各数字子任务目录，收集存在 `deliverables/`
+/// 的子目录路径，排除 `exclude_idx`（当前正在 spawn 的子任务，防自引用）。
+///
+/// **注入目录而非文件快照**：同批并行兄弟在分封时点尚无产出（冒烟实证：
+/// 文件级快照恒空、会盟失效），目录路径 = 动态发现入口——子任务执行中可
+/// 经 read 工具随时发现兄弟陆续陈列的贡品；跨轮/rerun 场景同样有效。
+///
+/// 无降级原则：目录读取失败 → `Err` 上抛（数据完整性问题必须暴露），
+/// 禁止 `unwrap_or_default()` 吞错。`children/` 不存在（无兄弟）是状态分支，
+/// 返回空列表，非降级。非数字目录条目（如临时目录）跳过。
+fn collect_sibling_deliverables(
+    children_root: &Path,
+    exclude_idx: usize,
+) -> Result<Vec<String>, TaijiError> {
+    let mut venues: BTreeMap<usize, PathBuf> = BTreeMap::new();
+    if !children_root.exists() {
+        return Ok(vec![]);
+    }
+    for entry in std::fs::read_dir(children_root).map_err(TaijiError::IO)? {
+        let entry = entry.map_err(TaijiError::IO)?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Ok(idx) = name.parse::<usize>() else {
+            continue; // 非数字目录（临时/杂项）不是兄弟任务
+        };
+        if idx == exclude_idx {
+            continue;
+        }
+        let del_dir = entry.path().join("deliverables");
+        if del_dir.exists() {
+            venues.insert(idx, del_dir);
+        }
+    }
+    Ok(venues.into_values().map(|p| p.to_string_lossy().to_string()).collect())
+}
 
 /// Best-effort mark of every aborted child whose `meta.json` still says
 /// `Running` as `Failed` (V26.3, E1).
@@ -582,6 +662,11 @@ impl Tool for RecursiveDecomposeTool {
                                     "type": "string",
                                     "description": "Specification for verifying the subtask result"
                                 },
+                                "mode": {
+                                    "type": "string",
+                                    "enum": ["Orchestration", "Execution"],
+                                    "description": "Whether the subtask runs in Orchestration (further decomposition) or Execution (direct work) mode. Assign by subtask difficulty: atomic/single-step → Execution; complex/multi-dimension → Orchestration. Leaf-depth subtasks are forced to Execution automatically."
+                                },
                                 "context": {
                                     "type": "object",
                                     "description": "Additional context for the subtask"
@@ -591,7 +676,7 @@ impl Tool for RecursiveDecomposeTool {
                                     "description": "Optional: index of an existing child subtask to re-run. When set, the child reuses its existing directory, loads prior chat history for continuity, and the old checkpoint is deleted before re-execution. Use this when a previous sub-decompose needs retrying with adjusted parameters. Leave unset for new subtasks."
                                 }
                             },
-                            "required": ["description", "verification_spec"]
+                            "required": ["description", "verification_spec", "mode"]
                         },
                         "description": "List of subtasks to execute"
                     }
@@ -610,6 +695,95 @@ impl Tool for RecursiveDecomposeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // V30 测试临时目录唯一性（AGENTS.md §16）：pid 基路径不唯一，需静态计数器。
+    static SIBLING_TEST_COUNTER: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    #[test]
+    fn test_collect_sibling_deliverables_basic() {
+        // V30 会盟：收集兄弟贡品陈列室目录，排除自身，BTreeMap 有序。
+        let tmp = std::env::temp_dir().join(format!(
+            "decompose_sibling_{}_{}",
+            std::process::id(),
+            SIBLING_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("0/deliverables")).unwrap();
+        std::fs::create_dir_all(tmp.join("1/deliverables")).unwrap();
+        std::fs::create_dir_all(tmp.join("2/deliverables")).unwrap();
+        std::fs::write(tmp.join("1/deliverables/b.md"), "b").unwrap();
+        std::fs::write(tmp.join("2/deliverables/c.md"), "c").unwrap();
+
+        // 排除自身（idx=1）：应看到 0 与 2 的陈列室
+        let siblings = collect_sibling_deliverables(&tmp, 1).unwrap();
+        assert_eq!(siblings.len(), 2, "应含兄弟 0 与 2 的陈列室: {siblings:?}");
+        assert!(
+            siblings[0].ends_with("0/deliverables"),
+            "路径错误: {}",
+            siblings[0]
+        );
+        assert!(
+            siblings[1].ends_with("2/deliverables"),
+            "路径错误: {}",
+            siblings[1]
+        );
+
+        // 不排除自身：按目录索引有序出现
+        let all = collect_sibling_deliverables(&tmp, 99).unwrap();
+        assert_eq!(all.len(), 3, "应含 0/1/2 的陈列室: {all:?}");
+        let joined = all.join("\n");
+        let pos_0 = joined.find("0/deliverables").unwrap();
+        let pos_1 = joined.find("1/deliverables").unwrap();
+        let pos_2 = joined.find("2/deliverables").unwrap();
+        assert!(pos_0 < pos_1 && pos_1 < pos_2, "目录应按索引有序: {joined}");
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_collect_sibling_deliverables_empty_and_missing_root() {
+        // 无兄弟 / children/ 不存在 → 空列表（状态分支，非降级）。
+        let tmp = std::env::temp_dir().join(format!(
+            "decompose_sibling_empty_{}_{}",
+            std::process::id(),
+            SIBLING_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        assert_eq!(
+            collect_sibling_deliverables(&tmp, 0).unwrap(),
+            Vec::<String>::new()
+        );
+
+        std::fs::create_dir_all(tmp.join("0")).unwrap(); // 无 deliverables 目录
+        assert_eq!(
+            collect_sibling_deliverables(&tmp, 0).unwrap(),
+            Vec::<String>::new()
+        );
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[test]
+    fn test_collect_sibling_deliverables_skips_non_numeric_entries() {
+        // 非数字目录（临时/杂项）不是兄弟任务，跳过。
+        let tmp = std::env::temp_dir().join(format!(
+            "decompose_sibling_skip_{}_{}",
+            std::process::id(),
+            SIBLING_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        ));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(tmp.join("0/deliverables")).unwrap();
+        std::fs::create_dir_all(tmp.join("_tmp/deliverables")).unwrap();
+        std::fs::write(tmp.join("0/deliverables/x.md"), "x").unwrap();
+        std::fs::write(tmp.join("_tmp/deliverables/y.md"), "y").unwrap();
+
+        let siblings = collect_sibling_deliverables(&tmp, 99).unwrap();
+        assert_eq!(siblings.len(), 1, "非数字目录应被跳过: {siblings:?}");
+        assert!(siblings[0].contains("0/deliverables"));
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 
     #[test]
     fn test_assemble_child_description_full() {

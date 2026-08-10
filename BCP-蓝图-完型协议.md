@@ -1,30 +1,14 @@
 # taiji 架构蓝图 — 纯云端 MCP Agent 插件系统（Rust / Rig）
 
-> 蓝图-完型协议 V24（2026-07-31，实现后对齐修订 2026-08-01）。
+> 蓝图-完型协议 V30。
+>
+> **V30 变更（分封制：任务自我认知 + 会盟）**：管理模型 = 分封制——瞬态任务知道自己的身份（内容/类别/父/子/兄弟）与地位（层级/权限），全部系统确定性赋予（身份册 meta.json 既有字段 + MetaContext.mode + 分封时快照），禁止 LLM 分类；会盟：子任务注入兄弟贡品索引（YangPrompt.sibling_deliverables），贡品跨兄弟公开只读、中间记忆仍隔离（§8.9 修订）；**无降级原则**：新代码读册/扫描失败一律错误上抛，问题暴露后修根因（§8.20）。
+>
+> **V28 变更（产物契约）**：执行事实是唯一记忆——产出即交接：交接物 = `deliverables/handoff.md`（产出物之一，§1.4 / §8.18），上下文超限/失败一律先写交接产出再返回；恢复优先级链改为产出继承（deliverables → decompose_result → 重跑，chat_history 降级为兜底）；路由按结构化失败原因分流（超限→阳拆解、认知→元校准，LLM 裁决兜底）；BACK_TO_TPN 改为基于产出递归分解、BACK_TO_META 改为 MetaAgent 注入产出校准；不做上下文压缩（特意设计）。
+>
+> **V29 变更（上下文窗口预算）**：用精准 token 计数替换 max_turns 轮次机制——`usage.input_tokens` 累计，250k 超限必须写交接产出（context_overflow → 阳拆解）、300k 硬截止直接上报 FAIL；统一 Meta/Fitting/Causal 预算，轮次计数器降级为循环防护；ChatAgent 保留 max_turns=20（§8.19）。
 >
 > **本文件 = 唯一事实。** 实施约束与避坑规则见 [`AGENTS.md`](./AGENTS.md)（给 AI 自检）。
->
-> **V24 变更摘要：聊天面板升级为完整 ChatAgent。** 从"裸单轮 LLM 补全"升级为完整 Rig Agent（5 个 L1 Skills + 工具循环 + 对话记忆），新增流式输出协议（ServerResponse chunk 扩展）、多 Provider 配置生态（`providers` 列表）、会话历史持久化（`chat_history.json` 原子写入）、聊天中的任务感知（注入 task meta + 归藏摘要）。§2、§3、§8、§9.4、§9.7 相关章节更新。
->
-> **2026-08-01 实现后对齐修订：** 校准 §3 契约 #13-#15、§9.9 契约 #16-#17 的签名与返回类型，补充 `guizang_digest()` 方法文档，修正 §9.7 流式渲染描述。均为实现后校准，不改变架构设计。
->
-> **V25 变更摘要（2026-08-05，Meta/Causal 收集工具落地）：** Meta 与 Causal 相位从「无工具」升级为「LLM + 只读收集工具」——MetaAgent 注册 read / search / webfetch（收集任务上下文、父层 deliverables、归藏资产与网络信息后更新权重），CausalAgent 注册 read / webfetch（LLM 逐文件核验 deliverables、联网核实外部事实后裁决路由）。§1.2 权限面列、§8.2 权限同构、§8.5 Hook 安全模型更新：执行工具（write / bash / recursive_decompose / causal_verify）收敛 Fitting 相位，收集工具（read / search / webfetch）三相共有，「带工具必有安全钩子」为硬约束（Meta / Causal 均挂载 SafetyHook，webfetch 的 SSRF 检查由此生效）。§8.9 硬编码保证第 3、4 条（read 逐文件验证）由此从模板要求变为工具注册事实。
-
-> **V26.7 变更摘要（2026-08-07，自我分析报告 P3/P4/P5 续修）：** ① **P4 死代码清理**——删除 `rate_limiter.rs`（governor 依赖仅此使用，连带移除 Cargo.toml）与 `TaskStatus::Decomposed` 变体（无写者，仅 3 处匹配同步删除）；甄别保留：`dmn_consumer`/`cognition_evolver` 属 §8.3 规划未激活（DMN 单写者设计），`trigger_engine`/`match_skills` 实为在用（main/factory/tpn_cycle/chat 全构造，报告误判）。② **P5 归藏资产对齐 V26**——6 个 prompts 资产仍为 V25 AgentMode 分裂内容（教 LLM 设置已删除的 `mode`、按模式差异化裁决），重写为 V26 单模式语义（对齐 `build_system_prompt` / `VERIFY_SYSTEM_PROMPT` / `CONVERGE_SYSTEM_PROMPT`，version→2，tags 不动兼容 index.yaml）；修复 tpn_cycle.rs BACK_TO_META 分支 `&[]` 空标签（零匹配→元相恒空）改为 `&["general"]` 与首次运行一致。③ **P3 残余 F1**——runner 超时分支（timeout drop TpnCycle → JoinSet drop 隐式 abort 子任务，不走状态写路径）补 `mark_aborted_children_failed`（改为 `pub(crate)`），子任务 meta.json 不再滞留 Running。验证：全量 182 passed；真实冒烟——90s 超时任务根 Failed + 2 个并行子任务全部落盘 Failed。§8.1 补充超时子任务落盘约定。
-
-> **V26.6 变更摘要（2026-08-07，任务 ID 可读化）：** `task_id` 从纯 UUID 改为**人类可读格式 `{简述slug}-{YYYYMMDD-HHMMSS}`**（如 `分析源码架构-20260807-061530`），新增 `src/infra/task_id.rs`（slugify 路径安全化：非字母数字→`-`、去首尾破折号、空描述→`task`；本地时间秒级时间戳；`ensure_unique` 目录已存在则追加 `-2/-3`）。根任务（runner）用 `generate_task_id(description)` + `ensure_unique`（查 `tasks/` 目录）；子任务（recursive_decompose）追加 `-{index}` 保证同父并行不撞；MCP taiji_plan 同步改用。**chat session_id（ws/handler）保持 UUID**（会话文件已持久化，不属任务 ID）。task_id 仍为纯字符串类型：任务目录路径、meta.json、trace、WS 事件、前端树、`--resume`/`taiji trace` CLI 全部兼容，无格式假设代码。§8.1 任务目录布局与 ID 生成说明同步。
-
-> **V26.5 变更摘要（2026-08-07，自我分析任务 57a31b8f 落地 P1/P2）：** 让 taiji 以架构评审者身份分析自身源码（交付 `analysis_report.md`），随后按报告修复两个高严重度问题：① **P1 trace 脱敏双实现版本分裂**——`infra/trace.rs` 仍保留旧 `{40,}` 通用正则，`TraceWriter::write` 二次脱敏抵消 V26.3 E3 修复，长 UUID/文件正文被误伤。修复：`infra/trace.rs` 正则收敛为前缀型（`sk-`/`ds-`/`ghp_`/`AKIA`），`hooks/trace.rs` 的 `redact_sensitive` 改为薄转发 `TraceWriter::redact_sensitive`（单一实现，消除漂移），新增端到端回归测试 `write_record_preserves_long_plain_strings_end_to_end`。② **P2 崩溃恢复重构函数恒失败**——`construct_tpn_result_from_trace` 匹配 `phase=="output"/"result"`（TraceHook 从不写这两种 phase），FittingDone 恢复恒重跑 LLM。修复：改为 `construct_tpn_result_from_state`（`tpn_cycle.rs`），从 `chat_history.json` 最后一条 assistant 文本重建 content + trace 的 `tool_call::*` 聚合 tools_used（首调顺序）+ deliverables 目录列出；新增 2 个回归测试。验证：全量 175 passed；冒烟任务 trace 中 46 个 40+ 字符长字符串完整保留（修复前全被遮蔽）；FittingDone 崩溃场景 resume 经 RUST_LOG 确认无 re-running、trace 零 Fitting 重跑记录。附带清理 `is_crash_recovery` 死赋值警告。§8.1 持久化清单与恢复链语义不变（纯内部实现修复，无接口契约变更）。
-
-> **V26.4 变更摘要（2026-08-07，E2E 冒烟实测：hook 单槽语义修复）：** V26.1-3 修复轮收尾冒烟（真实任务 e00d70e7）暴露深层 bug——`trace.jsonl` 缺失 + `tools_used` 为空，回溯根因：Rig 0.39 `AgentBuilder::hook()` 是**单槽覆盖式**，`.hook(a).hook(b).hook(c)` 只有 `c` 生效，导致 V25 起 FittingAgent 的 SafetyHook 从未真正挂载、V26.1 加 ChatHistorySnapshotHook 后 TraceHook 也失效（V26.1-A tools_used 修复随之失效）。新增 `FittingHookSet`（safety → trace → snapshot 组合，首个非 Continue 短路，一次 `.hook()` 挂载）修复；Meta / Causal / Chat 单 hook 不受影响。冒烟复验：`trace.jsonl` 47 行记录、`TPNResult.tools_used = [write, read, causal_verify]` 真实落盘、无密钥明文。§8.5 Hook 安全模型补挂载机制说明；AGENTS.md §17 沉淀。
-
-> **V26.3 变更摘要（2026-08-07，任务 6f95dacd 深度分析落地）：** 对 E2E 超时任务 6f95dacd（「逐一审计全部 src Rust 文件」）的完成情况与任务描述矛盾分析（结论：无虚假完成，status=Failed 诚实；但三层不一致）落地 4 项修复：① **abort 子任务状态落盘**——RecursiveDecomposeTool 错误路径 `abort_all()` 后统一把 `children/` 下 Running 子任务写 Failed（实测 8 个子任务 7 个停在 Running 且 3 个实际产出了交付物，与「超时/失败/取消正确落盘」宣称不符）；② **L1 Skills 工具参数契约对齐**——SkillTool ToolDefinition 暴露单参 `input` 但 BashTool 读 `command`、ReadTool 读 `path`，LLM 传 `{"input":"ls"}` 永远报 missing 参数，唯一活路是 input 塞 JSON 字符串（纯靠试错，每次 resume 重新踩坑）；修复为 BashTool/ReadTool 支持 `input` 键直读纯字符串 + ToolDefinition description 补用法示例（双保险）；③ **trace 脱敏精确化**——value-based 正则 `[a-zA-Z0-9_-]{40,}` 误伤 UUID/文件正文，LLM 读 config.json 等内容被整段遮蔽；收紧为仅密钥前缀匹配或仅 key-based，read/bash 输出豁免 value-based；④ **Fitting 规模感知引导**——模板提示任务过大时优先拆解分批、预算不足时明确说明覆盖范围。§8.1（子任务状态一致性）、§8.5（工具契约与 description 约定）同步更新。
-
-> **V26.2 变更摘要（2026-08-07，持久化去冗余）：** 持久化文件审计发现 2 个只写不读的死文件并删除：① `meta_conversation.json`（内容四字段全部可推导：task_description→meta.json、llm_input/llm_response→trace.jsonl、meta_ctx→meta_ctx.json），连带删除 `MetaAgentBuilder.task_dir` 字段（仅为写它存在）；② `converge_state.json`（converge 在 RecursiveDecomposeTool 内部调用，其崩溃窗口已被「父任务失败→重跑→children/ 复用→重新 converge」幂等重放天然覆盖）。§8.1 新增任务目录持久化文件清单（唯一事实，新增文件必须先入清单）。
-
-> **V26.1 变更摘要（2026-08-07，E2E 实测修复）：** V26 端到端验收（156 测试全绿 + 真实任务冒烟 Completed + --resume 恢复 + 超时→Failed 验证）暴露 4 个问题并修复：① `tools_used` 统计从 LLM 响应文本 contains 匹配改为 **TraceHook 真实工具调用记录**（`on_tool_call` 收集工具名），消除 LLM 正文提及工具名的伪阳性；② CausalAgent verify/converge `max_turns` 6→10（真实任务首次 causal_verify 在 6 轮上限触发 MaxTurnsError，重试 25s 成功——6 轮不足，10 轮覆盖）；③ **对话历史增量快照**：新增 ChatHistorySnapshotHook，在每次 LLM 调用前将完整对话（history + prompt）原子持久化到 `chat_history.json`——弥补 Rig `chat()` 出错即返回、不回写历史的缺陷，使 `--resume` / 子任务 rerun 可从失败点增量推进而非从空历史重跑整个 Fitting 阶段；④ 修复 `test_fitting_agent_depth_check` 污染已跟踪 `test_data/`（task_dir 改用临时目录）。§7.2、§8.1、§8.2、§8.5 同步更新。
-
-> **V26 变更摘要（2026-08-05，异层同构收敛）：** 删除 `AgentMode`（Orchestration / Execution）分裂——此前 Execution 模式 FittingAgent 不注册 `recursive_decompose`，工具面随 depth 分化，与「权限不随 depth 变化」的异层同构声明自相矛盾。V26 起任务节点在任意深度**完全同构**：同一 FittingAgent 代码（全工具注册、单 prompt 模板、统一 max_turns=30）、同一恢复链（根任务新增 `taiji run --resume <task_id>` 恢复入口，与子任务共享同一恢复代码）、统一状态持久化（TpnCycle 统一原子写 meta.json status，超时/失败/取消正确落盘 Failed/Cancelled）。WorkerPool 信号量语义简化为「并行分解节点上限」（RecursiveDecomposeTool 入口 acquire 1 permit、join 完成后释放，子任务运行不持 permit——持 permit 者不再 acquire，无死锁路径）。CausalAgent verify/converge max_turns 3→6（T4 实测：3 轮不足，LLM 需 read 多文件才能裁决）。§1.1、§2、§4、§5.2、§6.2、§8.1、§8.2、§8.6、§8.8、§8.10 同步更新；`PromptAsset.agent_mode` 字段删除（serde 默认宽容，旧归藏 YAML 自动兼容）。递归终止仅靠 depth guard（§8.6）。
 >
 
 ---
@@ -33,19 +17,22 @@
 
 ### 1.1 异层同构 (Isomorphic Recursion)
 
-递归树的每一层结构完全相同。depth=0 的根节点和 depth=N 的子节点执行相同的 TPN 三阶段循环、拥有相同的文件目录布局、相同的工具注册面、相同的 system prompt 模板、相同的 max_turns 与相同的恢复/持久化路径——**不为不同深度写不同的控制流，不引入任何 depth 特例**。递归终止仅由 §8.6 的 depth guard 保证（`depth >= max_depth` 时 decompose 工具拒绝拆解）。
+递归树的每一层结构完全相同。depth=0 的根节点和 depth=N 的子节点执行相同的 TPN 三阶段循环、拥有相同的文件目录布局、相同的恢复/持久化路径与相同的上下文预算——**不为不同深度写不同的控制流，不引入任何 depth 特例**。递归终止仅由 §8.6 的 depth guard 保证（`depth >= max_depth` 时 decompose 工具拒绝拆解）。
 
-**异层同构 = 结构同构 + 权限同构 + 配置同构**：任务节点（单个三相循环，见 §8.1）在任意深度保持相同的三相相位分工（Meta 认知权 / Fitting 执行权 / Causal 裁判权，见 §8.5）、相同的权限配置（同一 SafetyHook 单例、相同工具面、相同白名单）与相同的运行参数（max_turns / 温度 / 防护默认值）——**权限与配置不随 depth / round / cycle 变化，不同深度不存在任何梯度**。FittingAgent 在所有深度注册全部执行工具（5 L1 Skills + recursive_decompose + causal_verify），是否实际拆解由 LLM 依据任务描述自主判断（prompt 中说明「可用 recursive_decompose 拆解，也可直接产出」）。
+**异层同构 = 结构同构 + 权限同构 + 配置同构，但提示词按模式配对**：任务节点（单个三相循环，见 §8.1）在任意深度保持相同的三相相位分工（Meta 认知权 / Fitting 执行权 / Causal 裁判权，见 §8.5）、相同的权限配置（同一 SafetyHook 单例、相同白名单）与相同的运行参数（上下文预算 / 防护默认值，V29 §8.19）——**结构、权限与配置不随 depth / round / cycle 变化**。但每个节点由元 Agent 权重更新时按「递归层数规则 + 任务难易程度」决策**阴阳配对模式**（§8.8）：
 
-**提示词来源：** FittingAgent / CausalAgent 的 system prompt 由 MetaAgent 在每次 TPN 循环的开始阶段动态编排。MetaAgent 首先查询归藏 `prompts/` 层的提示词资产（标签匹配 + 置信度排序），若有高置信度匹配则调用 LLM 将资产组合为三份完整的 system prompt（fitting、verify、converge），注入 `MetaContext` 传递到下游 Agent。无归藏匹配时降级到 4 个 Base 硬编码模板（FittingAgent 的编排/执行各一、CausalAgent 的 verify/converge 各一），下游 Agent 自动使用内置回退。
+- **编排模式（Orchestration）**：阳 Agent 注册 recursive_decompose + causal_verify + 5 L1 Skills，用编排模板（拆解 + 综合）；阴 Agent 用收敛模板（子结果聚合判决）
+- **执行模式（Execution）**：阳 Agent 只注册 causal_verify + 5 L1 Skills（**不注册 recursive_decompose**，LLM 不可见拆解工具），用执行模板（直接产出）；阴 Agent 用验证模板（直接产出核验）
+
+**提示词来源：** FittingAgent / CausalAgent 的 system prompt 由 MetaAgent 在每次 TPN 循环的开始阶段动态编排。MetaAgent 首先查询归藏 `prompts/` 层的提示词资产（标签匹配 + 置信度排序），结合深度规则与难度判断决策模式，若有高置信度匹配则调用 LLM 将**与所选模式配对**的资产组合为三份完整的 system prompt（fitting、verify、converge），注入 `MetaContext`（含 `mode`）传递到下游 Agent。无归藏匹配时降级到 6 个 Base 硬编码模板（FittingAgent 的编排/执行各一、CausalAgent 的 verify/converge 各按模式一），下游 Agent 按 `MetaContext.mode` 自动使用对应回退。
 
 ### 1.2 三相互补 (Tri-Phase Complementarity)
 
 | Agent | 相位 | 易经 | 职责 | 权限面 |
 |-------|------|------|------|--------|
-| **MetaAgent** | 权重更新·元 | 无极生太极 | 遍历归藏图谱提取推理路径，注入认知偏置 | **认知权 + 收集权**：注册只读收集工具（read / search / webfetch，可联网核实），受 SafetyHook 约束；LLM 多轮收集任务上下文、父层 deliverables、归藏资产与网络信息后更新权重；归藏只读 |
-| **FittingAgent** | 概率拟合·阳 | 阳 | 沿路径发散探索，LLM 做微观概率采样，可递归拆解 | **执行权**：注册 5 个 L1 Skills + recursive_decompose + causal_verify，受 SafetyHook + TraceHook 约束（全节点唯一持有变更世界工具的相位） |
-| **CausalAgent** | 因果验证·阴 | 阴 | 将结果收敛回符号约束，验证宏观因果性 | **裁判权 + 收集权**：注册只读验证工具（read / webfetch，逐文件核验 + 联网核实），受 SafetyHook 约束；LLM 核验 deliverables 与外部事实后裁决路由（PASS / BACK_TO_TPN / BACK_TO_META） |
+| **MetaAgent** | 权重更新·元 | 无极生太极 | 遍历归藏图谱提取推理路径，注入认知偏置 | **认知权 + 收集权**：注册只读收集工具（read / search / webfetch，可联网核实），受 SafetyHook 约束；LLM 多轮收集任务上下文、父层 deliverables、归藏资产与网络信息后更新权重，**按递归层数规则 + 任务难易程度决策阴阳配对模式并编排配对提示词**；归藏只读 |
+| **FittingAgent** | 概率拟合·阳 | 阳 | 沿路径发散探索，LLM 做微观概率采样，可递归拆解 | **执行权**：注册 5 个 L1 Skills + causal_verify（全节点）+ recursive_decompose（**仅编排模式节点**），受 SafetyHook + TraceHook 约束（全节点唯一持有变更世界工具的相位） |
+| **CausalAgent** | 因果验证·阴 | 阴 | 将结果收敛回符号约束，验证宏观因果性 | **裁判权 + 收集权**：注册只读验证工具（read / webfetch，逐文件核验 + 联网核实），受 SafetyHook 约束；LLM 核验 deliverables 与外部事实后裁决路由（PASS / BACK_TO_TPN / BACK_TO_META）。**编排节点用收敛模板（converge），执行节点用验证模板（verify）** |
 
 TPN 循环 = 阳生（概率采样）→ 阴克（验证驳回）→ 元调（调整权重）→ 再阳生...，直到收敛。
 
@@ -55,11 +42,22 @@ TPN 循环 = 阳生（概率采样）→ 阴克（验证驳回）→ 元调（�
 
 LLM 是微观概率性的体现——每次 prompt 调用随机、不可精确重现。归藏是宏观因果性的体现——reasoning paths、Truth 约束形成可追溯的符号推理网络。TPN 循环就是这两层表象的交替：概率采样 → 符号验证 → 权重调整 → 再采样。
 
-### 1.4 第一性原理 (First Principles)
+### 1.4 产物契约与交接文件 (Artifact Contract & Handoff) — V28
+
+**执行事实是唯一记忆。** 跨层、跨时间传递的只有产出物（deliverables / task_output / 交接文件）。中间记忆（chat_history、meta_ctx 推理过程）只服务于本节点内部，不得向上传播、不作为结果的事实来源。
+
+**产出即交接：** 每个瞬态 agent（概率拟合）结束时有且仅有三种去向——完成（写最终产出）、上下文超限（写交接产出）、失败/取消（写交接产出）。**交接物 = `deliverables/handoff.md`，是产出物之一**——YAML front matter 携带结构化字段（failure_reason / degraded / output_refs），正文为环境信息（进度 / 剩余工作 / 决策 / 约束状态）。置于 `deliverables/` 内保证**可发现性**：父层（parent_deliverables 注入）、同任务其他 agent（verify/converge 逐文件核验）、元校准（BACK_TO_META 读产出）全部经既有路径自动可见，**不引入新的查找机制**。产出物是递归拆解、恢复、路由判定、元校准的唯一输入物。**V30 会盟扩展**：兄弟贡品（同级子任务 deliverables/）跨兄弟公开可发现可读——分封时注入兄弟贡品索引（`YangPrompt.sibling_deliverables`），读取经既有 read 工具，不引入新查找机制（§8.20）。
+
+- **上下文窗口是单次拟合的采样空间，不是记忆仓库。** 上下文超限 = 采样空间装不下任务 = 任务粒度错误 = 编排失败的运行时硬证据 → 返回阳，阳基于产出文件递归分解
+- **不做上下文压缩（特意设计）。** 压缩是把中间记忆塞回下一次拟合、污染新采样；交接是结束本次拟合、留下干净事实、开启新拟合
+- **阴（验证/收敛）基于产出核验**：CausalAgent 只读产出文件与交接文件裁决，不消费对话过程
+- **恢复 = 前一瞬态产出继承**：崩溃恢复从 `deliverables/`（含 handoff.md）重建，chat_history 仅作本节点断点续聊的最终兜底
+
+### 1.5 第一性原理 (First Principles)
 
 复杂事物由简单事物结构化组成。一个 FittingAgent 可以执行也可以递归拆解（不需要两种类型）、一个 EngineContext 携带 task_dir 根节点和子节点用它做同一件事、一个 Task 结构在不同层代表不同粒度但不改变结构。
 
-### 1.5 心流 (Flow) — 三层+预留模型
+### 1.6 心流 (Flow) — 三层+预留模型
 
 taiji 归藏资产按三层+预留组织，形成心流收缩-舒张节律：
 
@@ -77,7 +75,7 @@ taiji 归藏资产按三层+预留组织，形成心流收缩-舒张节律：
 
 所有资产更新通过 DMN Consumer 在符号层（YAML 文件）完成，纯云端架构无需本地模型。
 
-### 1.6 类比与隐喻 (Analogies and Metaphors)
+### 1.7 类比与隐喻 (Analogies and Metaphors)
 
 taiji 的核心理念植根于两个千年结构的统一：中国古典哲学（周易/归藏）中的变化与累积模型，以及现代概率算法（蒙特卡洛/知识图谱）。
 
@@ -149,9 +147,9 @@ taiji 的智能来自云端 LLM（DeepSeek via Rig）的概率采样能力与归
 | **Skills** | 可执行工具（硬编码） | 5 个内置真实工具（read/write/bash/search/webfetch）+ MCP 注入。带 success_rate/use_count。**心流深层沉淀**，统计更新写回归藏 |
 | **models/** | 预留层（连山） | 连山流型系统接入前的占位。当前不参与任何运行时行为 |
 | **归藏 (Guizang)** | 认知仓库 | 三层+预留 YAML 存储于 `.taiji/knowledge/`。TPN 执行期间只读，DMN Consumer 单写者 |
-| **MetaAgent** | 权重更新·元 | 瞬态 Rig Agent，查询归藏 Prompts 标签匹配 + LLM 编排 system prompt（fitting/verify/converge），产出 MetaContext，`max_turns=6`（收集→提取工具循环） |
-| **FittingAgent** | 概率拟合·阳 | 瞬态 Rig Agent，内置 5 个 L1 Skills + `recursive_decompose` + `causal_verify`（任意深度全量注册，V26 起无模式分化）；前端通过 MCP ExternalContext 注入额外上下文，`max_turns=30` |
-| **CausalAgent** | 因果验证·阴 | 瞬态 Rig Agent（双模式：verify / converge）。verify 先跑 ConstraintEngine 前置检查（Hard 直接短路），再调 LLM 裁决路由；converge 聚合子结果判决收敛。`max_turns=10`（V26 由 3→6 仍不足，V26.1 再升至 10） |
+| **MetaAgent** | 权重更新·元 | 瞬态 Rig Agent，查询归藏 Prompts 标签匹配 + LLM 编排 system prompt（fitting/verify/converge），**按递归层数规则 + 任务难易程度决策阴阳配对模式（编排-收敛 / 执行-验证）**，产出 MetaContext。受 §8.19 上下文预算约束（V29，替换 max_turns=6） |
+| **FittingAgent** | 概率拟合·阳 | 瞬态 Rig Agent，内置 5 个 L1 Skills + `causal_verify`（任意深度注册）；`recursive_decompose` **仅编排模式注册**（执行模式 LLM 不可见）；前端通过 MCP ExternalContext 注入额外上下文。受 §8.19 上下文预算约束（V29，替换 max_turns=30）。模式由 MetaContext 携带（MetaAgent 决策） |
+| **CausalAgent** | 因果验证·阴 | 瞬态 Rig Agent（双模式：verify / converge，**各自按节点模式选模板**）。verify 先跑 ConstraintEngine 前置检查（Hard 直接短路），再调 LLM 裁决路由；converge 聚合子结果判决收敛。受 §8.19 上下文预算约束（V29，替换 max_turns=10） |
 | **AgentFactory** | 瞬态 Agent 工厂 | 中枢组件，持有基础设施 Arc 引用（ProviderRegistry / GuizangClient / WorkerPool / ConstraintEngine） |
 | **ChatAgent** | 前端内嵌对话 Agent | 长生命周期 Rig Agent（24h 超时），注册 5 个 L1 Skills + SafetyHook，`max_turns=20`。`stream_chat()` 逐 token 推流到 WS 定向通道。聊天历史持久化到 `{data_root}/chat/{session_id}.json`。**与 TPN 循环完全解耦**（不进三相循环，不触发递归拆解） |
 | **DMN Consumer** | 反向传播·调权 | 独立后台任务，轮询 pending 队列执行演化（δ₀ 修剪 → δ₁ 技能调优）。纯符号层 YAML 更新，无需本地模型。代码已实现，可随时激活 |
@@ -189,8 +187,8 @@ flowchart TD
     EXECUTE --> INIT["init task dir (data/tasks/{task_id}/)"]
 
     subgraph "TPN 循环"
-        INIT --> META["① 权重更新 (元·MetaAgent, max_turns=1)\n标签匹配 Prompts + 置信度排序 → MetaContext"]
-        META -->         FIT["② 概率拟合 (阳·FittingAgent) LLM loop (max_turns=30)\nrecursive_decompose / causal_verify\n5 个内置 L1 Skills (read/write/bash/search/webfetch)"]
+        INIT --> META["① 权重更新 (元·MetaAgent)\n标签匹配 Prompts + 置信度排序 → MetaContext"]
+        META -->         FIT["② 概率拟合 (阳·FittingAgent) LLM loop（上下文预算 §8.19）\nrecursive_decompose / causal_verify\n5 个内置 L1 Skills (read/write/bash/search/webfetch)"]
         FIT --> VERIFY["③ 因果验证 (阴)\nverify() → VerificationReport"]
     end
 
@@ -246,7 +244,6 @@ flowchart TB
         CONFIG["config — TaijiConfig"]
         ERR["error — TaijiError"]
         TRACE_W["trace — TraceWriter (JSONL)"]
-        RLIMIT["rate_limiter — RateLimiter"]
         TSPEC["task_spec — TaskSpec 解析"]
     end
 
@@ -295,7 +292,6 @@ flowchart TB
 | L1 | infra/provider | ProviderRegistry：Rig client 管理（创建/复用/fallback） |
 | L1 | infra/knowledge | GuizangClient：归藏 文件系统读写 + 标签搜索 |
 | L1 | infra/trace | TraceWriter：JSONL 写入 + 10MB 轮转 + read_tree 合并 |
-| L1 | infra/rate_limiter | 全局 token bucket 限流 |
 | L2 | hooks/safety | ToolSafetyGuard：路径穿越 / 命令注入 / SSRF 拦截 |
 | L2 | hooks/trace | TraceHook：自动捕获 StepEvent 写入 trace.jsonl |
 | L3 | agents/factory | AgentFactory：持有所有 Arc 引用，创建三种瞬态 Agent |
@@ -322,15 +318,15 @@ flowchart TB
 
 | # | 契约 | 说明 |
 |---|------|------|
-| 1 | `RecursiveDecomposeTool.execute(subtasks: Vec[SubtaskSpec]) -> DecomposeResult` | 输入 LLM 拆解的子任务 → spawn 子 FittingAgent → JoinSet 收集 → CausalAgent.converge() → 返回收敛结果。**任意深度 FittingAgent 注册**（V26 无模式分化）；递归终止由 depth guard 保证；WorkerPool permit 在工具入口 acquire（并行分解节点上限），join 完成后释放，无嵌套持有 → 无死锁 |
-| 2 | `AgentFactory.create_fitting_agent(depth, meta_ctx, engine_ctx, cancel) -> FittingAgentBuilder` | 从 MetaContext + EngineContext + CancellationToken + 归藏 创建阳 Agent，builder.run() 后销毁 |
-| 3 | `FittingAgentBuilder { depth, meta_ctx, engine_ctx, factory, model, cancel: CancellationToken }` | 阳 Agent 构建器，单模板（V26 无 mode 字段），是否拆解由 LLM 自主判断 |
+| 1 | `RecursiveDecomposeTool.execute(subtasks: Vec[SubtaskSpec]) -> DecomposeResult` | 输入 LLM 拆解的子任务 → spawn 子 FittingAgent → JoinSet 收集 → CausalAgent.converge() → 返回收敛结果。**仅编排模式 FittingAgent 注册**（执行模式 LLM 不可见拆解工具）；递归终止由 depth guard 保证；WorkerPool permit 在工具入口 acquire（并行分解节点上限），join 完成后释放，无嵌套持有 → 无死锁。**V30 会盟**：spawn 时收集兄弟贡品索引注入子 `YangPrompt.sibling_deliverables`（BTreeMap 有序扫描，排除自身，失败上抛——无降级 §8.20） |
+| 2 | `AgentFactory.create_fitting_agent(depth, meta_ctx, engine_ctx, cancel) -> FittingAgentBuilder` | 从 MetaContext（含 `mode`）+ EngineContext + CancellationToken + 归藏 创建阳 Agent，模式随 meta_ctx 传递 |
+| 3 | `FittingAgentBuilder { depth, mode, meta_ctx, engine_ctx, factory, model, cancel: CancellationToken }` | 阳 Agent 构建器，**按模式选模板**（编排模板 / 执行模板）；recursive_decompose 仅编排模式注册。**V30 身份自觉**：run() 注入「身份与地位」段（身份册 + mode + 兄弟贡品索引，`build_identity_section`，读册失败上抛——无降级 §8.20） |
 | 4 | `SafetyHook (AgentHook)` | 在 ToolCall 事件上检查路径穿越/命令注入/SSRF，返回 Flow::cont() 或 Flow::skip() |
 | 5 | `ConstraintEngine.check_constraints(output, constraints) -> ConstraintResult` | CausalAgent.verify 前置检查，Hard 违反直接短路返回 BACK_TO_META |
-| 6 | `MetaAgentBuilder.run(task_description, task_type_tags) -> MetaContext` | 查询归藏 Prompts 标签匹配 → 置信度排序 → LLM 编排三份 system prompt（fitting/verify/converge）→ 注入 MetaContext；无归藏资产时降级返回 MetaContext::empty() |
+| 6 | `MetaAgentBuilder.run(task_description, task_type_tags, handoff: Option<HandoffContext>) -> MetaContext`（builder 经 `depth()` / `max_depth()` 注入递归层数规则） | 查询归藏 Prompts 标签匹配 → 置信度排序 → **按深度规则 + 难度决策配对模式** → LLM 编排三份 system prompt（fitting/verify/converge，与所选模式配对）→ 注入 MetaContext（含 mode）；无归藏资产时降级返回 MetaContext::empty()（mode 默认 Orchestration）。**V28：BACK_TO_META 重跑时 `handoff` 注入前一瞬态产出摘要**（deliverables/ 索引 + handoff.md 内容），基于产出校准权重与资产，不再空手重跑 |
 | 7 | `DMN Consumer (独立 tokio::spawn)` | 指数退避轮询 pending/ 队列，执行 δ₀ 修剪 + δ₁ 技能调优，单写者更新归藏。δ₂ 预留（连山接入后激活） |
-| 8 | `CausalVerifyAgentBuilder.verify(output, tool_results, meta_ctx, mode) -> VerificationReport` | 优先使用 meta_ctx.verify_system_prompt，None 时降级到 mode 对应的硬编码模板。`tool_results` 由 `TpnCycle.collect_tool_results()` 从 trace.jsonl 自动提取最近 10 条工具调用输出，非空数组 |
-| 9 | `CausalConvergeAgentBuilder.converge(subtask_results, meta_ctx, mode) -> ConvergenceDecision` | 优先使用 meta_ctx.converge_system_prompt，None 时降级到 mode 对应的硬编码模板 |
+| 8 | `CausalVerifyAgentBuilder.verify(output, tool_results, meta_ctx) -> VerificationReport` | 优先使用 meta_ctx.verify_system_prompt，None 时按 `meta_ctx.mode` 降级到 VERIFY_ORC / VERIFY_EXEC 硬编码模板（编排-验证 / 执行-验证配对）。`tool_results` 由 `TpnCycle.collect_tool_results()` 从 trace.jsonl 自动提取最近 10 条工具调用输出，非空数组 |
+| 9 | `CausalConvergeAgentBuilder.converge(subtask_results, meta_ctx) -> ConvergenceDecision` | 优先使用 meta_ctx.converge_system_prompt，None 时按 `meta_ctx.mode` 降级到 CONVERGE_ORC / CONVERGE_EXEC 硬编码模板（编排-收敛 / 执行-收敛配对） |
 | 10 | `RecursiveRunner.execute(description, external_ctx, max_depth) -> TPNResult` | runner.execute() 的增强版本，接受来自前端 agent 的 ExternalContext（文件、工具结果、对话总结），将文件物化到 `task_dir/context/files/` 并写入 `context/meta.json`，设置 `engine_ctx.context_dir` → FittingAgent 模板注入 External Context 节。可选 `max_depth` 参数覆盖配置中的递归深度限制 |
 | 11 | `PlanBuilder.plan(description, task_type_tags) -> PlanSummary` | 运行 MetaAgent（权重更新+提示词编排）获取 MetaContext，随后调用 LLM 将 MetaContext + 任务描述编排为结构化的 PlanSummary（含子任务预估、技能推荐、复杂度评估），**不进 TPN 循环**，不触发 FittingAgent/CausalAgent |
 | 12 | `TaijiMcpServer.handle_explain(task_id) -> ExplainReport` | 读取 `meta.json` + 递归 `trace.jsonl` + `deliverables/` 目录，解析 TraceRecord 的 phase/cycle/round 字段构建阶段时间线和路由决策树，产出人类可读 ExplainReport（含 summary 自然语言总结） |
@@ -356,7 +352,9 @@ classDiagram
     class SubtaskSpec {
         +description: String
         +verification_spec: String
+        +mode: AgentMode
         +context: Value
+        +rerun_of: Option[usize]
     }
 
     class DecomposeResult {
@@ -382,10 +380,17 @@ classDiagram
         +constraints: Vec[TruthConstraint]
         +matched_skills: Vec[SkillRef]
         +yang_prompt: YangPrompt
+        +mode: AgentMode
         +temperature: Option[f32]
         +fitting_system_prompt: Option[String]
         +verify_system_prompt: Option[String]
         +converge_system_prompt: Option[String]
+    }
+
+    class AgentMode {
+        <<enum>>
+        Orchestration
+        Execution
     }
 
     class PromptAsset {
@@ -415,6 +420,7 @@ classDiagram
         +task_description: String
         +constraint_summaries: Vec[String]
         +parent_deliverables: Vec[String]
+        +sibling_deliverables: Vec[String]  %% V30 会盟：兄弟贡品索引（serde default 空）
     }
 
     class TruthConstraint {
@@ -533,6 +539,7 @@ classDiagram
     MetaContext --> TruthConstraint : contains
     MetaContext --> SkillRef : contains
     MetaContext --> YangPrompt : contains
+    MetaContext --> AgentMode : decides
     PlanSummary --> SubtaskPlan : contains
     ExplainReport --> PhaseSummary : contains
     ExplainReport --> DecisionSummary : contains
@@ -559,22 +566,24 @@ sequenceDiagram
 
     U->>RR: execute(description)
     RR->>RR: create task dir + meta.json
-    RR->>AF: create_meta_agent(task_id)
+    RR->>AF: create_meta_agent(task_id, depth, max_depth)
     AF-->>RR: MetaAgentBuilder
     RR->>MA: run(description, task_type_tags)
     MA->>MA: 查询归藏 prompts/（标签匹配 + 置信度排序）
+    MA->>MA: 深度规则 + 难度评估 → 决策配对模式 (Orchestration | Execution)
     alt 有高置信度提示词资产
-        MA->>MA: LLM 编排三份 system prompt（fitting/verify/converge）
+        MA->>MA: LLM 编排三份 system prompt（与所选模式配对：
+        MA->>MA: 编排→编排拟合+收敛；执行→执行拟合+验证）
     else 无匹配资产
-        MA->>MA: 降级 → fitting/verify/converge 全为 None
+        MA->>MA: 降级 → mode 默认 Orchestration，模板全为 None
     end
-    MA-->>RR: MetaContext (reasoning paths + constraints + skills + prompts)
+    MA-->>RR: MetaContext (mode + reasoning paths + constraints + skills + prompts)
 
     loop TPN 循环 (max_cycles × max_rounds)
         RR->>AF: create_fitting_agent(depth, meta_ctx, engine_ctx)
         AF-->>RR: FittingAgentBuilder
         RR->>FA: run(description)
-        Note over FA: LLM loop (max_turns=30) + recursive_decompose + causal_verify\n内置 L1 Skills (read/write/bash/search/webfetch)\n前端 agent 可通过 MCP ExternalContext 注入额外上下文
+        Note over FA: LLM loop（上下文预算 §8.19） + recursive_decompose + causal_verify\n内置 L1 Skills (read/write/bash/search/webfetch)\n前端 agent 可通过 MCP ExternalContext 注入额外上下文\nV28: 上下文超限/失败/取消 → 先写 deliverables/handoff.md 再返回（§8.18）
         FA-->>RR: TPNResult
 
         RR->>AF: create_causal_verify_agent(engine_ctx)
@@ -587,9 +596,9 @@ sequenceDiagram
             Note over RR,DMN: TPN PASS — enqueue DMN（当前 DMN Consumer 未激活，入队逻辑待实现）
             RR-->>U: TPNResult
         else route = BACK_TO_TPN
-            RR->>RR: round++，注入验证报告→current_description\nFittingAgent 下一轮看到被拒原因
+            RR->>RR: round++，读取 deliverables/（含 handoff.md）→ FittingAgent 基于前一瞬态产出递归分解\nV28: 不再以原 description + chat_history 重放重跑（§8.18）
         else route = BACK_TO_META
-            RR->>RR: cycle++, round=0\n重置 description，重跑 MetaAgent
+            RR->>RR: cycle++, round=0\nMetaAgent 基于 deliverables/ 产出校准权重与认知资产（§8.18）
         end
     end
 ```
@@ -609,19 +618,23 @@ sequenceDiagram
     participant CCA as CausalAgent.converge
 
     FA->>RDT: execute(subtasks: Vec[SubtaskSpec])
-    Note over FA, RDT: 每个 SubtaskSpec 携带 verification_spec + context 由 assemble_child_description() 拼入子任务描述\n**此工具在任意深度 FittingAgent 注册**（depth guard 保证递归终止）
+    Note over FA, RDT: 每个 SubtaskSpec 携带 verification_spec + mode（父 LLM 按难度分配）+ context
+    Note over FA, RDT: 由 assemble_child_description() 拼入子任务描述\n**此工具仅编排模式 FittingAgent 注册**（执行模式 LLM 不可见）；工具内部 mode guard 兜底
     RDT->>RDT: 父 TPNResult.deliverables → 注入子 MetaContext.parent_deliverables
+    RDT->>RDT: V30 会盟：collect_sibling_deliverables（BTreeMap 扫描兄弟贡品）→ 注入子 YangPrompt.sibling_deliverables
 
-    RDT->>RDT: guard: depth < max_depth + subtasks ≤ max_subtasks
+    RDT->>RDT: guard: depth < max_depth + subtasks ≤ max_subtasks + mode == Orchestration
     RDT->>RDT: check cancel token + create child_token
     RDT->>RDT: WorkerPool.acquire() — 入口持 1 permit（并行分解节点上限），join 后释放
 
     loop for each subtask
-        RDT->>RDT: generate child UUID task_id + child_token
-        RDT->>AF: create_fitting_agent(depth+1, meta_ctx, child_ctx, child_token)
+        RDT->>RDT: 子模式 = subtask.mode；depth+1 >= max_depth 时强制覆盖为 Execution（深度规则兜底）
+        RDT->>RDT: generate child task_id + child_token
+        RDT->>AF: create_fitting_agent(depth+1, meta_ctx(mode=子模式), child_ctx, child_token)
         AF-->>RDT: FittingAgentBuilder
         RDT->>CFA: run(subtask.description)
-        Note over CFA: 单模板（拆解/产出由 LLM 自主判断）——与根任务完全相同
+        Note over CFA: 子节点模式由 SubtaskSpec.mode 携带（父 LLM 难度判断），深度规则兜底；
+        Note over CFA: BACK_TO_META 时子节点 MetaAgent 重新决策
         Note over CFA: deliverables 字段列出所有产物绝对路径
         Note over CFA: TPNResult 携带 rounds / tools_used 供 converge 参考
         CFA-->>RDT: TPNResult (含 deliverables / rounds / tools_used)
@@ -633,6 +646,7 @@ sequenceDiagram
     RDT->>AF: create_causal_converge_agent(child_ctx)
     AF-->>RDT: CausalConvergeAgentBuilder
     RDT->>CCA: converge(subtask_results, parent_meta_ctx)
+    Note over CCA: 模板按 parent_meta_ctx.mode 选 CONVERGE_ORC（编排节点收敛）
     Note over CCA: 接收子 deliverables 路径，硬编码要求 read 工具逐文件检查
     CCA-->>RDT: ConvergenceDecision
     RDT-->>FA: DecomposeResult (含 deliverables)
@@ -649,10 +663,10 @@ sequenceDiagram
 | 路由 | 触发条件 | 行为 | 计数器 |
 |------|---------|------|--------|
 | **PASS** | 交付件通过 L4 Truth 约束检查 + LLM 判定收敛 | 输出 TPNResult → 入队 DMN | — |
-| **BACK_TO_TPN** | 执行偏差（交付件不满足验证规格） | 将 CausalAgent 验证报告（`report.summary` + `constraint_violations`）注入 `current_description`，传回 FittingAgent 重试。FittingAgent 知晓上一轮被拒原因，定向修正 | `round++`，达 max_rounds → FAIL |
-| **BACK_TO_META** | 认知偏差（推理路径错误、缺少必要约束） | 重置 `current_description` 为原始任务描述，重新运行 MetaAgent 获取推理路径 | `cycle++` / `round=0`，达 max_cycles → FAIL |
+| **BACK_TO_TPN** | 执行偏差（交付件不满足验证规格）或 **V28 结构化信号：`failure_reason = context_overflow / output_missing`**（任务粒度错误） | 读取 `deliverables/`（含 `handoff.md`），FittingAgent **基于前一瞬态产出递归分解**（V28：不再以原 description + chat_history 重放重跑）；验证报告注入作定向修正参考 | `round++`，达 max_rounds → FAIL |
+| **BACK_TO_META** | 认知偏差（推理路径错误、缺少必要约束）或 **V28 结构化信号：`failure_reason = constraint_violation(Hard) / cognitive`** | 读取 `deliverables/`（含 `handoff.md`），重新运行 MetaAgent **基于产出校准权重与认知资产**（V28：不再空手重跑），重新获取推理路径 | `cycle++` / `round=0`，达 max_cycles → FAIL |
 
-路由由 CausalAgent 的 LLM 裁决，不硬编码于 RecursiveRunner。约束检查（ConstraintEngine.check_constraints）在 LLM 调用之前执行：Hard 违反直接返回 BACK_TO_META，Soft 违反注入 LLM prompt 由 LLM 裁定。
+路由判定 = **V28 结构化失败信号优先 + CausalAgent LLM 裁决兜底**（§8.18 分流表）。约束检查（ConstraintEngine.check_constraints）在 LLM 调用之前执行：Hard 违反直接返回 BACK_TO_META，Soft 违反注入 LLM prompt 由 LLM 裁定。
 
 CausalAgent.verify() 接收的 `tool_results` 由 `TpnCycle.collect_tool_results()` 从 `trace.jsonl` 中自动提取最近 10 条工具调用输出，确保验证 LLM 可交叉比对工具结果与任务输出。
 
@@ -662,7 +676,7 @@ CausalAgent.verify() 接收的 `tool_results` 由 `TpnCycle.collect_tool_results
 
 ### 6.1 三层+预留资产模型
 
-> **V22 变更：** 五层精简为三层+预留。原 L5 Prompt 与 L3 Grid 合并为统一的 Prompts 层——Grid 的 role_prompt/workflow 本质就是行为模板，与 Prompt 的 content 说的是同一件事（「告诉 Agent 你是谁、怎么做事」）。删除了 Grid 的 relations 关系图（边的权重缺实证基础，空集运行无意义）。L4 Truth 保留但移除 TMS 依赖链。
+归藏资产为**三层+预留**布局：Prompts（行为模板——含角色定义、工作流、执行参数。标签匹配 + 置信度排序 → LLM 编排 system prompt）、Truths（硬约束——severity + justification）、models/（预留层）。Grid 层不存在——role_prompt/workflow 与 Prompt 的 content 同属行为模板，统一收纳于 Prompts 层；Grid 的 relations 关系图已不参与运行时。
 
 ```
 .taiji/knowledge/
@@ -708,7 +722,7 @@ TPN 执行期间只读，DMN Consumer 单写者更新。
 | Truths | `severity: String`（"Hard" \| "Soft"）; `justification: Option<String>`（此约束为什么成立——供审计，不参与运行时传播） |
 | models/ | **预留层** — 待连山流型系统接入。未来字段：`alpha: f64`, `beta: f64`（Bayesian 后验），`steering_vector: Option<Vec<f32>>`（介入向量）。当前归藏 `models/` 目录为空 |
 
-> **V22 移除：** `relations`（Grid 关系边）、`justification_depends_on`（TMS 依赖链）、`dependency_index`（index.yaml 反向索引）——全部删除。index.yaml 仅保留 tag 反向索引。
+index.yaml 仅保留 `tag_index`（反向索引）。`relations`、`justification_depends_on`、`dependency_index` 不在资产模型中。
 
 ### 6.3 检索
 
@@ -752,11 +766,11 @@ flowchart LR
     WRITE --> NEXT["下轮 MetaAgent 自动读取最新图谱"]
 ```
 
-δ₀-δ₂ 演化器归属藏文件系统的硬编码字段更新（不涉及 LLM），通过 DMN Consumer 单写者安全更新。δ₃ 网格重连已移除（无 Grid 层不再需要）。
+δ₀-δ₂ 演化器归属藏文件系统的硬编码字段更新（不涉及 LLM），通过 DMN Consumer 单写者安全更新。
 
 ### 6.5 真值维护 (Truth Maintenance — 精简版)
 
-> **V22 变更：** 移除 TMS 依赖传播（PROPAGATE/dependency_index/stale 标记）——当前 L4 Truths 目录为空集运行，依赖传播引擎从未被真实触发，其复杂性未经验证。连山接入或 Truths 资产累积后再评估恢复。
+真值维护采用**精简版**：无依赖传播（PROPAGATE/dependency_index/stale 标记不存在），仅保留 ASSERT/RETRACT 两种状态操作。连山接入或 Truths 资产累积后再评估恢复传播机制。
 
 **保留的机制：**
 
@@ -783,10 +797,10 @@ data/                               ← 默认 data_root
 │   │   └── dead/                   ← 死信队列
 │   ├── knowledge/                  ← 归藏 认知仓库 (§6)
 │   └── tasks/
-│       └── {task_id}/            ← 根任务（V26.6 起：`{简述slug}-{YYYYMMDD-HHMMSS}`，见 §8.1）
+│       └── {task_id}/            ← 根任务（`{简述slug}-{YYYYMMDD-HHMMSS}`，见 §8.1）
 │           ├── meta.json           ← Task { id, depth:0, status }
 │           ├── trace.jsonl         ← 根层执行轨迹
-│           ├── deliverables/       ← LLM 产出
+│           ├── deliverables/       ← LLM 产出（含 handoff.md 交接物，V28 §8.18）
 │           └── children/           ← 递归子任务
 │               ├── 0/              ← depth:1
 │               │   ├── meta.json
@@ -809,7 +823,7 @@ data/                               ← 默认 data_root
 
 每层任务目录独立 `trace.jsonl`。`read_tree()` 递归遍历所有 `**/trace.jsonl` 按时间戳合并。单文件超过 10MB 自动轮转，保留最近 5 代。敏感信息（API Key）写入前脱敏。
 
-TraceHook 的 `on_tool_call` 同时收集**真实工具调用名**（V26.1 起）：FittingAgent 的 `tools_used` 统计改读此记录，不再对 LLM 响应文本做 contains 子串匹配（消除 LLM 正文提及工具名的伪阳性）。对话历史快照职责见 §8.1（ChatHistorySnapshotHook）。
+TraceHook 的 `on_tool_call` 同时收集**真实工具调用名**：FittingAgent 的 `tools_used` 统计读此记录（不解析 LLM 响应文本，避免 LLM 正文提及工具名的伪阳性）。对话历史快照职责见 §8.1（ChatHistorySnapshotHook）。
 
 ---
 
@@ -829,13 +843,13 @@ AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → Age
 - 认知更新通过归藏 YAML 文件持久化，下轮加载时自动生效
 - 整个系统 = 多瞬态任务节点系统：节点实例 = round × cycle × depth 的笛卡尔积，沿生成树展开（蒙特卡洛树式概率探索）、沿收敛树归并（马尔可夫链式状态转移与收敛），每一层递归与每一轮循环都是一次概率采样
 
-瞬态性保证：节点销毁后磁盘状态（checkpoint / chat_history / trace / deliverables）按 §7 原子持久化，崩溃恢复按恢复优先级链重建节点（`resume_history` > `decompose_result.json` > `checkpoint.json`）。
+瞬态性保证：节点销毁后磁盘状态（checkpoint / deliverables / trace）按 §7 原子持久化，崩溃恢复按恢复优先级链重建节点。**V28 恢复优先级链 = 产出继承**：`deliverables/`（含 `handoff.md`）> `decompose_result.json` > 重跑（`resume_history`/`chat_history` 仅作本节点断点续聊的最终兜底，**不再作为结果重建来源**——执行事实是唯一记忆，§1.4）。
 
 **恢复链对根任务与子任务同构生效**：子任务恢复由 RecursiveDecomposeTool 扫描 `children/` 时复用旧结果（rerun_of 索引）；根任务恢复由 `taiji run --resume <task_id>` 触发——runner 复用既有 task_id（不生成新 UUID），恢复 EngineContext（depth 从 meta.json 读取）后进入同一 `TpnCycle.execute` 恢复链。根/子共享同一段恢复代码，无特例。
 
-**对话历史增量快照（V26.1）**：Rig `chat()` 在 LLM 调用出错时提前返回、不回写 `chat_history`（仅成功时 `extend`）——仅靠 FittingAgent 成功路径的全量 save 会导致失败任务磁盘上恒为空历史，`--resume` 只能从空历史重跑整个 Fitting 阶段。为此在 FittingAgent 注册 **ChatHistorySnapshotHook**：每次 LLM 调用前（`on_completion_call`，含工具循环内每次调用）将完整对话（调用前 `history` + 本轮 `prompt`，均为 `rig::completion::Message`）按 `save_json_atomic` 原子快照到 `{task_dir}/chat_history.json`。失败/超时任务最多丢失最后一轮 in-flight 请求；成功路径的全量 save 保留作为最终一致性收尾。快照对根任务 `--resume` 与子任务 rerun 恢复同样生效。
+**对话历史增量快照**：Rig `chat()` 在 LLM 调用出错时提前返回、不回写 `chat_history`（仅成功时 `extend`）——仅靠 FittingAgent 成功路径的全量 save 会导致失败任务磁盘上恒为空历史，`--resume` 只能从空历史重跑整个 Fitting 阶段。为此在 FittingAgent 注册 **ChatHistorySnapshotHook**：每次 LLM 调用前（`on_completion_call`，含工具循环内每次调用）将完整对话（调用前 `history` + 本轮 `prompt`，均为 `rig::completion::Message`）按 `save_json_atomic` 原子快照到 `{task_dir}/chat_history.json`。失败/超时任务最多丢失最后一轮 in-flight 请求；成功路径的全量 save 保留作为最终一致性收尾。快照对根任务 `--resume` 与子任务 rerun 恢复同样生效。**V28 定位降级**：chat_history 仅为本节点断点续聊兜底（省 token），不作为跨层传递物、不作为结果事实来源（§1.4 / §8.18）。
 
-**任务目录持久化文件清单（V26.2，唯一事实——新增文件必须先入此清单，只写不读者禁止引入）**：
+**任务目录持久化文件清单（唯一事实——新增文件必须先入此清单，只写不读者禁止引入）**：
 
 | 文件 | 内容 | 写者 | 读者 | 用途 |
 |------|------|------|------|------|
@@ -848,31 +862,33 @@ AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → Age
 | `deliverables/` | 产物文件 | FittingAgent | 聚合、前端 | 交付物实体 |
 | `children/` | 子任务目录 | RecursiveDecomposeTool | 扫描复用 | 递归树实体 |
 | `trace.jsonl` | 事件审计（脱敏） | TraceHook / 手动 | read_tree | 审计与工具结果提取 |
+| `deliverables/handoff.md` | 交接产出物：front matter 结构化字段（failure_reason/degraded/output_refs）+ 正文环境信息（进度/剩余/决策/约束状态） | Fitting 超限/失败/取消路径（V28） | 父层、verify/converge、Meta 校准、恢复链（均经 deliverables/ 既有路径发现） | 产出即交接，残缺产出继承载体（§8.18） |
 
-> V26.2 已删除：`meta_conversation.json`（信息全部可推导）、`converge_state.json`（converge 幂等重放天然覆盖）。恢复链 `resume_history > decompose_result.json > checkpoint.json` 不受影响（死文件本无消费者）。
 
-**任务 ID 格式（V26.6）**：`{简述slug}-{YYYYMMDD-HHMMSS}`（如 `分析源码架构-20260807-061530`），由 `src/infra/task_id.rs` 生成——slug 取描述前 24 字符路径安全化（非字母数字→`-`、折叠连续破折号、去首尾破折号、空描述→`task`），时间戳为本地时间秒级。唯一性：根任务经 `ensure_unique` 检查 `tasks/` 目录已存在则追加 `-2/-3`；子任务追加 `-{index}`（同父并行不撞，跨父碰撞概率可忽略且无文件冲突——子任务目录在 `children/<idx>/`，task_id 仅作标识）。**chat session_id 保持 UUID**（`{data_root}/chat/{session_id}.json`，会话文件已持久化，不属任务 ID）。task_id 为纯字符串，无任何代码假设其 UUID 格式，`--resume`/`taiji trace` 输入与前端树显示同步可读化。
+**任务 ID 格式**：`{简述slug}-{YYYYMMDD-HHMMSS}`（如 `分析源码架构-20260807-061530`），由 `src/infra/task_id.rs` 生成——slug 取描述前 24 字符路径安全化（非字母数字→`-`、折叠连续破折号、去首尾破折号、空描述→`task`），时间戳为本地时间秒级。唯一性：根任务经 `ensure_unique` 检查 `tasks/` 目录已存在则追加 `-2/-3`；子任务追加 `-{index}`（同父并行不撞，跨父碰撞概率可忽略且无文件冲突——子任务目录在 `children/<idx>/`，task_id 仅作标识）。**chat session_id 保持 UUID**（`{data_root}/chat/{session_id}.json`，会话文件已持久化，不属任务 ID）。task_id 为纯字符串，无任何代码假设其 UUID 格式，`--resume`/`taiji trace` 输入与前端树显示同步可读化。
 
-**子任务状态一致性（V26.3）**：RecursiveDecomposeTool 错误路径 `abort_all()` 终止子任务后，`children/` 下 status=Running 的子任务必须统一落盘为 Failed（写失败仅 warn，不阻断父任务错误传播）——「超时/失败/取消正确落盘」声明覆盖所有任务节点，含被父任务中止的子任务；中止不产生虚假的 Running 残留。
+**子任务状态一致性**：RecursiveDecomposeTool 错误路径 `abort_all()` 终止子任务后，`children/` 下 status=Running 的子任务必须统一落盘为 Failed（写失败仅 warn，不阻断父任务错误传播）——「超时/失败/取消正确落盘」声明覆盖所有任务节点，含被父任务中止的子任务；中止不产生虚假的 Running 残留。
 
-### 8.2 异层同构（V26：单一模式，无分化）
+### 8.2 异层同构（结构同构，提示词按模式配对）
 
-`depth` 只改变编号，不改变目录布局、TPN 循环结构、工具注册面、prompt 模板、max_turns 与恢复路径。根任务和子任务执行**同一段代码、同一套配置**（V26 起无 AgentMode，此前 Orchestration/Execution 双模式分化已删除——模式分化导致工具面随 depth 变化，与异层同构声明矛盾）。
+`depth` 只改变编号，不改变目录布局、TPN 循环结构、上下文预算与恢复路径。根任务和子任务执行**同一段代码、同一套配置**。但每个节点的**提示词与工具注册面由元 Agent 权重更新时决策的阴阳配对模式决定**：
 
-- 单 FittingAgent 模板：prompt 同时包含「拆解优先 + 执行优先」融合引导（「可用 recursive_decompose 拆解，也可直接产出，由你判断」），是否拆解由 LLM 依据任务描述自主判断
-- 单 max_turns：Meta 6 / Fitting 30 / Causal verify·converge 10（V26 提升至 6：T4 实测 3 轮不足；V26.1 再升至 10：真实任务 6 轮仍溢出）
-- 递归层间通过 `MetaContext`（推理偏置注入）和 `ConvergenceDecision`（收敛结果上浮）传递信息
+- **模式决策**：MetaAgent 按递归层数规则（depth/max_depth，叶节点 `depth+1 >= max_depth` 硬性强制 Execution）+ 任务难易程度（复杂/多步/跨多维→Orchestration，原子/单步→Execution）决策 `MetaContext.mode`。根节点与 BACK_TO_META 重跑时由 MetaAgent 决策；子节点由父 LLM 在 `SubtaskSpec.mode` 按难度分配，`RecursiveDecomposeTool` 按深度规则兜底强制叶节点 Execution
+- **配对提示词**：Orchestration → 阳用编排模板（拆解+综合）、阴用收敛模板；Execution → 阳用执行模板（直接产出）、阴用验证模板
+- **工具面随模式分化**：`recursive_decompose` 仅编排模式注册（执行模式 LLM 不可见拆解工具，工具内部 mode guard 兜底）；5 L1 Skills + causal_verify 两模式均注册
+- 单上下文预算：全相位（Meta / Fitting / Causal）统一 250k 交接 / 300k 硬截止（V29 §8.19）；不再使用 max_turns 轮次限制
+- 递归层间通过 `MetaContext`（推理偏置注入 + mode）和 `ConvergenceDecision`（收敛结果上浮）传递信息
 - 递归终止仅靠 depth guard：`depth >= max_depth` 时 RecursiveDecomposeTool 拒绝拆解（MaxDepthExceeded）
 
-**权限同构（异层同构的权限维度）**：任务节点在任意深度保持相同的三相分工与权限配置——每个子循环节点与根节点一样：Fitting 相位持有全部执行工具（含 recursive_decompose）并受同一 SafetyHook 约束、Meta / Causal 相位持有只读收集工具（read / search / webfetch）且无执行工具。**权限模式与配置不随 depth 变化，权限边界随位置（task_dir）变化**（见 §8.9 工作区即权限边界）——不同深度不存在任何权限梯度。
+**权限同构（异层同构的权限维度）**：任务节点在任意深度保持相同的三相分工与权限配置——每个子循环节点与根节点一样：Fitting 相位持有执行工具（5 L1 Skills + causal_verify；编排模式另加 recursive_decompose）并受同一 SafetyHook 约束、Meta / Causal 相位持有只读收集工具（read / search / webfetch）且无执行工具。**权限模式与配置不随 depth 变化，权限边界随位置（task_dir）变化**（见 §8.9 工作区即权限边界）——不同深度不存在任何权限梯度，模式分化只影响提示词内容与拆解工具可见性。
 
 ### 8.3 TPN 只读 / DMN 单写者
 
 TPN 执行期间只读归藏。DMN Consumer 设计为唯一的写者（单线程后台任务），避免读写竞争。**当前 DMN Consumer 代码已实现但未激活（参见 §8.12）**——日常 TPN 运行中归藏为完全只读模式。激活后，TPN PASS → enqueue DMN → 单写者更新归藏资产，下轮 MetaAgent 加载时自动获取最新认知基础。
 
-### 8.4 LLM 路由内部化
+### 8.4 路由内部化（结构化信号 + LLM 裁决）
 
-TPN 循环的路由决策（PASS / BACK_TO_TPN / BACK_TO_META）由 CausalAgent 的 LLM 根据 VerificationReport 裁决。RecursiveRunner 只执行路由结果（递增循环计数器、重入对应阶段），不硬编码路由逻辑。
+TPN 循环的路由决策（PASS / BACK_TO_TPN / BACK_TO_META）由 CausalAgent 的 LLM 根据 VerificationReport 裁决。RecursiveRunner 只执行路由结果（递增循环计数器、重入对应阶段），不硬编码路由逻辑。**V28：结构化失败信号优先**——`failure_reason`（context_overflow / output_missing / constraint_violation / cognitive / degraded / other）由交接文件携带，命中分流表（§8.18）时直接路由；仅模糊地带（degraded / other）交 LLM 裁决兜底。
 
 ### 8.5 Hook 安全模型
 
@@ -882,17 +898,17 @@ SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到带工具的 Ri
 
 | 相位 | 工具注册 | SafetyHook | 权限角色 |
 |------|:---:|:---:|------|
-| MetaAgent | read + search + webfetch（只读收集 / 联网核实） | **挂载** | 认知者 + 收集者：LLM 收集任务上下文 / 父层 deliverables / 归藏资产与网络信息后更新权重，无执行面 |
-| FittingAgent | 5 L1 Skills + recursive_decompose + causal_verify | **挂载**（+ TraceHook） | 执行者：唯一持有变更世界工具、受安全约束的权限面 |
-| CausalAgent | read + webfetch（只读验证 / 联网核实） | **挂载** | 裁判者 + 收集者：LLM 逐文件核验 deliverables、联网核实外部事实后裁决路由，无执行面 |
+| MetaAgent | read + search + webfetch（只读收集 / 联网核实） | **挂载** | 认知者 + 收集者：LLM 收集任务上下文 / 父层 deliverables / 归藏资产与网络信息后更新权重并决策配对模式，无执行面 |
+| FittingAgent | 5 L1 Skills + causal_verify（两模式）；recursive_decompose（**仅编排模式**） | **挂载**（+ TraceHook） | 执行者：唯一持有变更世界工具、受安全约束的权限面；编排节点可拆解，执行节点专注直接产出 |
+| CausalAgent | read + webfetch（只读验证 / 联网核实） | **挂载** | 裁判者 + 收集者：LLM 逐文件核验 deliverables、联网核实外部事实后裁决路由（编排节点收敛模板 / 执行节点验证模板），无执行面 |
 
 **节点间权限同构**：所有任务节点（任意 depth / round / cycle）共享同一进程级 `SafetyHook` 单例（`build_engine` 创建一次，`Arc` 注入全部带工具的 Agent），规则一致、白名单一致——权限配置在节点间完全同构，不存在按深度 / 轮次 / 层级的权限分化。
 
 **带工具必有安全钩子（硬约束）**：任何相位只要注册工具（含只读收集工具），就必须挂载 SafetyHook——「无工具的相位允许不挂载，带工具的相位必须挂载」是相位权限闭合的底线。CausalAgent 的 LLM 验证路径（verify / converge 真实 LLM 调用 + read 逐文件核验）已在此约束下落地。
 
-**Rig 0.39 hook 挂载机制（V26.4 实测修正）**：`AgentBuilder::hook()` 是单槽覆盖式——链式 `.hook(a).hook(b).hook(c)` 只有 `c` 生效，多 hook 必须组合为一次挂载。FittingAgent 的 safety / trace / snapshot 三个 hook 经 `FittingHookSet` 组合（safety 优先、首个非 Continue 短路，违规工具不进入 trace 记录）；Meta / Causal / Chat 单 hook 直接挂载。任何相位新增第二个 hook 必须先查现有挂载点是否单槽。
+**Rig 0.39 hook 挂载机制**：`AgentBuilder::hook()` 是单槽覆盖式——链式 `.hook(a).hook(b).hook(c)` 只有 `c` 生效，多 hook 必须组合为一次挂载。FittingAgent 的 safety / trace / snapshot 三个 hook 经 `FittingHookSet` 组合（safety 优先、首个非 Continue 短路，违规工具不进入 trace 记录）；Meta / Causal / Chat 单 hook 直接挂载。任何相位新增第二个 hook 必须先查现有挂载点是否单槽。
 
-**L1 Skills 工具参数契约（V26.3）**：SkillTool 是单参 `input` 包装（Rig ToolDefinition 暴露 `input: string`，`call` 内对 input 值做二级 JSON 解析——JSON 字符串解析为对象，失败保留原文）。各内置工具的参数键必须与 LLM 可用的传参形式兼容：BashTool 读 `command`、ReadTool 读 `path`，**必须同时支持 `input` 键直读**（`args.get("input")` 为纯字符串时直接当命令/路径）——否则 LLM 按 schema 传 `{"input":"ls"}` 永远报 missing 参数，被迫试错摸索 `{"input":"{\"command\":\"ls\"}"}`（每次 resume 重跑重新踩坑，系统性吞噬预算）。ToolDefinition 的 description 必须包含用法示例（双保险：实现容错 + schema 引导）。write/search/webfetch 参数键同理自查。
+**L1 Skills 工具参数契约**：SkillTool 是单参 `input` 包装（Rig ToolDefinition 暴露 `input: string`，`call` 内对 input 值做二级 JSON 解析——JSON 字符串解析为对象，失败保留原文）。各内置工具的参数键必须与 LLM 可用的传参形式兼容：BashTool 读 `command`、ReadTool 读 `path`，**必须同时支持 `input` 键直读**（`args.get("input")` 为纯字符串时直接当命令/路径）——否则 LLM 按 schema 传 `{"input":"ls"}` 永远报 missing 参数，被迫试错摸索 `{"input":"{\"command\":\"ls\"}"}`（每次 resume 重跑重新踩坑，系统性吞噬预算）。ToolDefinition 的 description 必须包含用法示例（双保险：实现容错 + schema 引导）。write/search/webfetch 参数键同理自查。
 
 ### 8.6 递归防护
 
@@ -902,11 +918,12 @@ SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到带工具的 Ri
 | 子任务上限 | `subtasks.len() ≤ max_subtasks` | 4 |
 | TPN 轮次 | `round_counter ≤ max_rounds` | 10 |
 | TPN 循环 | `cycle_counter ≤ max_cycles` | 3 |
+| 上下文预算 | `usage.input_tokens ≥ handoff_tokens` → 交接（context_overflow）；`≥ hard_cutoff_tokens` → 硬截止 FAIL（V29 §8.19） | 250k / 300k |
 | 取消传播 | `CancellationToken` 传递到所有递归层（parent→child_token 链接） | — |
-| 嵌套 task_id | 每个递归层使用独立 UUID v4，`parent_id` 指向父层 | — |
+| 嵌套 task_id | 每层使用可读 task_id（`{简述slug}-{时间戳}`，子任务追加 `-{index}`），`parent_id` 指向父层 | — |
 | 执行超时 | tokio::timeout 包裹整个 execute()（超时 → cancel + 写 Failed） | 600s |
 
-> V26 变更：删除「模式约束」行（AgentMode 已删除，递归终止仅靠深度限制）。默认值统一以 `config.rs` RuntimeConfig 为准（此表为真实默认值），配置文件可覆盖。
+> 默认值统一以 `config.rs` RuntimeConfig 为准（此表为真实默认值），配置文件可覆盖。
 
 ### 8.7 Rig 本地化（Vendor）
 
@@ -933,18 +950,19 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 
 1. **查询归藏** — 根据 `task_type_tags` 标签匹配 `prompts/` 层的 PromptAsset，按 `confidence` 降序排列
 2. **置信度过滤** — 仅保留 `confidence >= 0.3` 的高置信度资产
-3. **LLM 编排** — 将匹配的 prompt 资产和任务描述一起传给 LLM，组合三份完整 system prompt（`fitting_system_prompt`、`verify_system_prompt`、`converge_system_prompt`）
-3. **温度提取** — 从最高置信度的匹配 PromptAsset 提取 `temperature` 字段；若未设置，回退到 Base 模板默认温度（见 §8.10）；注入 `MetaContext.temperature`
-4. **注入 MetaContext** — 三份提示词作为 `Option<String>` 字段注入 MetaContext，同时注入 `temperature`，传递到下游 Agent
-5. **降级路径** — 无归藏资产或 LLM 编排失败时，全部设为 `None`，下游 Agent 自动使用内置硬编码模板
+3. **模式决策** — 结合递归层数规则（builder 注入 depth / max_depth：`depth+1 >= max_depth` 必须 Execution，其余按深度倾向）+ 任务难易程度（复杂/多步/跨多维→Orchestration，原子/单步→Execution），决策当前节点 `mode`
+4. **LLM 编排** — 将匹配的 prompt 资产、任务描述、深度规则与难度评估一起传给 LLM，**按所选模式配对**组合三份完整 system prompt：Orchestration → 编排拟合 + 收敛（verify 可省略）；Execution → 执行拟合 + 验证（converge 可省略）。输出含 `mode` 字段
+5. **温度提取** — 从最高置信度的匹配 PromptAsset 提取 `temperature` 字段；若未设置，回退到 Base 模板默认温度（见 §8.10）
+6. **注入 MetaContext** — 三份提示词作为 `Option<String>` 字段 + `mode` 注入 MetaContext，传递到下游 Agent
+7. **降级路径** — 无归藏资产或 LLM 编排失败时，全部设为 `None`、mode 默认 Orchestration，下游 Agent 按 mode 自动使用对应的内置硬编码模板
 
 **下游消费规则：**
 
 | Agent | 方法 | 优先级 | 降级 |
 |-------|------|--------|------|
-| FittingAgent | `build_system_prompt()` | `meta_ctx.fitting_system_prompt` → `Some` 时直接返回，不编译模板；`meta_ctx.temperature` → `Some` 时覆盖默认温度 | 单一 Base 模板 + Base 温度默认值 |
-| CausalAgent.verify | `verify(output, ..., meta_ctx)` | `meta_ctx.verify_system_prompt` → 作为 system prompt | `VERIFY_SYSTEM_PROMPT` 常量 |
-| CausalAgent.converge | `converge(results, ..., meta_ctx)` | `meta_ctx.converge_system_prompt` → 作为 system prompt | `CONVERGE_SYSTEM_PROMPT` 常量 |
+| FittingAgent | `build_system_prompt()` | `meta_ctx.fitting_system_prompt` → `Some` 时直接返回，不编译模板 | 按 `meta_ctx.mode` 选编排模板 / 执行模板；recursive_decompose 仅编排模式注册 |
+| CausalAgent.verify | `verify(output, ..., meta_ctx)` | `meta_ctx.verify_system_prompt` → 作为 system prompt | 按 `meta_ctx.mode` 选 `VERIFY_ORC_SYSTEM_PROMPT` / `VERIFY_EXEC_SYSTEM_PROMPT` |
+| CausalAgent.converge | `converge(results, ..., meta_ctx)` | `meta_ctx.converge_system_prompt` → 作为 system prompt | 按 `meta_ctx.mode` 选 `CONVERGE_ORC_SYSTEM_PROMPT` / `CONVERGE_EXEC_SYSTEM_PROMPT` |
 
 ### 8.9 绝对路径单向传递与权限收敛
 
@@ -968,31 +986,32 @@ DecomposeResult.deliverables → 父 CausalAgent.converge() 逐文件检查
 
 > 本节的路径权限与 §8.5 的相位权限分工共同构成节点间权限同构：每个任务节点（任意 depth）都遵循相同的「父→子只读、子→父聚合、兄弟隔离」目录规则——权限同构覆盖工具面（§8.5）与数据面（本节）两个维度。
 >
-> **工作区即权限边界**：节点权限范围 = 其 `task_dir`（根任务为 `{task_id}/`，子任务为 `children/N/`）——位置与权限一体两面：区内自由读写、区外不可达。本节路径规则（父→子只读、兄弟隔离、绝对路径单向传递）正是这一边界的载体。
+> **工作区即权限边界**：节点权限范围 = 其 `task_dir`（根任务为 `{task_id}/`，子任务为 `children/N/`）——位置与权限一体两面：区内自由读写、区外不可达。本节路径规则（父→子只读、**V30：兄弟贡品公开只读**、绝对路径单向传递）正是这一边界的载体。
 
 | 方向 | 规则 | 保证方式 |
 |------|------|---------|
 | 父→子 | 父 deliverables 绝对路径注入子 `YangPrompt.parent_deliverables`，**只读参照** | 硬编码模板指令：子只能 read，不能 write 父目录 |
 | 子→父 | 子 deliverables 绝对路径通过 `DecomposeResult.deliverables` 返回父层 | `recursive_decompose` 中硬编码聚合 `tpn_result.deliverables` |
-| 兄弟隔离 | 子节点不可见兄弟目录 | 文件系统布局保证：`children/{0}/` 与 `children/{1}/` 各自独立 |
+| 兄弟（V30 收窄） | 兄弟贡品（deliverables/）**公开可发现可读**（会盟注入目录 + read 工具）；**写入封闭**——write 目标必须在**本任务 task_dir 内**（封地自治，FittingHookSet 域校验强制）；兄弟任务目录内**非 deliverables 文件（中间记忆）不可见** | 文件系统布局保证：`children/{0}/` 与 `children/{1}/` 各自独立；SafetyHook 黑名单 + FittingHookSet 写路径域校验（§8.20 会盟） |
 
 **硬编码保证（不可被 LLM 绕过）：**
 
-1. **阳 Fitting 模板（单模板，V26）**：必须明确列出所有产物文件的绝对路径；prompt 同时引导「拆解优先 + 执行优先」，是否拆解由 LLM 自主判断；子产物在 convergent 阶段可见
-3. **阴 verify 模板**：接收 `deliverables` 路径，调用 `read` 工具逐文件检查
-4. **阴 converge 模板**：接收所有子 `deliverables`，调用 `read` 逐文件检查跨子任务一致性
+1. **阳 Fitting 模板（按模式配对）**：必须明确列出所有产物文件的绝对路径。编排模板引导「拆解优先 + 综合」（recursive_decompose 可用，含子任务模式分配指南）；执行模板引导「直接产出」（无 recursive_decompose，专注 L1 工具完成）；子产物在 convergent 阶段可见。**V30 身份段**：模板注入「身份与地位」段（内容/类别/父/子/兄弟贡品索引/权限教学，§8.20）
+3. **阴 verify 模板（按模式配对）**：接收 `deliverables` 路径，调用 `read` 工具逐文件检查（编排节点查 MECE 完备性与综合质量，执行节点查直接产出合规）
+4. **阴 converge 模板（按模式配对）**：接收所有子 `deliverables`，调用 `read` 逐文件检查跨子任务一致性（编排节点收敛子结果）
 
 绝对路径以 `task_dir` 为根——每层递归有独立的 `task_dir`（`data/tasks/{root}/children/{i}/...`），子层不会因为路径冲突覆盖父层文件。
 
 ### 8.10 四象温度（Base 模板默认温度）
 
-四个 Base 硬编码模板根据各自职责设置不同温度，引导 LLM 行为偏向：
+六个 Base 硬编码模板（Fitting 编排/执行、Causal 验证/收敛各按模式配对）根据各自职责设置不同温度，引导 LLM 行为偏向：
 
 | Base 模板 | 默认 temperature | 设计依据 |
 |-----------|:---:|------|
-| FittingAgent（单模板，V26 统一） | `0.7` | 中高温度平衡拆解探索与直接产出（原 ORC 0.8 / EXEC 0.5 合并） |
-| CausalAgent 验证 | `0.2` | 低温度严格控制，严格对照约束逐条检查 |
-| CausalAgent 收敛 | `0.2` | 低温度严格判决，不引入额外噪声 |
+| FittingAgent 编排（Orchestration） | `0.8` | 高温度鼓励拆解探索与多方案发散 |
+| FittingAgent 执行（Execution） | `0.5` | 中低温度聚焦直接产出，减少漂移 |
+| CausalAgent 验证（verify，两模式） | `0.2` | 低温度严格控制，严格对照约束逐条检查 |
+| CausalAgent 收敛（converge，两模式） | `0.2` | 低温度严格判决，不引入额外噪声 |
 
 温度优先级：`PromptAsset.temperature`（最高）→ Base 模板默认值 → `TaijiConfig` 全局默认值（`0.7`）。
 
@@ -1018,7 +1037,7 @@ DMN Consumer 代码已完整实现并测试通过，但日常 `taiji run` 不启
 
 ### 8.13 真值维护精简 (Truth Maintenance — Simplified)
 
-> **V22 变更：** 原 TMS（ASSERT/RETRACT/PROPAGATE + `justification_depends_on` 依赖链 + `dependency_index` 反向索引）已从蓝图移除。移除理由：
+真值维护采用**精简版**，不含完整 TMS（ASSERT/RETRACT/PROPAGATE + `justification_depends_on` 依赖链 + `dependency_index` 反向索引）。精简理由：
 > - **空集运行** — L4 Truths 目录当前为空，TMS 传播引擎从未被真实数据触发，复杂性未经验证
 > - **与 ConstraintEngine 职责重叠** — ConstraintEngine 已通过 Hard/Soft severity + active/retracted 状态过滤实现核心校验，TMS 的依赖传播是叠加的增量收益
 > - **连山接入后重新评估** — 若未来 Truths 资产累积且需要跨约束依赖推理，再恢复 PROPAGATE 机制
@@ -1027,9 +1046,8 @@ DMN Consumer 代码已完整实现并测试通过，但日常 `taiji run` 不启
 - `justification` 字段保留在 TruthConstraint 类型中，作为审计信息（为什么成立）
 - ConstraintEngine 只加载 `active` 状态的 Truth，`retracted`/`stale` 不参与前置检查
 
-**实现策略：**
-- `TruthConstraint` 类型中移除 `justification_depends_on` 字段（代码同步时执行）
-- `PropagationEngine`、`GridRewireEngine`、`RelationEngine` 模块标记为弃用，代码同步时移除
+**实现事实：**
+- `TruthConstraint` 无 `justification_depends_on` 字段；`PropagationEngine`、`GridRewireEngine`、`RelationEngine` 模块不存在于代码中
 
 ### 8.14 流式输出协议 (ChatAgent Streaming)
 
@@ -1053,7 +1071,7 @@ pub struct ServerResponse {
     pub ok: bool,
     pub data: Option<serde_json::Value>,    // 最终完整响应（兼容旧版）
     pub error: Option<String>,
-    // V24 新增流式字段（均 skip_serializing_if = "Option::is_none"）
+    // 流式字段（均 skip_serializing_if = "Option::is_none"）
     pub chunk: Option<String>,              // 逐文本 delta
     pub stream_done: Option<bool>,          // true = 流结束
 }
@@ -1118,7 +1136,115 @@ ChatAgent **不进 TPN 循环**：它是旁路对话系统，不参与三相递�
 - **读取模式**：ChatAgent 构造时从文件加载历史；文件不存在 → 空历史
 - **24h 清理**：`chat/` 目录下超过 24h 未修改的 `.json` 文件可被后台 GC 清理（轻量实现：每次新连接时扫描删除过期文件）
 
+### 8.18 交接文件机制与失败分流 (Artifact Handoff & Failure Routing) — V28
 
+**原则：执行事实是唯一记忆，产出即交接。** 瞬态 agent（Meta / Fitting / Causal 相位执行器）结束即弃，唯一留存是产出物。中间记忆（chat_history / meta_ctx 推理过程）不跨层传播、不作为恢复与路由的事实来源（§1.4）。
+
+**交接物 = `deliverables/handoff.md`——产出物之一，不设独立交接文件。** 写者：Fitting 超限/失败/取消路径；读者：父层、同任务其他 agent、恢复链、MetaAgent 校准。置于 `deliverables/` 内保证**可发现性**：
+
+- **父 agent**：RecursiveDecomposeTool 注入 `parent_deliverables`（目录索引）→ 交接物自动可见
+- **同任务其他 agent（阴侧）**：CausalAgent verify/converge 本来就逐文件核验 `deliverables/` → 自然读到
+- **元校准**：BACK_TO_META 读 `deliverables/` 全部产出（含 handoff.md）
+- **同级任务 agent**：独立任务互不读取；需协作时信息经父层聚合传递
+- **恢复链**：产出继承 = 读 `deliverables/`
+
+```markdown
+---
+phase: fitting
+failure_reason: context_overflow | output_missing | constraint_violation | cognitive | degraded | other
+degraded: false
+output_refs: [deliverables/xxx.md]
+---
+# 交接信息（环境信息）
+
+## 进度
+已完成 A、B，未完成 C
+
+## 剩余工作
+- C 需分解为 C1/C2
+
+## 决策
+- 选用方案 X
+
+## 约束状态
+无违规
+```
+
+- **触发**：FittingAgent 上下文长度 ≥ 250k（V29 精准 token 统计，替换 max_turns 轮次）、LLM 降级、失败、取消——一律先写 `deliverables/handoff.md` 再返回，禁止裸 `LLMCallFailed` 上抛（**残缺产出 > 无产出**）
+- **收尾调用（LLM 压缩收尾，交接 = 压缩产物）**：交接文件是上下文压缩的产物——超限/失败时用**一次聚焦的瞬态调用**把本拟合对话压缩为结构化交接正文（进度 / 剩余 / 决策 / 约束 / 失败原因），只做「收尾写 handoff.md」不续聊。这与 Prime Agent compaction 同构（结构化摘要 + 保留执行状态），但**消费方向不同**（摘要回注入同会话 vs 跨层传给下一瞬态 agent 作恢复）且**多了编排失败语义**（超限触发本身就是任务粒度错误 = 编排失败的硬证据，驱动 BACK_TO_TPN / 连续超限强制残缺产出——Prime Agent 无此信号，其压缩是常规操作）。
+  - **压缩输入**：chat_history 序列化（`[User]/[Assistant]/[Tool result]` 格式，工具结果截断 2000 字符）→ 截断到 `compress_input_tokens`（默认 20k，**首部 2k 保留任务目标 + 尾部最新状态**，中间省略标记）——超限路径不得再花一次大调用
+  - **压缩输出**：结构化 Markdown 正文（## 进度 / ## 剩余工作 / ## 决策 / ## 约束状态 / ## 已产出文件），max_tokens 2048，temperature 0.2
+  - **降级链**：LLM 压缩失败 / 超时（30s）→ 降级静态正文（v1 确定性收尾），仅 `warn!` 不阻断错误传播——交接文件写失败与压缩失败均不得阻断「残缺产出 > 无产出」
+  - **禁止对话换皮**：交接正文只含从对话中可证实的执行事实（环境信息），不含对话过程本身——否则就是中间记忆跨层（§1.4 违规）
+- **环境信息精炼**：handoff.md 只含环境事实（进度 / 剩余 / 决策 / 约束 / 失败原因）与产出引用，**不含对话过程**——否则就是中间记忆换皮（LLM 压缩收尾只做提取，不做转录）
+- **连续超限上限**：同一路径连续 2 次因超限回退 → 强制「残缺产出即最终产出」，不再拆解（防止拆解粒度错误导致递归超限）
+
+**失败分流（结构化信号运行时捕获优先，LLM 裁决兜底）**：failure_reason 由 Fitting 错误路径**运行时直接捕获**（≥ 250k → context_overflow、≥ 300k → hard_cutoff 等，V29 §8.19），随返回路径传给 TpnCycle 路由，**不依赖解析交接文件**；写入 handoff.md 仅作审计与 LLM 消费。
+
+| failure_reason | 路由 | 语义 |
+|---|---|---|
+| context_overflow | BACK_TO_TPN | 粒度错误 → 阳基于产出递归分解 |
+| output_missing | BACK_TO_TPN | 同上（无产出 = 任务未拆到位） |
+| constraint_violation (Hard) | BACK_TO_META | 约束缺失 → 元校准 Truths 与权重 |
+| cognitive | BACK_TO_META | 策略/资产问题 → 元基于产出校准 |
+| degraded | LLM 裁决 | 降级产物质量存疑 |
+| other | LLM 裁决 | 兜底 |
+
+**恢复优先级链（V28 修订）**：`deliverables/`（含 handoff.md）> `decompose_result.json` > 重跑——chat_history 仅本节点断点续聊兜底，不再作为结果重建来源（§8.1 同步）。
+
+**BACK_TO_TPN 语义（V28 修订）**：不再以「原 description + chat_history 重放」重跑——读取 `deliverables/`，FittingAgent **基于前一瞬态产出递归分解**。
+
+**BACK_TO_META 语义（V28 修订）**：MetaAgent 输入增加前一瞬态产出摘要（`MetaAgentBuilder.run(description, tags, handoff)`，契约 6），基于失败产物**校准权重与认知资产**（归藏保持只读，校准结果注入 MetaContext），不再空手重跑。
+
+**不做上下文压缩（特意设计）**：上下文窗口是单次概率拟合的采样空间。超限即粒度错误信号，动作为交接 + 拆解，而非压缩后续跑——压缩把过期中间记忆重新注入新采样，污染拟合（§1.4）。
+
+### 8.19 上下文窗口预算 (Context Window Budget) — V29
+
+**轮次不反映上下文消耗，弃用 max_turns。** Rig `max_turns` 是 LLM 调用轮数计数器（旧默认：Meta 6 / Fitting 30 / Causal 10），与 token 消耗不对应——一次工具调用可返回 10k tokens 工具结果，30 轮可能远超窗口。V29 起 TPN 内瞬态 agent（Meta / Fitting / Causal）统一使用**精准上下文长度统计**：
+
+- **统计源**：`CompletionResponse.usage.input_tokens`（provider 报告的真实请求 token 数，含历史重放与工具结果），经 `on_completion_response` hook 累计（FittingHookSet 内 ContextLimiter；Meta / Causal 同机制挂载）
+- **阈值**（`config.json → context_limits`，默认值）：
+
+| 阈值 | 动作 |
+|---|---|
+| `handoff_tokens` = 250k | 超限 → `HookAction::Terminate("context_overflow")` → **必须写 `deliverables/handoff.md`**（残缺产出 + 环境信息，§8.18）→ failure_reason=context_overflow → BACK_TO_TPN → 阳基于产出递归分解 |
+| `hard_cutoff_tokens` = 300k | 硬截止 → `Terminate("hard_cutoff")` → 写交接文件 → **直接上报 FAIL**，不进 BACK_TO_* 循环（预算保护） |
+| `compress_input_tokens` = 20k | 收尾压缩输入截断上限（§8.18 LLM 压缩收尾）：序列化对话截断到此量（首部 2k + 尾部，中间省略标记），防超限路径再花大调用 |
+
+- **余量设计**：250k→300k 的 50k 余量即「收尾写交接」预算（§8.18 收尾调用）——触发后 LLM 状态已差也不影响交接落盘
+- **路由信号**：failure_reason = context_overflow / hard_cutoff 由运行时捕获随返回路径传递（§8.18 分流表；hard_cutoff 等效 context_overflow 但强制 FAIL）
+- **轮次计数器降级**：`max_rounds`（BACK_TO_TPN 重试上限）/ `max_cycles` 保留为循环防护（§8.6），不再承担上下文管理职责——计数器防死循环，token 预算管上下文，职责分离
+- **ChatAgent 例外**：交互式对话保留 `max_turns=20`（单轮交互语义，非长程概率拟合，不适用交接/拆解回路）
+
+---
+
+### 8.20 分封制：任务自我认知（身份 + 地位）与会盟 — V30
+
+**管理模型 = 分封制。** 根任务（天子）分封子任务（诸侯），诸侯可再分封；封地（task_dir）自治，贡品（deliverables/）公开陈列，中间记忆（chat_history / meta_ctx / trace 等）仅本节点可见；瞬态生命周期——任务即用即弃，唯一遗存是产出（§1.4）。
+
+**任务自我认知**（注入阳 Agent system prompt 的「身份与地位」段，`build_identity_section`）：
+
+| 要素 | 内容 | 来源（确定性） |
+|------|------|------|
+| 身份·内容 | task description | meta.json.description（创建时入册） |
+| 身份·类别 | 编排/执行（阳）、验证/收敛（阴） | **元权重更新阶段确定**：MetaContext.mode（§8.8）；模板已教学 |
+| 身份·兄弟 | 同级子任务贡品索引 | 会盟注入：YangPrompt.sibling_deliverables |
+| 身份·父 | parent_id + 父 description | meta.json.parent_id → 父 meta.json（根任务注明「根任务（天子）」） |
+| 身份·子 | subtask_ids | meta.json.subtask_ids |
+| 地位·层级 | depth / max_depth | EngineContext + config（§8.6） |
+| 地位·权限 | 可读写本任务 deliverables/；父产出与兄弟贡品只读；中间记忆仅本节点可见 | SafetyHook 执行层强制（§8.5/§8.9）+ 教学层显式告知 |
+
+**确定性原则**：身份与地位全部由系统赋予——创建时入册（内容/父/子）、元阶段决策（类别）、递归结构派生（层级）、分封时快照（兄弟）——**禁止 LLM 分类或运行时推断**。同一条创建路径 → 同一身份，可复现、可审计。
+
+**会盟（兄弟贡品发现）**：RecursiveDecomposeTool 分封时向子任务注入**兄弟贡品陈列室目录**（`children/<idx>/deliverables/` 绝对路径，BTreeMap 有序扫描，排除自身——注入目录而非文件快照：同批并行兄弟在分封时点尚无产出，目录 = 动态发现入口，子任务执行中可经 read 工具随时发现陆续陈列的贡品；跨轮/rerun 同样有效）。读取由子任务自行 read（贡品公开陈列语义）。
+
+**能看不能写（执行层强制）**：兄弟关系是**单向观摩**——read 开放（贡品公开陈列，父产出与兄弟贡品可读），write 封闭（封地自治：写入必须落在本任务 `task_dir` 内）。执行层强制 = `FittingHookSet` 写路径域校验（`on_tool_call` 对 write 工具目标路径做归一化前缀检查，`task_dir` 外一律 `ToolCallHookAction::skip` + warn）——SafetyHook 黑名单只拦 `..`/`~`/`/etc` 等，绝对路径直写兄弟目录（无 `..`）不触发，必须域校验兜底（与全局单例 SafetyHook 不冲突：域校验持有 per-agent task_dir，放 FittingHookSet 转发链）。兄弟任务目录内非 deliverables 文件（中间记忆）不可读不可写；兄弟间一切通信汇总由父层处理（聚合 → converge → BACK_TO_TPN 注入）。
+
+**贡品可见性修订（§8.9 兄弟隔离条款收窄）**：兄弟隔离收窄为「兄弟任务目录内非 deliverables 文件不可见」——贡品跨兄弟**公开可发现可读**；中间记忆仍隔离。SafetyHook 黑名单（`..` / `~` / 系统路径）不拦截任务树内贡品绝对路径。
+
+**无降级原则（V30 起新代码）**：禁止降级兜底——新代码读身份册失败 / 会盟扫描失败一律错误上抛（`TaijiError`），问题暴露后修根因，不用默认值掩盖。「无父（根任务，parent_id=None）」与「无兄弟（children/ 为空）」是**状态分支**，非降级。既有降级点（MetaContext::empty、Base 模板、压缩静态正文、load_json_optional 等）维持现状，改造另立章节。
+
+**注入实现**：`build_identity_section(engine_ctx, meta_ctx) -> Result<String>`（fitting.rs 同步函数）读本册 + 父册 + meta_ctx.mode + 兄弟索引 → 「身份与地位」段 push 到 system_prompt 末尾（归藏资产与 Base 模板统一生效，与 §8.19 预算纪律同模式）。不注入 Meta/Causal（Causal 核验本任务贡品无需兄弟；Meta 校准走既有 handoff 路径）。
 
 ---
 
@@ -1215,7 +1341,7 @@ pub enum ClientMessage {
 ```rust
 /// 核心 → 前端 的定向响应（仅发起请求的客户端收到）。
 ///
-/// # V24 流式扩展
+/// # 流式扩展
 ///
 /// `chunk` + `stream_done` 字段支持逐 token 流式推送。
 /// 流式模式下：每个文本 delta 通过 mpsc 通道发送一帧，前端累积渲染。
@@ -1231,10 +1357,10 @@ pub struct ServerResponse {
     pub data: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
-    /// V24: 流式文本 chunk（增量 delta）。
+    /// 流式文本 chunk（增量 delta）。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub chunk: Option<String>,
-    /// V24: 流式传输是否结束。
+    /// 流式传输是否结束。
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stream_done: Option<bool>,
 }
@@ -1242,7 +1368,7 @@ pub struct ServerResponse {
 
 **前端鉴别方式：** JSON 消息中若存在 `requestId` 字段 → `ServerResponse`（含可能的流式 chunk）；否则 → `TaskEvent`（广播事件）。
 
-**流式处理逻辑（V24 新增）：**
+**流式处理逻辑：**
 ```
 收到 ServerResponse:
   if msg.chunk != null && msg.streamDone != true:
@@ -1444,7 +1570,7 @@ fn spindle_layout(nodes: Vec<SpindleNode>) -> Vec<PositionedNode> {
 | 13 | `WsServer::broadcast(event: TaskEvent)` | WebSocket 广播：将 TaskEvent 推送至所有连接的 WebSocket 客户端（无变化） |
 | 14 | `TaskTreeBuilder::build(root_task_id) -> TaskTreeSnapshot` | 扫描 `data/tasks/{root}/children/` 递归目录树，构建 SpindleNode 列表 + 边 |
 | 15 | `WsHandler::submit_review(intervention: YinIntervention, data_root: &Path) -> Result<()>` | 前端审批提交：将人工干预写入 `review.json` |
-| 16 | `ChatAgentBuilder.chat(message, chat_history: &mut Vec<Message>, on_chunk: Box<dyn Fn(String) + Send + Sync>) -> Result<String, TaijiError>` | **V24 新增**。创建 Rig Agent（5 Skills + SafetyHook，`max_turns=20`），`stream_chat()` 遍历 `MultiTurnStreamItem`，提取 `Text` delta 逐 delta 回调 `on_chunk`。`chat_history` 可变借用，内部 `run_stream()` 完成后自动将本轮 user + assistant + tool 消息追加到历史，`save_json_atomic` 持久化。`context_task_id` 是 Builder 构造时的字段（非 per-message 参数）。不注册 recursive_decompose/causal_verify。返回最终响应文本 |
+| 16 | `ChatAgentBuilder.chat(message, chat_history: &mut Vec<Message>, on_chunk: Box<dyn Fn(String) + Send + Sync>) -> Result<String, TaijiError>` | 创建 Rig Agent（5 Skills + SafetyHook，`max_turns=20`），`stream_chat()` 遍历 `MultiTurnStreamItem`，提取 `Text` delta 逐 delta 回调 `on_chunk`。`chat_history` 可变借用，内部 `run_stream()` 完成后自动将本轮 user + assistant + tool 消息追加到历史，`save_json_atomic` 持久化。`context_task_id` 是 Builder 构造时的字段（非 per-message 参数）。不注册 recursive_decompose/causal_verify。返回最终响应文本 |
 | 17 | `WsHandler::handle_chat_message(message, session_id, context_task_id, state, on_chunk: Box<dyn Fn(String) + Send + Sync>) -> Result<(String, String), TaijiError>` | WS handler 层：解析/生成 session_id（session_id 为空时 `Uuid::new_v4()`），调用 `AgentFactory.create_chat_agent(session_id, context_task_id, None, None)` → `builder.chat()`。`on_chunk` 转发到 `WsServer::send_to` 逐 chunk 推送（`ServerResponse::chunk`）。完成时 `ServerResponse::stream_done` 携带 `{"text": final_text, "sessionId": resolved_session_id}`。返回 `(final_text, resolved_session_id)` |
 | 18 | `WsHandler::get_task_tree(root_task_id: &str, data_root: &Path) -> Result<TaskTreeSnapshot>` | 前端主动拉取完整任务树快照 |
 | 19 | `WsHandler::list_tasks(data_root: &Path) -> Result<Vec<String>>` | 列出所有根任务 ID（按 mtime 倒序） |

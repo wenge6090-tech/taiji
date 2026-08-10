@@ -107,13 +107,22 @@ impl AgentFactory {
     /// registers read-only collection tools (`read` / `search` / `webfetch`)
     /// and is limited to `max_turns = 6` (collect → extract); the shared
     /// process-wide [`SafetyHook`] is mounted — "带工具必有安全钩子" (蓝图 V25).
+    /// `depth` / `max_depth` are injected into the mode-decision prompt
+    /// (递归层数规则, V27).
     ///
     /// **LLM config**: resolved from `agent_overrides["meta"]`, falling back
     /// to the default provider + model.
-    pub fn create_meta_agent(&self, task_id: &str) -> Result<MetaAgentBuilder, TaijiError> {
+    pub fn create_meta_agent(
+        &self,
+        task_id: &str,
+        depth: u32,
+        max_depth: u32,
+    ) -> Result<MetaAgentBuilder, TaijiError> {
         let (_provider, model) = self.agent_llm_config("meta");
         tracing::debug!(
             task_id,
+            depth,
+            max_depth,
             model = %model,
             "Creating MetaAgent"
         );
@@ -124,6 +133,8 @@ impl AgentFactory {
             &model,
         )
         .max_turns(6)
+        .depth(depth)
+        .max_depth(max_depth)
         .safety_hook(self.safety_hook.clone()))
     }
 
@@ -156,8 +167,12 @@ impl AgentFactory {
     /// The FittingAgent is configured with the task's `depth` and engine
     /// context.  Its Rig agent receives:
     /// - tools matched by [`SkillTriggerEngine`]
-    /// - built-in `recursive_decompose` and `causal_verify` tools
+    /// - built-in `recursive_decompose`（仅编排模式注册）and `causal_verify` tools
     /// - [`SafetyHook`] and [`TraceHook`] registered as prompt hooks
+    ///
+    /// **V27 阴阳配对模式**：`mode` 取自 `meta_ctx.mode`（由 MetaAgent 权重更新
+    /// 按深度规则 + 难度决策），决定阳 Agent 的模板（编排/执行）与
+    /// recursive_decompose 注册面。
     ///
     /// **Note**: this method takes `self: &Arc<Self>` because the returned
     /// builder retains a clone of the factory for spawning sub-agents during
@@ -173,11 +188,13 @@ impl AgentFactory {
         tracing::debug!(
             task_id = %engine_ctx.task_id,
             depth,
+            mode = ?meta_ctx.mode,
             model = %model,
             "Creating FittingAgent"
         );
         Ok(FittingAgentBuilder::new(
             depth,
+            meta_ctx.mode,
             meta_ctx.clone(),
             engine_ctx.clone(),
             self.clone(),
@@ -413,11 +430,14 @@ mod tests {
         let config = make_config();
         let (factory, tmp_dir) = build_factory(config).await;
         let builder = factory
-            .create_meta_agent("test-task-1")
+            .create_meta_agent("test-task-1", 0, 2)
             .expect("MetaAgentBuilder creation");
         // Verify the builder is properly initialised by checking internal
         // fields through its public API (run returns a MetaContext).
-        let ctx = builder.run("test task", &[]).await.expect("MetaAgent run");
+        let ctx = builder
+            .run("test task", &[], None)
+            .await
+            .expect("MetaAgent run");
         assert!(ctx.constraints.is_empty());
         // Cleanup
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;

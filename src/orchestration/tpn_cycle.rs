@@ -198,6 +198,8 @@ impl TpnCycle {
                 Some(ref ctx) => ctx.clone(),
                 None => MetaContext::empty(),
             };
+            // V27 深度规则兑底：parent-initiated re-run 同样适用。
+            apply_leaf_depth_rule(&mut meta_ctx, engine_ctx.depth, self.config.runtime.max_depth);
             (None, false)
         } else if let Ok(Some(checkpoint)) = load_json_optional::<Checkpoint>(&checkpoint_path) {
             // Check if decompose_result.json exists → task already completed.
@@ -239,6 +241,8 @@ impl TpnCycle {
                     initial_meta_ctx.clone().unwrap_or_else(MetaContext::empty)
                 }
             };
+            // V27 深度规则兑底：崩溃恢复路径同样适用。
+            apply_leaf_depth_rule(&mut meta_ctx, engine_ctx.depth, self.config.runtime.max_depth);
 
             (Some(checkpoint.phase), true)
         } else {
@@ -284,8 +288,14 @@ impl TpnCycle {
                 task_id: engine_ctx.task_id.clone(),
                 phase: TpnPhase::Meta,
             });
-            let meta_agent = self.factory.create_meta_agent(&engine_ctx.task_id)?;
-            meta_ctx = meta_agent.run(description, &["general"]).await?;
+            let meta_agent = self
+                .factory
+                .create_meta_agent(&engine_ctx.task_id, engine_ctx.depth, self.config.runtime.max_depth)?;
+            // 首次运行无前一瞬态产出（handoff=None）。
+            meta_ctx = meta_agent.run(description, &["general"], None).await?;
+
+            // V27 深度规则兑底：叶节点（depth+1 >= max_depth）强制 Execution。
+            apply_leaf_depth_rule(&mut meta_ctx, engine_ctx.depth, self.config.runtime.max_depth);
 
             // Persist MetaContext for crash recovery.
             persist_meta_ctx(&meta_ctx, &engine_ctx.task_dir);
@@ -296,6 +306,8 @@ impl TpnCycle {
             // Use parent-provided MetaContext.
             if let Some(ctx) = initial_meta_ctx {
                 meta_ctx = ctx;
+                // V27 深度规则兑底：父层分配的 mode 在叶节点强制 Execution。
+                apply_leaf_depth_rule(&mut meta_ctx, engine_ctx.depth, self.config.runtime.max_depth);
                 // Persist immediately so crash recovery never loses the parent context.
                 persist_meta_ctx(&meta_ctx, &engine_ctx.task_dir);
             }
@@ -321,7 +333,8 @@ impl TpnCycle {
                 || resume_phase == Some(CyclePhase::VerifyDone)
             {
                 // Crash recovery: FittingAgent already ran, reconstruct its
-                // result from persisted state (chat_history + trace + deliverables).
+                // result from persisted state. V28 产出继承优先（handoff /
+                // deliverables），chat_history 仅本节点兜底（§1.4 / §8.18）。
                 // If we can't reconstruct, re-run.
                 match construct_tpn_result_from_state(&engine_ctx) {
                     Ok(Some(result)) => result,
@@ -330,36 +343,46 @@ impl TpnCycle {
                             task_id = %engine_ctx.task_id,
                             "Could not reconstruct FittingAgent result from state — re-running"
                         );
-                        let fitting_agent = self
-                            .factory
-                            .create_fitting_agent(
-                                engine_ctx.depth,
-                                &meta_ctx,
-                                engine_ctx,
-                                self.cancel.clone(),
-                            )?;
-                        fitting_agent
-                            .run(&current_description, Some(chat_history.clone()))
-                            .await?
+                        match run_fitting_with_v28_routing(
+                            &self.factory,
+                            engine_ctx,
+                            &meta_ctx,
+                            self.cancel.clone(),
+                            &mut chat_history,
+                            &mut current_description,
+                            self.config.runtime.max_rounds,
+                        )
+                        .await?
+                        {
+                            Some(result) => result,
+                            None => continue,
+                        }
                     }
                 }
             } else {
-                let fitting_agent = self
-                    .factory
-                    .create_fitting_agent(
-                        engine_ctx.depth,
-                        &meta_ctx,
-                        engine_ctx,
-                        self.cancel.clone(),
-                    )?;
-                let result = fitting_agent
-                    .run(&current_description, Some(chat_history.clone()))
-                    .await?;
-
-                // Write checkpoint after FittingAgent (chat_history already saved internally).
-                write_checkpoint(&checkpoint_path, CyclePhase::FittingDone, engine_ctx, &self.cancel);
-
-                result
+                match run_fitting_with_v28_routing(
+                    &self.factory,
+                    engine_ctx,
+                    &meta_ctx,
+                    self.cancel.clone(),
+                    &mut chat_history,
+                    &mut current_description,
+                    self.config.runtime.max_rounds,
+                )
+                .await?
+                {
+                    Some(result) => {
+                        // Write checkpoint after FittingAgent (chat_history already saved internally).
+                        write_checkpoint(
+                            &checkpoint_path,
+                            CyclePhase::FittingDone,
+                            engine_ctx,
+                            &self.cancel,
+                        );
+                        result
+                    }
+                    None => continue,
+                }
             };
 
             // ── Phase 3: CausalVerify (因果验证·阴) ──
@@ -471,6 +494,13 @@ impl TpnCycle {
                         report.summary,
                         violations_note,
                     );
+                    // V28 产出继承：注入产出文件引用（deliverables/ + handoff.md），
+                    // 下一轮基于产出修正/拆解（§8.18）。
+                    current_description.push_str(
+                        &crate::infra::handoff::build_handoff_description(
+                            &engine_ctx.task_dir,
+                        ),
+                    );
                     tracing::warn!(
                         round = engine_ctx.round,
                         task_id = %engine_ctx.task_id,
@@ -490,8 +520,9 @@ impl TpnCycle {
                     // retry description, then consume the review file.
                     inject_human_review(&engine_ctx.task_dir, &mut current_description);
 
-                    // Reload chat_history from disk (fitting_agent.run() saved it).
-                    chat_history = load_chat_history_or_empty(&engine_ctx.task_dir);
+                    // V28：不再重放对话历史（执行事实是唯一记忆，§1.4）——
+                    // 下一轮基于验证报告 + 产出文件继续/修正。
+                    chat_history = Vec::new();
                     continue;
                 }
                 VerificationRoute::BackToMeta => {
@@ -533,11 +564,29 @@ impl TpnCycle {
                         task_id: engine_ctx.task_id.clone(),
                         phase: TpnPhase::Meta,
                     });
-                    let meta_agent = self.factory.create_meta_agent(&engine_ctx.task_id)?;
+                    let meta_agent = self
+                        .factory
+                        .create_meta_agent(
+                            &engine_ctx.task_id,
+                            engine_ctx.depth,
+                            self.config.runtime.max_depth,
+                        )?;
                     // V26.5-P5: same tags as first run — empty tags matched nothing
                     // in the knowledge store, so BACK_TO_META re-runs never
                     // injected fresh reasoning bias.
-                    meta_ctx = meta_agent.run(description, &["general"]).await?;
+                    // V28：注入前一瞬态产出（handoff.md）作产出校准（§8.18），
+                    // 不再空手重跑。
+                    let handoff = crate::infra::handoff::read_handoff(&engine_ctx.task_dir);
+                    meta_ctx = meta_agent
+                        .run(description, &["general"], handoff.as_deref())
+                        .await?;
+
+                    // V27 深度规则兑底：BACK_TO_META 重跑后同样适用叶节点强制。
+                    apply_leaf_depth_rule(
+                        &mut meta_ctx,
+                        engine_ctx.depth,
+                        self.config.runtime.max_depth,
+                    );
 
                     // Persist MetaContext and checkpoint for crash recovery.
                     persist_meta_ctx(&meta_ctx, &engine_ctx.task_dir);
@@ -583,6 +632,22 @@ fn persist_meta_ctx(meta_ctx: &MetaContext, task_dir: &Path) {
             error = %e,
             "Failed to save meta_ctx"
         );
+    }
+}
+
+/// V27 深度规则兑底：叶节点（`depth + 1 >= max_depth`）无法再拆解，无论
+/// MetaAgent 或父层分配了什么模式，一律强制 Execution。
+///
+/// 与 `RecursiveDecomposeTool` 内的子任务模式兑底互为镜像——本函数覆盖根任务
+/// 与 BACK_TO_META 重跑路径，工具内覆盖子任务路径。
+fn apply_leaf_depth_rule(meta_ctx: &mut MetaContext, depth: u32, max_depth: u32) {
+    if depth + 1 >= max_depth && meta_ctx.mode != crate::types::agent::AgentMode::Execution {
+        tracing::info!(
+            depth,
+            max_depth,
+            "V27 leaf depth rule: forcing Execution mode (depth+1 >= max_depth)"
+        );
+        meta_ctx.mode = crate::types::agent::AgentMode::Execution;
     }
 }
 
@@ -667,6 +732,23 @@ fn construct_tpn_result_from_state(
 ) -> Result<Option<TPNResult>, TaijiError> {
     let task_dir = &engine_ctx.task_dir;
 
+    // V28 产出继承优先：有交接文件（deliverables/handoff.md）则从产出重建——
+    // 执行事实是唯一记忆（§1.4 / §8.18），chat_history 仅作本节点兜底。
+    if let Some(handoff) = crate::infra::handoff::read_handoff(task_dir) {
+        tracing::info!(
+            task_id = %engine_ctx.task_id,
+            "Crash recovery — reconstructing FittingAgent result from handoff (V28 产出继承)"
+        );
+        return Ok(Some(TPNResult {
+            task_id: engine_ctx.task_id.clone(),
+            content: handoff,
+            tools_used: collect_tools_used_from_trace(task_dir),
+            deliverables: list_deliverables(task_dir),
+            depth: engine_ctx.depth,
+            rounds: engine_ctx.round + 1,
+        }));
+    }
+
     // 1. Content: last assistant text in the persisted conversation.
     let history = load_chat_history_or_empty(task_dir);
     let content = assistant_text_from_history(&history);
@@ -686,6 +768,57 @@ fn construct_tpn_result_from_state(
         depth: engine_ctx.depth,
         rounds: engine_ctx.round + 1,
     }))
+}
+
+/// Run the FittingAgent with V28/V29 error routing (BCP §8.18 / §8.19).
+///
+/// - `Ok(Some(result))` — success.
+/// - `Ok(None)` — `ContextOverflow`（token 预算超限）：已递增 round、安装产出继承
+///   描述（deliverables/ + handoff.md）、emit BACK_TO_TPN；调用方应 `continue`
+///   （阳基于产出递归分解，不再重放 chat_history）。
+/// - `Err(e)` — `HardCutoff`（硬截止）及其他错误：传播为 FAIL。
+async fn run_fitting_with_v28_routing(
+    factory: &Arc<AgentFactory>,
+    engine_ctx: &mut EngineContext,
+    meta_ctx: &MetaContext,
+    cancel: CancellationToken,
+    chat_history: &mut Vec<Message>,
+    current_description: &mut String,
+    max_rounds: u32,
+) -> Result<Option<TPNResult>, TaijiError> {
+    let fitting_agent =
+        factory.create_fitting_agent(engine_ctx.depth, meta_ctx, engine_ctx, cancel)?;
+    match fitting_agent
+        .run(current_description.as_str(), Some(chat_history.clone()))
+        .await
+    {
+        Ok(result) => Ok(Some(result)),
+        Err(TaijiError::ContextOverflow { threshold }) => {
+            engine_ctx.round += 1;
+            if engine_ctx.round > max_rounds {
+                return Err(TaijiError::MaxRoundsExceeded { max: max_rounds });
+            }
+            tracing::warn!(
+                task_id = %engine_ctx.task_id,
+                round = engine_ctx.round,
+                threshold,
+                "BACK_TO_TPN — context overflow: handoff-based decomposition (V28)"
+            );
+            event_bus::emit_event(TaskEvent::TpnRouteDecision {
+                task_id: engine_ctx.task_id.clone(),
+                route: "BACK_TO_TPN".into(),
+                cycle: engine_ctx.cycle,
+                round: engine_ctx.round,
+                verdict: format!("上下文超限（≥{threshold} tokens）→ 基于产出递归分解"),
+            });
+            // V28 产出继承：不再以原 description + chat_history 重放重跑
+            *current_description =
+                crate::infra::handoff::build_handoff_description(&engine_ctx.task_dir);
+            *chat_history = Vec::new();
+            Ok(None)
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Extract the text of the last assistant message that contains any text

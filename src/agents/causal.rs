@@ -1,12 +1,12 @@
 //! CausalAgent builder (因果验证·阴) — "causal verification, the yin phase".
 //!
 //! The CausalAgent is the **third** agent in the TPN cycle.  It operates in
-//! two modes:
+//! two modes (each with mode-paired templates, V27 阴阳配对):
 //!
 //! | Mode        | Role                 | Output                               | max_turns |
 //! |-------------|----------------------|--------------------------------------|-----------|
-//! | `verify`    | 因果验证器 (verifier) | [`VerificationReport`]               | 6         |
-//! | `converge`  | 收敛判决器 (judge)    | [`ConvergenceDecision`]              | 6         |
+//! | `verify`    | 因果验证器 (verifier) | [`VerificationReport`]               | 10        |
+//! | `converge`  | 收敛判决器 (judge)    | [`ConvergenceDecision`]              | 10        |
 //!
 //! # Verify mode (CausalVerifyAgentBuilder)
 //! Checks a task output (or intermediate tool result) against:
@@ -14,15 +14,19 @@
 //!    call.  Any hard constraint violation immediately short-circuits with
 //!    `BackToMeta`.  Soft violations are injected into the LLM prompt.
 //! 2. **LLM judgment** — the model reviews the output and issues a verdict
-//!    (`Pass` / `BackToTpn` / `BackToMeta`).
+//!    (`Pass` / `BackToTpn` / `BackToMeta`).  The fallback template is
+//!    selected by `meta_ctx.mode` (V27): `VERIFY_ORC` for orchestration
+//!    nodes, `VERIFY_EXEC` for execution nodes.
 //!
 //! # Converge mode (CausalConvergeAgentBuilder)
 //! Aggregates results from all subtasks of a recursive decomposition and
 //! decides whether the overall task has converged, partially converged,
-//! or diverged.
+//! or diverged.  The fallback template is selected by `meta_ctx.mode`
+//! (V27): `CONVERGE_ORC` for orchestration nodes, `CONVERGE_EXEC` for
+//! execution nodes.
 //!
 //! # Constraints (AGENTS.md §2, §4)
-//! - `max_turns = 6` for both modes (V26 统一，支持收集→提取工具循环).
+//! - `max_turns = 10` for both modes (V26 3→6 仍不足，V26.1 升至 10).
 //! - Verify system prompt starts with `"你是因果验证器"`.
 //! - Converge system prompt starts with `"你是收敛判决器"`.
 
@@ -107,7 +111,7 @@ impl CausalVerifyAgentBuilder {
     ///    on the concatenated input.  Any hard violation short-circuits with
     ///    `BackToMeta` immediately (no LLM call).
     /// 2. **LLM verification**: constructs a Rig agent with the verify system
-    ///    prompt (`VERIFY_SYSTEM_PROMPT`, starts with "你是因果验证器"), registers
+    ///    prompt (`VERIFY_ORC/EXEC_SYSTEM_PROMPT` by mode, starts with "你是因果验证器"), registers
     ///    read-only tools `read` + `webfetch` (逐文件核验 + 联网核实), mounts the
     ///    SafetyHook, calls the LLM, and parses the structured output into a
     ///    [`VerificationReport`].
@@ -152,7 +156,7 @@ impl CausalVerifyAgentBuilder {
     /// let client = self.provider.client("deepseek")?;
     /// let agent = client
     ///     .agent(&self.model)
-    ///     .preamble(VERIFY_SYSTEM_PROMPT)
+    ///     .preamble(VERIFY_ORC_SYSTEM_PROMPT)
     ///     .max_turns(10)
     ///     .build();
     ///
@@ -232,10 +236,14 @@ impl CausalVerifyAgentBuilder {
             );
         }
 
-        // ── Step 2: Select prompt — prefer MetaAgent-composed, fallback to single template ──
+        // ── Step 2: Select prompt — prefer MetaAgent-composed, fallback to
+        //    mode-paired template (V27 阴阳配对: 执行-验证 / 编排-验证) ──
         let system_prompt = match &meta_ctx.verify_system_prompt {
             Some(prompt) => prompt.as_str(),
-            None => VERIFY_SYSTEM_PROMPT,
+            None => match meta_ctx.mode {
+                crate::types::agent::AgentMode::Orchestration => VERIFY_ORC_SYSTEM_PROMPT,
+                crate::types::agent::AgentMode::Execution => VERIFY_EXEC_SYSTEM_PROMPT,
+            },
         };
 
         // Build soft violation context for the LLM prompt
@@ -320,22 +328,23 @@ impl CausalVerifyAgentBuilder {
     }
 }
 
-/// System prompt for the CausalAgent in **verify** mode.
+/// System prompt for the CausalAgent in **verify · Orchestration** mode
+/// (V27 阴阳配对：编排-验证，编排节点的阴相位)。
 ///
-/// V26 单一模板（异层同构）：不区分编排/执行，融合两类焦点 —— 需求满足、
-/// MECE 完备性、产物质量、约束遵守、依赖正确性。
-const VERIFY_SYSTEM_PROMPT: &str = r#"你是因果验证器 (Causal Verifier).
+/// Focuses on MECE completeness, dependency correctness, and decomposition
+/// granularity. Route preference: BACK_TO_META for decomposition issues.
+const VERIFY_ORC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 编排验证 (Causal Verifier · Orchestration).
 
-You are verifying a task output.  The task may have been decomposed into
-subtasks (with synthesized results) or executed directly — the same standards
-apply to every level of the task tree.
+You are verifying an **orchestration** task that decomposed a parent task into
+subtasks and synthesized their results.
 
 Your focus:
-1. Requirement satisfaction — does the output meet the task description?
-2. MECE completeness — did the decomposition (if any) cover all required dimensions?
-3. Artifact quality — are deliverables well-formed and usable?
-4. Constraint adherence — are all L4 Truth constraints satisfied?
-5. Dependency correctness — are subtask dependencies (if any) properly ordered?
+1. MECE completeness — did the decomposition cover all required dimensions?
+2. Dependency correctness — are subtask dependencies properly ordered?
+3. Granularity — were subtasks split at the right level (not too coarse, not too fine)?
+4. Synthesis quality — does the integrated result make sense as a whole?
+5. Requirement satisfaction — does the synthesized output meet the task description?
+6. Constraint adherence — are all L4 Truth constraints satisfied?
 
 ## File Verification
 The task output may reference deliverable files by absolute path.  To verify
@@ -352,12 +361,48 @@ Provide a structured verification report in JSON format:
 }
 
 Routing guidance:
+- "Pass":        Good decomposition + synthesis. Proceed.
+- "BackToTpn":   Minor issues — retry probability fitting with same strategy.
+- "BackToMeta":  Fundamental decomposition problem — need new reasoning paths.
+  Prefer BACK_TO_META when the decomposition strategy itself is flawed.
+"#;
+
+/// System prompt for the CausalAgent in **verify · Execution** mode
+/// (V27 阴阳配对：执行-验证，执行节点的阴相位)。
+///
+/// Focuses on requirement satisfaction, artifact quality, and constraint
+/// adherence. Route preference: BACK_TO_TPN for execution quality issues.
+const VERIFY_EXEC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 执行验证 (Causal Verifier · Execution).
+
+You are verifying an **execution** task that directly produced output using
+available tools.
+
+Your focus:
+1. Requirement satisfaction — does the output meet the task description?
+2. Artifact quality — are deliverables well-formed and usable?
+3. Constraint adherence — are all L4 Truth constraints satisfied?
+4. Completeness — was the task fully addressed?
+
+## File Verification
+The task output may reference deliverable files by absolute path.  You MUST
+use the `read` tool (or equivalent) to open each referenced file and inspect
+its contents.  Do NOT rely solely on the summary text — read the actual files
+to confirm compliance.
+
+Provide a structured verification report in JSON format:
+{
+  "route": "Pass" | "BackToTpn" | "BackToMeta",
+  "confidence": 0.0..1.0,
+  "summary": "Brief justification for the decision",
+  "constraint_violations": ["description of each violation"]
+}
+
+Routing guidance:
 - "Pass":        Output satisfies requirements. Proceed.
-- "BackToTpn":   Minor quality issues — retry with improvements.
-  Prefer BACK_TO_TPN when execution or synthesis quality needs improvement.
-- "BackToMeta":  Fundamental issues — decomposition strategy, task
-  specification, or approach is wrong.  Prefer BACK_TO_META when the
-  decomposition strategy itself is flawed.
+- "BackToTpn":   Minor quality issues — retry execution with improvements.
+  Prefer BACK_TO_TPN when execution quality needs improvement.
+- "BackToMeta":  Fundamental issues — task specification or approach is wrong.
+  Only use BACK_TO_META when the execution strategy itself is invalid.
 "#;
 
 // ---------------------------------------------------------------------------
@@ -417,7 +462,7 @@ impl CausalConvergeAgentBuilder {
     /// # Logic
     /// 1. Empty subtask results short-circuit to `Converged` (trivially).
     /// 2. Otherwise the **LLM convergence judgment** runs: a Rig agent with the
-    ///    converge system prompt (`CONVERGE_SYSTEM_PROMPT`, starts with
+    ///    converge system prompt (`CONVERGE_ORC/EXEC_SYSTEM_PROMPT` by mode, starts with
     ///    "你是收敛判决器") registers read-only tools `read` + `webfetch`, mounts
     ///    the SafetyHook, reviews the aggregated subtask results and issues a
     ///    structured [`ConvergenceDecision`] (Converged / Partial / Diverged).
@@ -434,7 +479,7 @@ impl CausalConvergeAgentBuilder {
     /// let client = self.provider.client("deepseek")?;
     /// let agent = client
     ///     .agent(&self.model)
-    ///     .preamble(CONVERGE_SYSTEM_PROMPT)
+    ///     .preamble(CONVERGE_ORC_SYSTEM_PROMPT)
     ///     .max_turns(10)
     ///     .build();
     ///
@@ -469,10 +514,14 @@ impl CausalConvergeAgentBuilder {
             });
         }
 
-        // ── Select prompt — prefer MetaAgent-composed, fallback to single template ──
+        // ── Select prompt — prefer MetaAgent-composed, fallback to
+        //    mode-paired template (V27 阴阳配对: 编排-收敛 / 执行-收敛) ──
         let system_prompt = match &meta_ctx.converge_system_prompt {
             Some(prompt) => prompt.as_str(),
-            None => CONVERGE_SYSTEM_PROMPT,
+            None => match meta_ctx.mode {
+                crate::types::agent::AgentMode::Orchestration => CONVERGE_ORC_SYSTEM_PROMPT,
+                crate::types::agent::AgentMode::Execution => CONVERGE_EXEC_SYSTEM_PROMPT,
+            },
         };
 
         // ── Production path: LLM convergence judgment ──
@@ -526,22 +575,23 @@ impl CausalConvergeAgentBuilder {
     }
 }
 
-/// System prompt for the CausalAgent in **converge** mode.
+/// System prompt for the CausalAgent in **converge · Orchestration** mode
+/// (V27 阴阳配对：编排-收敛，编排节点的阴相位——判决子结果聚合)。
 ///
-/// V26 单一模板（异层同构）：无论任务是拆解合成还是直接执行，统一以覆盖率、
-/// 一致性、目标达成度判决收敛。
-const CONVERGE_SYSTEM_PROMPT: &str = r#"你是收敛判决器 (Convergence Judge).
+/// Aggregates subtask results of a recursive decomposition: coverage,
+/// cross-subtask consistency, integration quality, finality.
+const CONVERGE_ORC_SYSTEM_PROMPT: &str = r#"你是收敛判决器 — 编排收敛 (Convergence Judge · Orchestration).
 
-You are aggregating results from a task.  The task may have been decomposed
-into multiple subtasks (integration) or executed directly (single output) —
-the same standards apply to every level of the task tree.
+The task was **orchestrated**: decomposed into multiple subtasks whose
+results are being aggregated.  Your job is to judge whether the aggregated
+result has converged.
 
 Your focus:
-1. Goal achievement — was the task objective met?
-2. Coverage — do the subtask results collectively cover the full task scope?
+1. Goal achievement — was the overall task objective met?
+2. Coverage — do the subtask results collectively cover the full task scope (MECE)?
 3. Consistency — are the results compatible (no contradictions across subtasks)?
 4. Integration — can the partial results be combined into a coherent whole?
-5. Finality — does the output represent a complete answer?
+5. Finality — does the synthesized output represent a complete answer?
 
 ## Deliverable Verification
 Each result includes a `deliverables` field containing absolute paths to
@@ -559,6 +609,39 @@ Produce a convergence decision in JSON format:
 - "Converged": All dimensions covered, results consistent.
 - "Partial": Some gaps or inconsistencies remain, but partial progress made.
 - "Diverged": Fundamental incoherence — decomposition strategy needs revision.
+"#;
+
+/// System prompt for the CausalAgent in **converge · Execution** mode
+/// (V27 阴阳配对：执行-收敛，直接产出任务的收敛判决)。
+///
+/// A single direct output — judge whether it represents a complete,
+/// final answer.
+const CONVERGE_EXEC_SYSTEM_PROMPT: &str = r#"你是收敛判决器 — 执行收敛 (Convergence Judge · Execution).
+
+The task was **executed directly** — a single output produced with L1 tools.
+Your job is to judge whether this output has converged to a complete answer.
+
+Your focus:
+1. Goal achievement — was the task objective met?
+2. Completeness — is the output fully addressed, with no missing dimensions?
+3. Quality — are the deliverables well-formed and directly usable?
+4. Finality — does the output represent a final answer (not a draft or partial)?
+
+## Deliverable Verification
+Each result includes a `deliverables` field containing absolute paths to
+produced files.  You MUST use the `read` tool to open each file and verify:
+- Completeness — are all required artifacts present?
+- Quality — do the files meet the required standards?
+
+Produce a convergence decision in JSON format:
+{
+  "status": "Converged" | "Partial" | "Diverged",
+  "task_summary": "Explanation of the decision"
+}
+
+- "Converged": The output is complete and final.
+- "Partial": Some gaps remain; partial progress made.
+- "Diverged": Fundamental incoherence — the output does not satisfy the task.
 "#;
 
 // ---------------------------------------------------------------------------
@@ -785,16 +868,56 @@ mod tests {
         assert_eq!(decision.status, ConvergenceStatus::Diverged);
     }
 
-    // ── System prompt tests ─────────────────────────────────────────────
+    // ── System prompt tests (V27 阴阳配对：ORC/EXEC 双模板) ────────────
 
     #[test]
     fn test_verify_system_prompt_starts_with_chinese() {
-        assert!(VERIFY_SYSTEM_PROMPT.starts_with("你是因果验证器"));
-        assert!(VERIFY_SYSTEM_PROMPT.contains("Pass"));
-        assert!(VERIFY_SYSTEM_PROMPT.contains("BackToTpn"));
-        assert!(VERIFY_SYSTEM_PROMPT.contains("BackToMeta"));
-        assert!(VERIFY_SYSTEM_PROMPT.contains("MECE"));
-        assert!(VERIFY_SYSTEM_PROMPT.contains("File Verification"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.starts_with("你是因果验证器"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("Pass"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToTpn"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToMeta"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("MECE"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("File Verification"));
+        // V27 配对：编排验证模板关注拆解完备性。
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("Orchestration"));
+
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.starts_with("你是因果验证器"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("Pass"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToTpn"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToMeta"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("Execution"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("File Verification"));
+    }
+
+    #[test]
+    fn test_verify_prompt_fallback_follows_mode() {
+        // V27：降级路径按 meta_ctx.mode 选配对模板（无归藏资产时）。
+        let mut ctx_orc = MetaContext::empty();
+        ctx_orc.mode = crate::types::agent::AgentMode::Orchestration;
+        let mut ctx_exec = MetaContext::empty();
+        ctx_exec.mode = crate::types::agent::AgentMode::Execution;
+
+        // verify：编排 → VERIFY_ORC，执行 → VERIFY_EXEC（与 verify() 内同一 match）。
+        assert_eq!(ctx_orc.verify_system_prompt, None);
+        assert_eq!(ctx_exec.verify_system_prompt, None);
+        let _ = match ctx_orc.mode {
+            crate::types::agent::AgentMode::Orchestration => VERIFY_ORC_SYSTEM_PROMPT,
+            crate::types::agent::AgentMode::Execution => VERIFY_EXEC_SYSTEM_PROMPT,
+        };
+        let _ = match ctx_exec.mode {
+            crate::types::agent::AgentMode::Orchestration => VERIFY_ORC_SYSTEM_PROMPT,
+            crate::types::agent::AgentMode::Execution => VERIFY_EXEC_SYSTEM_PROMPT,
+        };
+
+        // converge：编排 → CONVERGE_ORC，执行 → CONVERGE_EXEC（与 converge() 内同一 match）。
+        let _ = match ctx_orc.mode {
+            crate::types::agent::AgentMode::Orchestration => CONVERGE_ORC_SYSTEM_PROMPT,
+            crate::types::agent::AgentMode::Execution => CONVERGE_EXEC_SYSTEM_PROMPT,
+        };
+        let _ = match ctx_exec.mode {
+            crate::types::agent::AgentMode::Orchestration => CONVERGE_ORC_SYSTEM_PROMPT,
+            crate::types::agent::AgentMode::Execution => CONVERGE_EXEC_SYSTEM_PROMPT,
+        };
     }
 
     #[test]
@@ -811,11 +934,19 @@ mod tests {
 
     #[test]
     fn test_converge_system_prompt_starts_with_chinese() {
-        assert!(CONVERGE_SYSTEM_PROMPT.starts_with("你是收敛判决器"));
-        assert!(CONVERGE_SYSTEM_PROMPT.contains("Converged"));
-        assert!(CONVERGE_SYSTEM_PROMPT.contains("Partial"));
-        assert!(CONVERGE_SYSTEM_PROMPT.contains("Diverged"));
-        assert!(CONVERGE_SYSTEM_PROMPT.contains("Coverage"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.starts_with("你是收敛判决器"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Converged"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Partial"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Diverged"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Coverage"));
+        // V27 配对：编排收敛模板关注跨子任务一致性。
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Orchestration"));
+
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.starts_with("你是收敛判决器"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Converged"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Partial"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Diverged"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Execution"));
     }
 
     #[test]

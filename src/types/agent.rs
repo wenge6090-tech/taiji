@@ -1,34 +1,76 @@
 use serde::{Deserialize, Serialize};
 
+/// Specifies whether a task node's FittingAgent (概率拟合·阳) operates in
+/// **Orchestration** or **Execution** mode (V27 阴阳配对模式恢复).
+///
+/// Decided by the MetaAgent's weight update based on recursion depth rules
+/// and task difficulty (BCP §8.8):
+///
+/// | 配对 | 阳 Agent | 阴 Agent |
+/// |------|----------|----------|
+/// | Orchestration（编排） | 编排模板：recursive_decompose 拆解 + 综合 | 收敛模板：子结果聚合判决（converge） |
+/// | Execution（执行） | 执行模板：L1 工具直接产出 | 验证模板：直接产出核验（verify） |
+///
+/// Mode is **not** derived from depth alone: the MetaAgent LLM weighs depth
+/// rules (leaf `depth+1 >= max_depth` is hard-forced to Execution by
+/// `RecursiveDecomposeTool`) plus task difficulty. Children receive their
+/// mode via `SubtaskSpec.mode` (parent LLM difficulty judgment).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AgentMode {
+    /// Agent acts as a task decomposer/synthesizer — breaks complex tasks into
+    /// subtasks via `recursive_decompose`, delegates, then integrates results.
+    Orchestration,
+    /// Agent acts as a focused executor — uses L1 skills to directly produce
+    /// output; `recursive_decompose` is not registered (LLM cannot see it).
+    Execution,
+}
+
+impl Default for AgentMode {
+    fn default() -> Self {
+        AgentMode::Orchestration
+    }
+}
+
 /// Context produced by MetaAgent (权重更新·元), injected as reasoning bias
 /// into FittingAgent and CausalAgent.
 ///
 /// MetaAgent queries the 归藏 (cognitive warehouse) and LLM-decides:
 /// - Cognitive context (constraints, skills)
-/// - Composed system prompts for downstream agents
+/// - The optimal [`AgentMode`] for the task (depth rules + difficulty)
+/// - Composed system prompts for downstream agents (mode-paired)
 ///
 /// # Fallback
 /// When 归藏 has no matching prompt assets, `fitting_system_prompt`,
-/// `verify_system_prompt`, and `converge_system_prompt` are `None`, and
-/// downstream agents fall back to their built-in hardcoded templates.
+/// `verify_system_prompt`, and `converge_system_prompt` are `None`, `mode`
+/// defaults to [`AgentMode::Orchestration`], and downstream agents fall back
+/// to their built-in mode-paired hardcoded templates.
 ///
-/// V26 起无 AgentMode（异层同构：任务节点在任意深度完全同构，无模式分化）。
+/// V27 起携带 `mode`（serde default=Orchestration，旧 meta_ctx.json 零迁移兼容）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MetaContext {
     pub constraints: Vec<crate::types::verification::TruthConstraint>,
     pub matched_skills: Vec<SkillRef>,
     pub yang_prompt: YangPrompt,
 
+    /// AgentMode decided by MetaAgent's weight update (recursion depth rules
+    /// + task difficulty). Defaults to [`AgentMode::Orchestration`] when
+    /// unset (degraded path).
+    #[serde(default)]
+    pub mode: AgentMode,
+
     /// Full system prompt for FittingAgent (概率拟合·阳), LLM-composed by
-    /// MetaAgent.  When `None`, FittingAgent uses its built-in template.
+    /// MetaAgent.  When `None`, FittingAgent uses its mode-paired built-in
+    /// template (编排模板 / 执行模板).
     pub fitting_system_prompt: Option<String>,
 
     /// Full system prompt for CausalAgent.verify() (因果验证·阴).
-    /// When `None`, CausalAgent falls back to VERIFY_SYSTEM_PROMPT.
+    /// When `None`, CausalAgent falls back to VERIFY_ORC/EXEC_SYSTEM_PROMPT
+    /// by `mode`.
     pub verify_system_prompt: Option<String>,
 
     /// Full system prompt for CausalAgent.converge() (收敛判决).
-    /// When `None`, CausalAgent falls back to CONVERGE_SYSTEM_PROMPT.
+    /// When `None`, CausalAgent falls back to CONVERGE_ORC/EXEC_SYSTEM_PROMPT
+    /// by `mode`.
     pub converge_system_prompt: Option<String>,
 }
 
@@ -36,7 +78,8 @@ impl MetaContext {
     /// Create an empty/degraded `MetaContext` with no cognitive context.
     ///
     /// All optional prompt fields are `None`, causing downstream agents to
-    /// fall back to their built-in hardcoded templates.
+    /// fall back to their built-in mode-paired templates.  Mode defaults to
+    /// [`AgentMode::Orchestration`] (safe for root task).
     pub fn empty() -> Self {
         Self {
             constraints: vec![],
@@ -45,7 +88,9 @@ impl MetaContext {
                 task_description: String::new(),
                 constraint_summaries: vec![],
                 parent_deliverables: vec![],
+                sibling_deliverables: vec![],
             },
+            mode: AgentMode::Orchestration,
             fitting_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
@@ -72,6 +117,11 @@ pub struct YangPrompt {
     /// cannot write to parent directories.
     #[serde(default)]
     pub parent_deliverables: Vec<String>,
+    /// V30 会盟：sibling 贡品索引——同级子任务（兄弟）deliverables/ 的绝对路径
+    /// 清单，由 `recursive_decompose` 分封时注入（BTreeMap 有序扫描，排除自身，
+    /// spawn 时点快照）。贡品跨兄弟公开可发现可读（§8.20）；中间记忆仍隔离。
+    #[serde(default)]
+    pub sibling_deliverables: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +186,10 @@ pub struct ExternalToolResult {
 /// ```
 ///
 /// V26 起 `agent_mode` 字段已删除（serde 默认宽容，旧归藏 YAML 中的
-/// `agent_mode` 键自动忽略，零迁移兼容）。
+/// `agent_mode` 键自动忽略，零迁移兼容）。V27 模式配对恢复后，资产仍不含
+/// `agent_mode` 字段——MetaAgent 按资产 name/tags/description 选择与所选
+/// 模式匹配的资产（assets 命名 orchestration_*/execution_*，tags 含
+/// orchestration/execution）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PromptAsset {
     /// Type discriminator — always `"prompt"`.

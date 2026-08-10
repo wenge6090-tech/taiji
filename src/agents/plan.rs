@@ -98,7 +98,8 @@ impl PlanBuilder {
             self.provider.clone(),
             &self.model,
         );
-        meta_agent.run(description, task_type_tags).await
+        // V28：PlanBuilder 不涉及 BACK_TO_META 校准，handoff 传 None。
+        meta_agent.run(description, task_type_tags, None).await
     }
 
     /// Ask the LLM to compose a [`PlanSummary`] from the task description

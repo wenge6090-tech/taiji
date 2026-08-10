@@ -22,6 +22,15 @@ pub struct SubtaskSpec {
     pub verification_spec: String,
     #[serde(default)]
     pub context: serde_json::Value,
+    /// Whether this subtask executes in Orchestration (decompose further) or
+    /// Execution (focus on direct output) mode (V27 阴阳配对模式).
+    ///
+    /// The parent LLM sets this value by difficulty judgment (guided by the
+    /// orchestration prompt's depth rules). `RecursiveDecomposeTool` may
+    /// override it to `Execution` when `depth + 1 >= max_depth` (leaf
+    /// enforcement). Defaults to Orchestration for robustness.
+    #[serde(default)]
+    pub mode: crate::types::agent::AgentMode,
     /// Explicit re-run marker: `Some(old_child_index)` means "re-run the
     /// subtask previously at `children/<old_child_index>/`". The `description`
     /// field carries the re-run reason and new requirements.
