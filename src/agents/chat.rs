@@ -238,16 +238,15 @@ impl ChatAgentBuilder {
         prompt
     }
 
-    /// Build a digest of Guizang knowledge assets (L5 prompt templates and
-    /// L4 active constraints) for the chat system prompt.
+    /// Build a digest of Guizang knowledge assets (L5 prompt templates) for
+    /// the chat system prompt. V38：truths 资产层已移除，仅取 prompts。
     ///
     /// Returns `None` when the knowledge directory is missing or unusable so
     /// the caller falls back to the base template without erroring.
     async fn guizang_digest(&self) -> Option<String> {
         let guizang_dir = PathBuf::from(&self.config.knowledge.data_dir);
         let prompts_dir = guizang_dir.join("prompts");
-        let truths_dir = guizang_dir.join("truths");
-        if !prompts_dir.is_dir() && !truths_dir.is_dir() {
+        if !prompts_dir.is_dir() {
             return None;
         }
         let guizang = match GuizangClient::new_sparse(&guizang_dir).await {
@@ -287,16 +286,6 @@ impl ChatAgentBuilder {
         });
         for p in prompts.into_iter().take(3) {
             sections.push(format!("- [L5 提示词] {}: {}", p.name, p.description));
-        }
-
-        // L4 constraints: active truths only.
-        if let Ok(truths) = guizang.load_active_truths().await {
-            for t in truths.into_iter().take(5) {
-                sections.push(format!(
-                    "- [L4 约束 · {}] {}: {}",
-                    t.severity, t.header.name, t.header.description
-                ));
-            }
         }
 
         if sections.is_empty() {
@@ -432,9 +421,9 @@ mod tests {
     fn test_build_system_prompt_with_guizang_digest() {
         let (mut builder, tmp_dir) = make_builder(None);
         // make_builder already initialised a knowledge layout under tmp_dir
-        // (truths/models/skills/prompts + index.yaml) — write real assets.
+        // (models/skills/prompts/verifications — V38 无 truths/index.yaml) —
+        // write real assets.
         std::fs::create_dir_all(tmp_dir.join("prompts")).expect("prompts dir");
-        std::fs::create_dir_all(tmp_dir.join("truths")).expect("truths dir");
         std::fs::write(
             tmp_dir.join("prompts").join("test-prompt.yaml"),
             "type: prompt\n\
@@ -451,26 +440,13 @@ mod tests {
              success_rate: 0.0\n",
         )
         .expect("write prompt asset");
-        std::fs::write(
-            tmp_dir.join("truths").join("test-truth.yaml"),
-            "type: truth\n\
-             layer: 4\n\
-             id: test-truth\n\
-             name: 测试约束\n\
-             description: 用于测试的约束\n\
-             tags: []\n\
-             confidence: 0.8\n\
-             version: 1\n\
-             severity: Hard\n\
-             status: active\n",
-        )
-        .expect("write truth asset");
         builder.config.knowledge.data_dir = tmp_dir.display().to_string();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let prompt = rt.block_on(builder.build_system_prompt());
         assert!(prompt.contains("归藏知识摘要"));
         assert!(prompt.contains("测试提示词"));
-        assert!(prompt.contains("测试约束"));
+        // V38：truths 资产层已移除——摘要不再含约束段。
+        assert!(!prompt.contains("测试约束"));
         std::fs::remove_dir_all(&tmp_dir).ok();
     }
 }

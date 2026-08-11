@@ -1,25 +1,24 @@
 //! LiluoClient — 归藏 (cognitive warehouse) file-system client.
 //!
-//! Cognitive assets (Prompts, Truths, Models) are stored as YAML files under
-//! `{data_dir}/{type}s/{id}.yaml`.  An `index.yaml` at the root maintains a
-//! tag-based reverse index for efficient search.
+//! Cognitive assets (Prompts, Models, Skills, Verifications) are stored as
+//! YAML files under `{data_dir}/{type}s/{id}.yaml`. V38: no `index.yaml` —
+//! tag search scans directories on demand (`scan_assets`).
 //!
-//! # Directory layout (V22 三层+预留)
+//! # Directory layout (V38：无 index.yaml / 无 truths/)
 //!
 //! ```text
 //! {data_dir}/
-//! ├── index.yaml          # tag → [AssetRef] reverse index (derived, tag_index only)
 //! ├── prompts/            # L5 Prompt assets (行为模板)
 //! │   ├── prompt-001.yaml
 //! │   └── ...
-//! ├── truths/             # L4 Truth assets
-//! └── models/             # L2 Model assets (预留 — 待连山流型系统接入)
+//! ├── verifications/      # L1 阴轨验证契约（V33 结构化 checks）
+//! ├── models/             # L2 Model assets（贝叶斯后验，MVP-3.5 激活）
+//! └── skills/             # L1 技能统计元数据
 //! ```
 //!
 //! # Consistency (AGENTS.md §7)
 //! - `save_asset()` reads the current version before overwriting (version++).
-//! - `index.yaml` is a derived data structure; `build_index()` rebuilds it
-//!   from the raw YAML files when corruption is detected.
+//! - V38：标签检索实时目录扫描（`scan_assets`），无持久化索引需维护。
 
 use crate::infra::error::TaijiError;
 use crate::types::agent::{PromptAsset, VerificationAsset};
@@ -64,19 +63,6 @@ pub struct AssetHeader {
     pub tags: Vec<String>,
     pub confidence: f64,
     pub version: u32,
-}
-
-/// L4 Truth — hard/soft constraints.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TruthAsset {
-    #[serde(flatten)]
-    pub header: AssetHeader,
-    pub severity: String, // "Hard" | "Soft"
-    // ── TMS 字段（V18 新增；V22 仅保留审计字段） ──
-    #[serde(default)]
-    pub status: String, // "active" | "retracted" | "stale"
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub justification: Option<String>,
 }
 
 /// L2 Model — Bayesian confidence model（MVP-3.5 激活，原「预留层」— BCP §6.2/§6.4.1）。
@@ -149,8 +135,7 @@ pub struct SkillAsset {
 // Index data structure
 // ---------------------------------------------------------------------------
 
-/// The on-disk index.yaml schema (V22: tag_index only — TMS dependency_index
-/// removed).
+/// V38 内存 tag 索引（实时扫描构建，不落盘——替代原 index.yaml schema）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct IndexData {
     tag_index: HashMap<String, Vec<AssetRef>>,
@@ -196,7 +181,6 @@ impl LiluoClient {
     /// Directory name for each asset type within `data_dir`.
     fn type_dir_name(type_: &str) -> &'static str {
         match type_ {
-            "truth" => "truths",
             "model" => "models",
             "skill" => "skills",
             "prompt" => "prompts",
@@ -211,12 +195,10 @@ impl LiluoClient {
 
     // ── Constructors ──────────────────────────────────────────────────
 
-    /// Create a new `LiluoClient`, ensuring the directory structure exists
-    /// and the tag index is built or verified.
+    /// Create a new `LiluoClient`, ensuring the directory structure exists.
     ///
     /// # Errors
-    /// Returns `TaijiError::IO` if the data directory cannot be created or
-    /// the index cannot be built.
+    /// Returns `TaijiError::IO` if the data directory cannot be created.
     pub async fn new(data_dir: &Path) -> Result<Self, TaijiError> {
         let this = Self {
             root_dir: data_dir.to_path_buf(),
@@ -224,13 +206,12 @@ impl LiluoClient {
             partition: None,
         };
         this.ensure_dirs().await?;
-        this.build_index().await?;
         Ok(this)
     }
 
     /// 派生指定模型分区 client（V36，BCP §6.1）——`data_dir = root/{model_key}`，
-    /// root_dir 保持（model_stats 仍根级）。自动创建分区目录 + 五资产目录 +
-    /// 空 index.yaml 初始化，调用方拿到即可检索/写入。
+    /// root_dir 保持（model_stats 仍根级）。自动创建分区目录 + 资产目录，
+    /// 调用方拿到即可检索/写入。
     ///
     /// 从根 client 或分区 client 均可派生（从分区派生会切换到新分区）。
     pub async fn for_model(&self, model_key: &str) -> Result<Self, TaijiError> {
@@ -241,9 +222,6 @@ impl LiluoClient {
             partition: Some(model_key.to_string()),
         };
         this.ensure_dirs().await?;
-        if !this.data_dir.join("index.yaml").exists() {
-            this.build_index().await?;
-        }
         Ok(this)
     }
 
@@ -274,11 +252,10 @@ impl LiluoClient {
     }
 
     /// Create directories for the asset types under `data_dir`
-    /// (V22 三层+预留: prompts/ truths/ models/ + skills 统计元数据；
-    /// V33 加 verifications/ 阴轨验证契约层).
+    /// (V22 三层+预留: models/ skills/ prompts；V33 加 verifications/ 阴轨验证契约层；
+    /// V38 移除 truths/ 资产层——L0 检查内置化)。
     async fn ensure_dirs(&self) -> Result<(), TaijiError> {
         let dirs = [
-            self.data_dir.join("truths"),
             self.data_dir.join("models"),
             self.data_dir.join("skills"),
             self.data_dir.join("prompts"),
@@ -494,9 +471,6 @@ impl LiluoClient {
             }
         })?;
 
-        // Rebuild index after mutation.
-        self.build_index().await?;
-
         Ok(())
     }
 
@@ -505,10 +479,10 @@ impl LiluoClient {
     /// Search for assets by tags.
     ///
     /// Returns all assets whose tag sets intersect with any of the given tags.
-    /// Relies on the `index.yaml` for efficient lookup; triggers a rebuild
-    /// if the index is missing.
+    /// V38：实时目录扫描（`scan_assets` 内存构建 tag → AssetRef 映射，不落盘）——
+    /// 资产量级几十个，扫描毫秒级；省去 index.yaml 的读写与一致性维护。
     pub async fn search_by_tags(&self, tags: &[&str]) -> Result<Vec<AssetRef>, TaijiError> {
-        let index = self.load_or_rebuild_index().await?;
+        let index = self.scan_assets().await?;
 
         let mut seen = HashSet::new();
         let mut results = Vec::new();
@@ -526,50 +500,13 @@ impl LiluoClient {
         Ok(results)
     }
 
-    /// Load `index.yaml`, rebuilding it from scratch if missing or corrupt.
-    async fn load_or_rebuild_index(&self) -> Result<IndexData, TaijiError> {
-        let index_path = self.data_dir.join("index.yaml");
-
-        if index_path.exists() {
-            match fs::read_to_string(&index_path).await {
-                Ok(content) => {
-                    if let Ok(index) = serde_yaml::from_str::<IndexData>(&content) {
-                        return Ok(index);
-                    }
-                    tracing::warn!(
-                        "index.yaml is corrupt, rebuilding from asset files"
-                    );
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        "failed to read index.yaml ({}), rebuilding",
-                        e
-                    );
-                }
-            }
-        }
-
-        self.build_index().await?;
-
-        // Re-read the freshly built index.
-        let content = fs::read_to_string(&index_path).await.map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!("failed to read rebuilt index.yaml: {e}"),
-            }
-        })?;
-        serde_yaml::from_str(&content).map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!("failed to parse rebuilt index.yaml: {e}"),
-            }
-        })
-    }
-
-    /// Rebuild `index.yaml` by scanning all YAML files in the type
-    /// directories and extracting tags from each.
-    pub async fn build_index(&self) -> Result<(), TaijiError> {
+    /// 实时扫描所有资产目录，内存构建 tag 反向索引（V38：替代 index.yaml）。
+    /// 扫描逻辑继承原 build_index：遍历各资产层的 *.yaml（跳过 .tmp），
+    /// 提取 id / tags / layer 建索引。不落盘。
+    pub async fn scan_assets(&self) -> Result<IndexData, TaijiError> {
         let mut index = IndexData::empty();
 
-        for type_ in &["truth", "model", "skill", "prompt", "verification"] {
+        for type_ in &["model", "skill", "prompt", "verification"] {
             let dir = self.data_dir.join(Self::type_dir_name(type_));
             if !dir.exists() {
                 continue;
@@ -649,135 +586,8 @@ impl LiluoClient {
             }
         }
 
-        // Write index.yaml atomically.
-        let index_path = self.data_dir.join("index.yaml");
-        let yaml = serde_yaml::to_string(&index).map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!("failed to serialise index: {e}"),
-            }
-        })?;
-
-        let tmp_path = self.data_dir.join("index.yaml.tmp");
-        {
-            let mut tmp = fs::File::create(&tmp_path).await.map_err(|e| {
-                TaijiError::KnowledgeStoreUnavailable {
-                    context: format!("failed to create index temp file: {e}"),
-                }
-            })?;
-            tmp.write_all(yaml.as_bytes()).await.map_err(|e| {
-                TaijiError::KnowledgeStoreUnavailable {
-                    context: format!("failed to write index temp file: {e}"),
-                }
-            })?;
-            tmp.flush().await.map_err(|e| {
-                TaijiError::KnowledgeStoreUnavailable {
-                    context: format!("failed to flush index temp file: {e}"),
-                }
-            })?;
-        }
-        fs::rename(&tmp_path, &index_path).await.map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!("failed to rename index file: {e}"),
-            }
-        })?;
-
-        Ok(())
+        Ok(index)
     }
-
-    // ── Truth I/O (TMS convenience) ────────────────────────────────────
-
-    /// Load a single Truth asset by ID.
-    ///
-    /// Returns `None` when the asset does not exist (graceful fallback).
-    pub async fn load_truth(&self, id: &str) -> Result<Option<TruthAsset>, TaijiError> {
-        match self.load_asset("truth", id).await {
-            Ok(CognitiveAsset::Truth(t)) => Ok(Some(t)),
-            Ok(_) => {
-                tracing::warn!("asset '{id}' found in truths/ but has wrong type tag");
-                Ok(None)
-            }
-            Err(e) => {
-                if e.to_string().contains("failed to read asset") {
-                    Ok(None)
-                } else {
-                    Err(e)
-                }
-            }
-        }
-    }
-
-    /// Save a [`TruthAsset`] to the `truths/` directory.
-    ///
-    /// Thin wrapper around [`save_asset`](Self::save_asset).
-    pub async fn save_truth(&self, truth: &mut TruthAsset) -> Result<(), TaijiError> {
-        let mut asset = CognitiveAsset::Truth(truth.clone());
-        truth.header.asset_type = "truth".into();
-        self.save_asset(&mut asset).await?;
-        truth.header.version = asset.version();
-        Ok(())
-    }
-
-    /// Load all Truth assets whose `status == "active"`.
-    ///
-    /// Skips retracted/stale truths. Returns all active truths for the
-    /// ConstraintEngine to load.
-    pub async fn load_active_truths(&self) -> Result<Vec<TruthAsset>, TaijiError> {
-        let dir = self.data_dir.join("truths");
-        let mut truths = Vec::new();
-        if !dir.exists() {
-            return Ok(truths);
-        }
-        let mut read_dir = fs::read_dir(&dir).await.map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!("failed to read truths directory: {e}"),
-            }
-        })?;
-        while let Some(entry) = read_dir.next_entry().await.transpose() {
-            match entry {
-                Ok(e) => {
-                    let path = e.path();
-                    if path.extension().is_none_or(|ext| ext != "yaml") {
-                        continue;
-                    }
-                    if path.file_name().is_none_or(|n| n.to_string_lossy().ends_with(".tmp")) {
-                        continue;
-                    }
-                    match self.load_truth_from_path(&path).await {
-                        Ok(Some(truth)) => {
-                            if truth.status == "active" || truth.status.is_empty() {
-                                truths.push(truth);
-                            }
-                        }
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::warn!("failed to load truth {:?}: {e}", path);
-                        }
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("error reading truths directory entry: {e}");
-                }
-            }
-        }
-        Ok(truths)
-    }
-
-    /// Load a single Truth asset from a specific file path.
-    async fn load_truth_from_path(&self, path: &Path) -> Result<Option<TruthAsset>, TaijiError> {
-        let content = fs::read_to_string(path).await.map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!("failed to read truth file {:?}: {e}", path),
-            }
-        })?;
-        match serde_yaml::from_str::<CognitiveAsset>(&content) {
-            Ok(CognitiveAsset::Truth(t)) => Ok(Some(t)),
-            _ => {
-                // File might be GFM/YAML frontmatter or some other format.
-                Ok(None)
-            }
-        }
-    }
-
 
     // ── Prompt asset convenience methods ──────────────────────────────
 
@@ -1111,8 +921,6 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CognitiveAsset {
-    #[serde(rename = "truth")]
-    Truth(TruthAsset),
     #[serde(rename = "model")]
     Model(ModelAsset),
     #[serde(rename = "skill")]
@@ -1124,11 +932,9 @@ pub enum CognitiveAsset {
 }
 
 impl CognitiveAsset {
-    /// Return the asset type string (`"truth"`, `"model"`,
-    /// `"skill"`, `"prompt"`, `"verification"`).
+    /// Return the asset type string (`"model"`, `"skill"`, `"prompt"`, `"verification"`).
     pub fn asset_type(&self) -> String {
         match self {
-            CognitiveAsset::Truth(_) => "truth".into(),
             CognitiveAsset::Model(_) => "model".into(),
             CognitiveAsset::Skill(_) => "skill".into(),
             CognitiveAsset::Prompt(_) => "prompt".into(),
@@ -1139,7 +945,6 @@ impl CognitiveAsset {
     /// Return the asset ID.
     pub fn id(&self) -> &str {
         match self {
-            CognitiveAsset::Truth(a) => &a.header.id,
             CognitiveAsset::Model(a) => &a.header.id,
             CognitiveAsset::Skill(a) => &a.header.id,
             CognitiveAsset::Prompt(a) => &a.id,
@@ -1150,7 +955,6 @@ impl CognitiveAsset {
     /// Return the asset version.
     pub fn version(&self) -> u32 {
         match self {
-            CognitiveAsset::Truth(a) => a.header.version,
             CognitiveAsset::Model(a) => a.header.version,
             CognitiveAsset::Skill(a) => a.header.version,
             CognitiveAsset::Prompt(a) => a.version,
@@ -1161,7 +965,6 @@ impl CognitiveAsset {
     /// Set the asset version.
     pub fn set_version(&mut self, v: u32) {
         match self {
-            CognitiveAsset::Truth(a) => a.header.version = v,
             CognitiveAsset::Model(a) => a.header.version = v,
             CognitiveAsset::Skill(a) => a.header.version = v,
             CognitiveAsset::Prompt(a) => a.version = v,
@@ -1172,8 +975,8 @@ impl CognitiveAsset {
 
 /// V36：把未分区的旧根资产迁移到默认模型分区（BCP §6.1）——幂等。
 ///
-/// 迁移对象：根目录的五个资产层（prompts/truths/models/skills/verifications）
-/// 与 index.yaml（衍生缓存随目录移动）。
+/// 迁移对象：根目录的资产层（prompts/models/skills/verifications；
+/// V38：不再迁移 truths/ 与 index.yaml——资产层已移除）。
 /// 幂等规则：目标分区已存在同名目录/文件 → 跳过（可重复调用）；两者都不存在
 /// → 跳过；仅源存在 → 移动。移动失败 → Err 上抛（带路径，诊断性——无降级原则
 /// §23：迁移是数据完整性操作，不允许静默吞错）。
@@ -1183,7 +986,7 @@ pub async fn migrate_to_partitioned(
     root: &Path,
     default_key: &str,
 ) -> Result<(), TaijiError> {
-    const ASSET_LAYERS: [&str; 5] = ["prompts", "truths", "models", "skills", "verifications"];
+    const ASSET_LAYERS: [&str; 4] = ["prompts", "models", "skills", "verifications"];
     let partition_dir = root.join(default_key);
     // rename 要求目标父目录存在——先建分区目录（幂等）。
     fs::create_dir_all(&partition_dir).await.map_err(|e| {
@@ -1218,19 +1021,16 @@ pub async fn migrate_to_partitioned(
         );
     }
 
-    // index.yaml 随目录移动（衍生缓存——分区内已有索引则不覆盖）。
+    // V38：index.yaml 已移除——不再迁移（旧根目录遗留的 index.yaml 忽略，
+    // 实时扫描不消费；如目标分区存在也不覆盖）。
     let src_index = root.join("index.yaml");
     let dst_index = partition_dir.join("index.yaml");
     let src_exists = fs::metadata(&src_index).await.is_ok();
     let dst_exists = fs::metadata(&dst_index).await.is_ok();
     if src_exists && !dst_exists {
-        fs::rename(&src_index, &dst_index).await.map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!(
-                    "migrate_to_partitioned: failed to move index.yaml: {e}"
-                ),
-            }
-        })?;
+        tracing::warn!(
+            "legacy index.yaml found at root — V38 不再维护，跳过迁移（保留原文件）"
+        );
     }
 
     Ok(())
@@ -1266,10 +1066,12 @@ mod tests {
     async fn test_new_creates_dirs() {
         let dir = test_dir("new_creates_dirs").await;
         let _client = LiluoClient::new(&dir).await.unwrap();
-        assert!(dir.join("truths").exists());
         assert!(dir.join("models").exists());
         assert!(dir.join("skills").exists());
-        assert!(dir.join("index.yaml").exists());
+        assert!(dir.join("verifications").exists());
+        // V38：不再创建 truths/ 与 index.yaml
+        assert!(!dir.join("truths").exists());
+        assert!(!dir.join("index.yaml").exists());
         cleanup(&dir).await;
     }
 
@@ -1281,22 +1083,15 @@ mod tests {
         let root = LiluoClient::new(&dir).await.unwrap();
 
         // 根 client 写根资产
-        let mut truth = TruthAsset {
-            header: AssetHeader {
-                asset_type: "truth".into(),
-                layer: 4,
-                id: "root-truth".into(),
-                name: "根约束".into(),
-                description: "root".into(),
-                tags: vec!["general".into()],
-                confidence: 0.9,
-                version: 0,
-            },
-            severity: "Hard".into(),
-            status: "active".into(),
-            justification: None,
-        };
-        root.save_asset(&mut CognitiveAsset::Truth(truth.clone()))
+        let mut prompt = crate::types::agent::PromptAsset::new(
+            "root-prompt",
+            "根提示词",
+            "root",
+            "content",
+            "FittingAgent",
+            vec!["general".into()],
+        );
+        root.save_asset(&mut CognitiveAsset::Prompt(prompt))
             .await
             .unwrap();
 
@@ -1306,7 +1101,8 @@ mod tests {
         assert!(dir.join("deepseek-deepseek-chat").exists());
         assert!(dir.join("deepseek-deepseek-chat/prompts").exists());
         assert!(dir.join("deepseek-deepseek-chat/verifications").exists());
-        assert!(dir.join("deepseek-deepseek-chat/index.yaml").exists());
+        // V38：分区不再创建 index.yaml
+        assert!(!dir.join("deepseek-deepseek-chat/index.yaml").exists());
         // root_dir 恒为 knowledge 根（model_stats 层）
         assert_eq!(partition.root_dir(), &dir);
 
@@ -1346,33 +1142,26 @@ mod tests {
         let root = LiluoClient::new(&dir).await.unwrap();
 
         // 根资产层放一个资产
-        let mut truth = TruthAsset {
-            header: AssetHeader {
-                asset_type: "truth".into(),
-                layer: 4,
-                id: "legacy-truth".into(),
-                name: "旧根约束".into(),
-                description: "legacy".into(),
-                tags: vec!["legacy".into()],
-                confidence: 0.9,
-                version: 0,
-            },
-            severity: "Hard".into(),
-            status: "active".into(),
-            justification: None,
-        };
-        root.save_asset(&mut CognitiveAsset::Truth(truth.clone()))
+        let mut prompt = crate::types::agent::PromptAsset::new(
+            "legacy-prompt",
+            "旧根提示词",
+            "legacy",
+            "content",
+            "FittingAgent",
+            vec!["legacy".into()],
+        );
+        root.save_asset(&mut CognitiveAsset::Prompt(prompt))
             .await
             .unwrap();
-        assert!(dir.join("truths/legacy-truth.yaml").exists());
+        assert!(dir.join("prompts/legacy-prompt.yaml").exists());
 
-        // 首次迁移：truths/ 整体移入默认分区
+        // 首次迁移：prompts/ 整体移入默认分区
         migrate_to_partitioned(&dir, "deepseek-deepseek-chat")
             .await
             .unwrap();
-        assert!(!dir.join("truths/legacy-truth.yaml").exists());
+        assert!(!dir.join("prompts/legacy-prompt.yaml").exists());
         assert!(dir
-            .join("deepseek-deepseek-chat/truths/legacy-truth.yaml")
+            .join("deepseek-deepseek-chat/prompts/legacy-prompt.yaml")
             .exists());
 
         // 幂等：重复调用无操作不报错
@@ -1382,7 +1171,7 @@ mod tests {
 
         // 分区 client 可读迁移后的资产
         let partition = root.for_model("deepseek-deepseek-chat").await.unwrap();
-        let loaded = partition.load_asset("truth", "legacy-truth").await;
+        let loaded = partition.load_asset("prompt", "legacy-prompt").await;
         assert!(loaded.is_ok(), "migrated asset readable in partition");
 
         cleanup(&dir).await;
@@ -1435,39 +1224,40 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_save_and_load_truth() {
-        let dir = test_dir("save_load_truth").await;
+    async fn test_save_and_load_skill() {
+        let dir = test_dir("save_load_skill").await;
         let client = LiluoClient::new(&dir).await.unwrap();
 
-        let mut asset = CognitiveAsset::Truth(TruthAsset {
+        let mut asset = CognitiveAsset::Skill(SkillAsset {
             header: AssetHeader {
-                asset_type: "truth".into(),
-                layer: 4,
-                id: "truth-001".into(),
-                name: "Test Truth".into(),
-                description: "A truth for testing".into(),
+                asset_type: "skill".into(),
+                layer: 1,
+                id: "skill-001".into(),
+                name: "Test Skill".into(),
+                description: "A skill for testing".into(),
                 tags: vec!["test".into(), "demo".into()],
                 confidence: 0.95,
                 version: 0, // will be set to 1 on save
             },
-            severity: "Hard".into(),
-            status: "active".into(),
-            justification: None,
+            tool_name: "calc".into(),
+            trigger_pattern: "calc".into(),
+            task_type_tags: vec!["math".into()],
+            success_count: 0,
+            fail_count: 0,
         });
 
         client.save_asset(&mut asset).await.unwrap();
         assert_eq!(asset.version(), 1);
 
         // Load back
-        let loaded = client.load_asset("truth", "truth-001").await.unwrap();
+        let loaded = client.load_asset("skill", "skill-001").await.unwrap();
         match loaded {
-            CognitiveAsset::Truth(t) => {
-                assert_eq!(t.header.id, "truth-001");
-                assert_eq!(t.header.version, 1);
-                assert_eq!(t.severity, "Hard");
-                assert!(t.header.tags.contains(&"test".to_string()));
+            CognitiveAsset::Skill(s) => {
+                assert_eq!(s.header.id, "skill-001");
+                assert_eq!(s.header.version, 1);
+                assert!(s.header.tags.contains(&"test".to_string()));
             }
-            _ => panic!("expected Truth asset"),
+            _ => panic!("expected Skill asset"),
         }
 
         cleanup(&dir).await;
@@ -1478,20 +1268,22 @@ mod tests {
         let dir = test_dir("save_increments_version").await;
         let client = LiluoClient::new(&dir).await.unwrap();
 
-        let mut asset = CognitiveAsset::Truth(TruthAsset {
+        let mut asset = CognitiveAsset::Skill(SkillAsset {
             header: AssetHeader {
-                asset_type: "truth".into(),
-                layer: 4,
-                id: "truth-ver".into(),
+                asset_type: "skill".into(),
+                layer: 1,
+                id: "skill-ver".into(),
                 name: "Version Test".into(),
                 description: "Testing version++".into(),
                 tags: vec!["test".into()],
                 confidence: 0.9,
                 version: 0,
             },
-            severity: "Soft".into(),
-            status: "active".into(),
-            justification: None,
+            tool_name: "calc".into(),
+            trigger_pattern: "calc".into(),
+            task_type_tags: vec!["math".into()],
+            success_count: 0,
+            fail_count: 0,
         });
 
         client.save_asset(&mut asset).await.unwrap();
@@ -1512,22 +1304,15 @@ mod tests {
         let dir = test_dir("search_tags").await;
         let client = LiluoClient::new(&dir).await.unwrap();
 
-        // Save a truth with tag "math".
-        let mut asset = CognitiveAsset::Truth(TruthAsset {
-            header: AssetHeader {
-                asset_type: "truth".into(),
-                layer: 4,
-                id: "truth-math".into(),
-                name: "Math Truth".into(),
-                description: "".into(),
-                tags: vec!["math".into(), "logic".into()],
-                confidence: 0.9,
-                version: 0,
-            },
-            severity: "Hard".into(),
-            status: "active".into(),
-            justification: None,
-        });
+        // Save a prompt with tag "math".
+        let mut asset = CognitiveAsset::Prompt(crate::types::agent::PromptAsset::new(
+            "prompt-math",
+            "Math Prompt",
+            "",
+            "content",
+            "FittingAgent",
+            vec!["math".into(), "logic".into()],
+        ));
         client.save_asset(&mut asset).await.unwrap();
 
         // Save a skill with tag "math".
@@ -1554,7 +1339,7 @@ mod tests {
         let results = client.search_by_tags(&["math"]).await.unwrap();
         assert_eq!(results.len(), 2);
 
-        // Search by "logic" — should get only the truth.
+        // Search by "logic" — should get only the prompt.
         let results = client.search_by_tags(&["logic"]).await.unwrap();
         assert_eq!(results.len(), 1);
 
@@ -1568,52 +1353,12 @@ mod tests {
         cleanup(&dir).await;
     }
 
-
-
-    #[tokio::test]
-    async fn test_index_rebuild_on_corruption() {
-        let dir = test_dir("index_corruption").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
-
-        // Save an asset so the index is populated.
-        let mut asset = CognitiveAsset::Truth(TruthAsset {
-            header: AssetHeader {
-                asset_type: "truth".into(),
-                layer: 4,
-                id: "truth-rebuild".into(),
-                name: "Rebuild Test".into(),
-                description: "".into(),
-                tags: vec!["rebuild-test".into()],
-                confidence: 0.9,
-                version: 0,
-            },
-            severity: "Soft".into(),
-            status: "active".into(),
-            justification: None,
-        });
-        client.save_asset(&mut asset).await.unwrap();
-
-        // Corrupt the index.
-        let index_path = dir.join("index.yaml");
-        let mut f = fs::File::create(&index_path).await.unwrap();
-        f.write_all(b"corrupt: [invalid yaml: {{").await.unwrap();
-        f.flush().await.unwrap();
-        drop(f);
-
-        // Searching should trigger a rebuild and still find the asset.
-        let results = client.search_by_tags(&["rebuild-test"]).await.unwrap();
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "truth-rebuild");
-
-        cleanup(&dir).await;
-    }
-
     #[tokio::test]
     async fn test_load_nonexistent_asset_returns_error() {
         let dir = test_dir("load_nonexistent").await;
         let client = LiluoClient::new(&dir).await.unwrap();
 
-        let result = client.load_asset("truth", "nonexistent").await;
+        let result = client.load_asset("prompt", "nonexistent").await;
         assert!(result.is_err());
 
         cleanup(&dir).await;
@@ -1730,11 +1475,8 @@ content: 手写内容
         assert_eq!(p.usage_count, 0);
         assert_eq!(p.success_rate, 0.0);
 
-        // 手写文件绕过 save_asset，索引是衍生缓存——需重建后搜索才能命中
-        // （真实场景由 DMN/初始化流程负责，此处显式验证）。
-        client.build_index().await.unwrap();
-
-        // search_prompts 必须能命中（index 重建后）。
+        // 手写文件绕过 save_asset——V38 实时扫描直接命中（无索引缓存）。
+        // search_prompts 必须能命中。
         let results = client.search_prompts(&["general"]).await.unwrap();
         assert!(
             results.iter().any(|x| x.id == "hand-written-prompt"),

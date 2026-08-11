@@ -1,14 +1,14 @@
-//! ConstraintEngine — L4 Truth runtime enforcement.
-//! Two integration points:
-//!   1. `load_truths()`  — inject L4 Truths into MetaAgent context
-//!   2. `check_constraints()` / `check_causal_output()` — pre-check before CausalAgent LLM call
+//! ConstraintEngine — L4 硬约束运行时执行（V38 起内置化，不再读归藏 truths/）。
+//! 两个集成点：
+//!   1. `load_truths()`  — 硬编码基线约束（不编造事实/有依据推理/可审计 + code-safety）
+//!   2. `check_constraints()` / `check_causal_output()` — CausalAgent LLM 调用前的 L0 检查
 //!
-//! See AGENTS.md §4 for detailed rules.
+//! V38：truths 资产层已移除——约束不再资产化、不参与 DMN 演化；
+//! 硬约束 = 本引擎内置的硬编码检查（summary 非空/有依据/可审计 + code-safety）。
 
-use crate::infra::knowledge::LiluoClient;
 use crate::types::agent::MetaContext;
 use crate::types::verification::{
-    ConstraintResult, ConstraintSeverity, ConstraintViolation, TruthConstraint, TruthStatus,
+    ConstraintResult, ConstraintSeverity, ConstraintViolation, TruthConstraint,
 };
 
 /// Engine for loading and enforcing L4 Truth constraints.
@@ -67,61 +67,6 @@ impl ConstraintEngine {
             count = truths.len(),
             tags = ?task_type_tags,
             "Loaded L4 Truths"
-        );
-
-        truths
-    }
-
-    /// Load L4 Truths from 归藏 Guizang, filtering by `TruthStatus::Active`.
-    ///
-    /// Returns only truths whose `status == Active`. Retracted or stale truths
-    /// are excluded from runtime enforcement.
-    ///
-    /// **Fallback:** When Guizang has no active truths for the given tags,
-    /// returns an empty Vec — the system runs with no active constraints.
-    /// Callers that always need baseline constraints should chain with
-    /// [`load_truths`] as a fallback layer.
-    pub async fn load_truths_from_guizang(guizang: &LiluoClient) -> Vec<TruthConstraint> {
-        let assets = match guizang.load_active_truths().await {
-            Ok(assets) => assets,
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "Failed to load active truths from Guizang — running without L4 constraints"
-                );
-                return Vec::new();
-            }
-        };
-
-        if assets.is_empty() {
-            tracing::debug!(
-                "No active truths found in Guizang — running without L4 constraints"
-            );
-            return Vec::new();
-        }
-
-        let truths: Vec<TruthConstraint> = assets
-            .iter()
-            .map(|a| TruthConstraint {
-                id: a.header.id.clone(),
-                name: a.header.name.clone(),
-                description: a.header.description.clone(),
-                severity: match a.severity.as_str() {
-                    "Hard" => ConstraintSeverity::Hard,
-                    _ => ConstraintSeverity::Soft,
-                },
-                justification: a.justification.clone(),
-                status: match a.status.as_str() {
-                    "active" => TruthStatus::Active,
-                    "retracted" => TruthStatus::Retracted,
-                    _ => TruthStatus::Stale,
-                },
-            })
-            .collect();
-
-        tracing::debug!(
-            count = truths.len(),
-            "Loaded active L4 Truths from Guizang"
         );
 
         truths

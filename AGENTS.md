@@ -84,18 +84,18 @@
 ### 目录布局
 ```
 .taiji/knowledge/
-├── prompts/     ← L5 提示词
-├── truths/      ← L4 约束
-├── models/      ← L2 贝叶斯经验（V22 起使用）
-├── skills/      ← L1 可执行工具
-└── index.yaml   ← tag 反向索引（衍生数据，自动维护）
+├── prompts/        ← L5 提示词
+├── verifications/  ← L1 验证契约（V33 结构化 checks）
+├── models/         ← L2 贝叶斯经验（V22 起使用）
+└── skills/         ← L1 可执行工具
+（V38：无 truths/ 资产层、无 index.yaml）
 ```
 
-- V22 起归藏**三层化**：`prompts/` `truths/` `models/` 为资产层，`skills/` 为工具层；`grids/`（L3 推理角色）及 GridAsset 已删除，代码 `ensure_dirs()` 只创建 truths/models/skills/prompts 四目录，新增资产层需同步修改 `ensure_dirs()`。
+- V22 起归藏**三层化**：`prompts/` `truths/` `models/` 为资产层，`skills/` 为工具层；`grids/`（L3 推理角色）及 GridAsset 已删除。**V38 起 truths/ 资产层移除**（硬约束内置为 ConstraintEngine 硬编码 L0 检查——summary 非空/有依据/可审计 + code-safety，不资产化、不参与 DMN 演化），`ensure_dirs()` 只创建 models/skills/prompts/verifications 四目录，新增资产层需同步修改 `ensure_dirs()`。
 
 - TPN 执行期间**只读**，DMN Consumer 是唯一写者。
 - `save_asset()` 前必须 `load_asset()` 确认版本不冲突，写入时 `version++`。
-- `index.yaml` 损坏时从原始 YAML 重建。`index.yaml` 只含 `tag_index`（V22 起 `dependency_index` 已删除）。
+- **V38 起无 index.yaml**：标签检索走实时目录扫描（`scan_assets` 内存构建 tag_index，不落盘；资产量级几十个毫秒级）。禁止重新引入 index.yaml / build_index / load_or_rebuild_index（索引漂移、损坏重建、并发 rename 冲突整类问题源头消失）。手写资产文件绕过 save_asset 也能被 search 命中（无需重建）。
 
 ### 深层递归产物传递
 - 产出目录必须使用绝对路径。父层 deliverables 注入子 `YangPrompt.parent_deliverables`（只读）。
@@ -182,7 +182,7 @@ TpnCycle 恢复历史时严格按此顺序（V28 产出继承，BCP §1.4 / §8.
 - **WS 流式聊天协议**：`ClientMessage::ChatMessage` 带 `sessionId`/`contextTaskId`（无 session 时服务端 Uuid 生成并经 `stream_done` 帧的 `data.sessionId` 返回前端）；流式响应为中间帧 `{requestId, ok, chunk}`（文本增量）+ 最终帧 `{requestId, ok, data:{text, sessionId}, chunk:"", streamDone:true}`；`chunk`/`stream_done` 均 `skip_serializing_if`，非聊天请求 JSON 不变；chatMessage 走 `CHAT_TIMEOUT_MS = 120s`，不得用默认 30s。
 - **ChatAgent 会话历史**：`{data_root}/chat/{session_id}.json` 原子写入（`save_json_atomic`）；历史经 Rig `stream_chat` 的 `FinalResponse.history()` 回填，为 None 时手动 push user+assistant 消息；新代码命名用 `GuizangClient`（`LiluoClient as GuizangClient` 别名仅允许出现在 chat.rs 主代码与测试各 1 处，其余文件既有旧名不改）。
 - **多 Provider**：`LlmConfig.providers: Vec<ProviderEntry>`——`name="deepseek"` 或无 `base_url` 走 deepseek map，其余走 OpenAI 兼容 map（`base_url` 必填否则 `LLMCallFailed`）；`ChatAgentBuilder` 经 `resolve_chat_provider` 双 map 解析。
-- **任务感知**：`build_system_prompt` 注入 `context_task_id` 对应 `meta.json`（description/status/depth）+ 归藏摘要（L5 prompts top-3 confidence 排序 + L4 active truths 前 5，knowledge 目录缺失时降级）。
+- **任务感知**：`build_system_prompt` 注入 `context_task_id` 对应 `meta.json`（description/status/depth）+ 归藏摘要（L5 prompts top-3 confidence 排序，knowledge 目录缺失时降级；V38 起不再取 truths——资产层已移除）。
 
 ## 9. BCP V22 精简产物（grid/relation 移除）
 
@@ -304,7 +304,7 @@ TpnCycle 恢复历史时严格按此顺序（V28 产出继承，BCP §1.4 / §8.
 - **V33 验证三权分立（归藏本体论重构 MVP-1）**：verify 管线 = ConstraintEngine（truths Hard 短路）→ **ContractEngine 机械执行 verifications checks（hard 失败直接短路返回 BackToMeta，LLM 不可翻案）** → LLM 只裁决 llm_judgement 项（L2 兜底 + 反偏置指令）。`llm_judgement` 不参与机械裁决（run_checks 跳过）；**机械全过 + 有契约 + 无 llm_judgement 项 → 直接 PASS（LLM 零调用）**；无契约资产（verifications 空）→ 维持纯 LLM 验证（降级路径不改）。`CausalVerifyAgentBuilder` 经 `.guizang(Arc<LiluoClient>)` builder 方法接线（工厂 `create_causal_verify_agent` 已接；None = 未接线 → 契约层跳过仅 warn）。
 - **ContractEngine 命令白名单（BCP §8.22）**：`command_succeeds` 仅允许 `COMMAND_ALLOWLIST` 前缀（cargo check / cargo test --no-run / rustc --emit=metadata）+ 禁止 shell 元字符（`&&`/`;`/`|`/`>`/`<`/`` ` ``/`$(`），命令经 `split_whitespace` 直接执行不经过 shell，30s 超时，cwd = task_dir，输出截断 2KB。新增命令进白名单须同步审查。
 - **契约资产 target 路径防护**：CheckSpec.target 含 `..` 段一律拒绝（`contains_path_traversal`），契约不得离开 task_dir；glob 仅支持最后一段单段 `*`（MVP-1 简化，不新增 glob 依赖）；`reference_resolves` 用 `extract_front_matter` 解析 `---` 围栏，`field` 缺省 `output_refs`。
-- **新增归藏资产层必须同步四处**：`ensure_dirs()` + `type_dir_name()` + `build_index()` 扫描数组 + `CognitiveAsset` 枚举（含 asset_type/id/version/set_version 匹配）——V33 加 verifications/ 就是这四处（历史教训：V22 grids/ 删除与 V33 verifications/ 新增都因漏改 build_index 导致索引漂移）。`search_by_tags(&[])` 返回空（for 循环不迭代），全量加载须走目录遍历（`load_all_verifications` 仿 `load_active_truths`）。
+- **新增归藏资产层必须同步三处**：`ensure_dirs()` + `type_dir_name()` + `CognitiveAsset` 枚举（含 asset_type/id/version/set_version 匹配）——V33 加 verifications/ 时需同步四处（含 build_index 扫描数组）是历史教训（V22 grids/ 删除与 V33 verifications/ 新增都因漏改导致索引漂移）；V38 移除 index.yaml 后扫描数组在 `scan_assets` 内，改层同样要同步它。`search_by_tags(&[])` 返回空（for 循环不迭代），全量加载须走目录遍历（`load_all_verifications` 仿 `load_active_truths`——后者 V38 已删，语义同 `load_all_prompts`）。
 - **手写资产 YAML 的 serde 对齐**：`type: verification`（CognitiveAsset tag）、`kind`/`severity` 为 snake_case（CheckKind/CheckSeverity rename_all）、checks 项必须含 id/kind/target/params/severity/pass_condition；缺省字段靠 `#[serde(default)]` 容错。种子契约写入后字段契约用 python yaml 校验（type/kind/severity/target/params/pass_condition 六项）。
 - **verify_state.json 的 checks 键兼容**：`{"report", "round", "cycle", "checks"}` 新增 checks（CheckResult 数组）——tpn_cycle 读取端只取 `state.get("report")`（serde_json::Value），加键零迁移；旧文件无 checks 键不报错。
 - **replace 编辑吞代码事故教训**：edit 替换时 newText 必须完整保留 oldText 中被匹配的语义内容（本次 `Ok(prompts)` 与 search_prompts 闭合被吞导致方法嵌入函数内部、impl 未闭合——`cargo build` 报 unclosed delimiter 在文件尾）。替换涉及函数结尾/impl 闭合时，newText 先复制 oldText 的尾部结构再追加新内容。
@@ -340,7 +340,7 @@ TpnCycle 恢复历史时严格按此顺序（V28 产出继承，BCP §1.4 / §8.
 
 ## 24. 按模型分区与分区路由（V36 实现轮）
 
-- **分区布局（BCP §6.1）**：`{knowledge}/{model_key}/`（model_key = `{provider}-{model}` slug）内含五资产层 + index.yaml；`model_stats.yaml`（元权重表）恒在 knowledge **根**（跨分区共享）。`LiluoClient` 双路径：`root_dir`（构造传入）恒为根、`data_dir`（活动目录）= 根或 `root/{model_key}`；`for_model(key)` 派生分区 client（自动建分区目录 + 五层 + 空 index），`partition_key()` 读回；根 client 与分区 client 的 `root_dir` 一致（model_stats 读写互见）。
+- **分区布局（BCP §6.1）**：`{knowledge}/{model_key}/`（model_key = `{provider}-{model}` slug）内含四资产层（V38：prompts/verifications/models/skills，无 truths/、无 index.yaml）；`model_stats.yaml`（元权重表）恒在 knowledge **根**（跨分区共享）。`LiluoClient` 双路径：`root_dir`（构造传入）恒为根、`data_dir`（活动目录）= 根或 `root/{model_key}`；`for_model(key)` 派生分区 client（自动建分区目录 + 四层），`partition_key()` 读回；根 client 与分区 client 的 `root_dir` 一致（model_stats 读写互见）。
 - **迁移时机**：`migrate_to_partitioned(root, default_key)` 幂等（目标已存在即跳过），在 `main.rs build_engine`（失败上抛——无降级原则）与 `cmd_init`（失败仅提示，人工可重跑）各调一次。**rename 前必须先 create_dir_all 分区目录**（os error 2 实测）。
 - **路由先于检索（plan.md V32 阻塞点 #1 修正）**：MetaAgent.run() 第一步是 ModelRouter（纯符号层，读 model_stats，无 LLM）→ `for_model` 分区检索 → LLM 编排。MetaContext.model = 路由结果（降级路径也保持——模型选择与资产编排解耦；None 仅当路由异常）。
 - **路由候选仅 deepseek 系**：default + `llm.providers` 中 base_url 为空或 name=="deepseek" 的条目；OpenAI-compat 不参与（Fitting/Causal 执行层 agent builder 跨 provider 类型动态分发未实现，MVP 边界）。`resolve_model` 按候选表精确匹配（模型名可含 `-`，禁止字符串拆解）。

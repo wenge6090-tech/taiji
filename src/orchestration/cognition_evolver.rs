@@ -1309,12 +1309,11 @@ mod tests {
         }
         assert!(
             assets.iter().all(|n| {
-                n == "truths"
-                    || n == "models"
+                // V38：不再创建 truths/ 与 index.yaml
+                n == "models"
                     || n == "skills"
                     || n == "prompts"
                     || n == "verifications"
-                    || n == "index.yaml"
             }),
             "unexpected files written during evolve: {assets:?}"
         );

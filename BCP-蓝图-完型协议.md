@@ -9,6 +9,7 @@
 > **架构定论（不可推翻）**：① 概率系统不能验证概率系统——收敛验证符号化（L0/L1 机械失败 > LLM 任何裁决，§6.6）；② 归藏 = 规范性本体论（验证契约库 + 生成资产库），拒绝向量库/图库/推理器/分布式/并行写/随机采样（§6.0/§8.3）；③ 激励问题不需要 ground truth——断言证据链（断言 vs 执行轨迹一致性）机械可判定（§8.22）；④ 最小 MVP 开发范式：每步可独立验收（§8.23）；⑤ 权重微调是模型厂家的事——taiji 不设计微调通道，models/ 层 steering_vector 仅预留（§6.2）；⑥ 一个模型 + 它的约束系统 = 一个领域学习单元——分区独立演化，契约难度随模型能力自适应（§6.1）。
 >
 > **版本历史**（全文见文末附录 A）：
+> - **V38**：归藏瘦身——移除 index.yaml 反向索引（实时目录扫描替代）+ 移除 truths 资产层（L0 输出健全性检查内置化，验证契约统一归 verifications/）
 > - **V37**：模型-领域学习单元 + 多级路由定稿 + 微调边界
 > - **V36**：归藏按模型分区 + 分区路由（ModelRouter / model_stats / 分区回传）
 > - **V35**：检索/演化侧数学化——UCB 检索落地 + prompts 对称演化（MVP-5/6）
@@ -170,7 +171,7 @@ taiji 的智能来自云端 LLM（DeepSeek via Rig）的概率采样能力与归
 | **Truths** | 硬约束层 | 全程硬约束，TCS 前置检查 + Hard 短路。**心流持续**，作为背景基线不变 |
 | **Skills** | 可执行工具（硬编码） | 5 个内置真实工具（read/write/bash/search/webfetch）+ MCP 注入。带 success_rate/use_count。**心流深层沉淀**，统计更新写回归藏 |
 | **models/** | 预留层（连山） | 连山流型系统接入前的占位。当前不参与任何运行时行为 |
-| **归藏 (Guizang)** | 本体论工程（验证契约库 + 生成资产库，V33） | **按模型分区**的资产树 YAML 存储于 `.taiji/knowledge/{model_key}/`（prompts/workflows 阳轨生成资产 + **verifications/truths 阴轨验证契约（V33 结构化 checks）** + index.yaml），`model_stats.yaml`（元权重表）存于 knowledge 根。TPN 执行期间只读，DMN Consumer 单写者（V32 §6.1/§8.21；V33 §6.0/§6.6） |
+| **归藏 (Guizang)** | 本体论工程（验证契约库 + 生成资产库，V33） | **按模型分区**的资产树 YAML 存储于 `.taiji/knowledge/{model_key}/`（prompts/workflows 阳轨生成资产 + **verifications/ 阴轨验证契约（V33 结构化 checks；V38 起 truths/ 并入，L0 检查内置）**），`model_stats.yaml`（元权重表）存于 knowledge 根。**无 index.yaml（V38 移除——标签检索实时目录扫描）**。TPN 执行期间只读，DMN Consumer 单写者（V32 §6.1/§8.21；V33 §6.0/§6.6） |
 | **MetaAgent** | 权重更新·元 | 瞬态 Rig Agent，查询归藏 **UCB 选择** + LLM 编排 system prompt（fitting/verify/converge），**按递归层数规则 + 任务难易程度决策阴阳配对模式（编排-收敛 / 执行-验证）+ 元权重模型路由（ModelRouter bandit，V32）**，产出 MetaContext（含 mode / model / assets_used）。受 §8.19 上下文预算约束（V29，替换 max_turns=6） |
 | **FittingAgent** | 概率拟合·阳 | 瞬态 Rig Agent，内置 5 个 L1 Skills + `causal_verify`（任意深度注册）；`recursive_decompose` **仅编排模式注册**（执行模式 LLM 不可见）；前端通过 MCP ExternalContext 注入额外上下文。受 §8.19 上下文预算约束（V29，替换 max_turns=30）。模式由 MetaContext 携带（MetaAgent 决策） |
 | **CausalAgent** | 因果验证·阴 | 瞬态 Rig Agent（双模式：verify / converge，**各自按节点模式选模板**）。verify 前置管线（V33 §6.6）：ConstraintEngine（Truths Hard 短路）→ **ContractEngine 机械执行验证契约 checks（L0 机械 + L1 契约，hard 失败直接短路，LLM 不可翻案）** → 剩余 llm_judgement 项 + ContractReport 注入 LLM 裁决（L2 兜底）；converge 聚合子结果判决收敛。受 §8.19 上下文预算约束（V29，替换 max_turns=10） |
@@ -238,7 +239,7 @@ TPN（任务处理网络）与 DMN（归藏认知演化）是同一认知系统�
 |------|-----|-----|
 | 本质 | 执行的马尔可夫链——每次执行 = 一次 rollout | 蒙特卡洛探索 fork 树——持久累积跨任务认知 |
 | 方向 | 前向 / 生成（retrieve → augment → execute） | 反向 / 训练（evaluate → update → re-retrieve） |
-| 载体 | 递归树（任务节点 = TPN 三相循环） | 资产树（prompts / workflows / verifications / truths / models） |
+| 载体 | 递归树（任务节点 = TPN 三相循环） | 资产树（prompts / workflows / verifications / models） |
 | 比喻 | 周易（变）——概率采样与因果验证 | 归藏（藏）——符号累积与统计调权 |
 
 同一棵资产树：TPN 在树上做检索消费（前向），DMN 在树上做统计更新（反向）——如 Transformer 权重同时服务训练与生成。**TPN 递归树验证 DMN 有效性**：DMN 的每次更新都被后续 TPN 执行的统计差异检验（省 token / 更高通过率），自我改进有数据支持。
@@ -259,7 +260,7 @@ ModelRouter（读 model_stats 元权重表，纯符号层）
   → MetaContext { mode, model, assets_used, prompts } 注入 Fitting / Causal
 另外两路只读消费：
   → ContractEngine 加载 verifications/ 机械验证（§8.22）
-  → ConstraintEngine 加载 truths/ 前置检查（Hard 短路）
+  → ConstraintEngine L0 输出健全性检查（内置硬编码，Hard 短路——V38 起不再读 truths/ 资产层）
 ```
 
 ### 数据流：TPN → DMN（反向 · 统计回传）
@@ -442,7 +443,7 @@ flowchart TB
 | 12 | `TaijiMcpServer.handle_explain(task_id) -> ExplainReport` | 读取 `meta.json` + 递归 `trace.jsonl` + `deliverables/` 目录，解析 TraceRecord 的 phase/cycle/round 字段构建阶段时间线和路由决策树，产出人类可读 ExplainReport（含 summary 自然语言总结） |
 | 13 | `AgentFactory.create_chat_agent(session_id, context_task_id, model, provider_name) -> ChatAgentBuilder` | 创建前端聊天面板的 ChatAgent builder。LLM 配置从 `agent_overrides["chat"]` 解析（model/provider_name 为 None 时使用解析后的默认值）。构造出的 builder 持有 `session_id`、`context_task_id`、`providers: Arc<ProviderRegistry>`、`safety_hook`、`config`、`data_root`、`model`、`provider_name` 八个字段（**不持有 AgentFactory 引用**——AgentFactory 无 Clone）。自动注册 5 个 L1 Skills + SafetyHook。`max_turns=20`。**不进 TPN 循环** |
 | 14 | `ChatAgentBuilder.chat(message, chat_history: &mut Vec<Message>, on_chunk: Box<dyn Fn(String) + Send + Sync>) -> Result<String, TaijiError>` | 单轮对话执行。`on_chunk` 回调接收每个文本 delta（Rig `StreamedAssistantContent::Text` 解包后的纯文本），需 `Send + Sync` 以跨 await 传递到 WS mpsc 通道。内部使用 `agent.stream_chat()` → 遍历 `MultiTurnStreamItem` → 提取 Text/ReasoningDelta → 回调。`chat_history` 可变借用，完成后内部自动 `save_json_atomic` 持久化。返回完整响应文本。`context_task_id` 是 builder 构造时字段，非 per-message 参数 |
-| 15 | `ChatAgentBuilder.build_system_prompt() -> String`（`async fn`） | 构建 ChatAgent 的 system prompt。若 `context_task_id` 非空，注入任务描述（从 `{data_root}/tasks/{id}/meta.json` 读取 description/status/depth）+ 归藏知识摘要（内部调用 `async fn guizang_digest(&self) -> Option<String>`：使用 `LiluoClient::new_sparse` 降级扫描 `prompts/` 目录按 confidence 降序取 top-3 Prompts + `load_active_truths` 取前 5，拼接 "## 归藏知识摘要" 段落；knowledge 目录缺失或任何步骤失败时 warn + 返回 None 降级）。无 context_task_id 时使用通用助手模板 |
+| 15 | `ChatAgentBuilder.build_system_prompt() -> String`（`async fn`） | 构建 ChatAgent 的 system prompt。若 `context_task_id` 非空，注入任务描述（从 `{data_root}/tasks/{id}/meta.json` 读取 description/status/depth）+ 归藏知识摘要（内部调用 `async fn guizang_digest(&self) -> Option<String>`：使用 `LiluoClient::new_sparse` 降级扫描 `prompts/` 目录按 confidence 降序取 top-3 Prompts（V38 起不再取 truths——资产层已移除），拼接 "## 归藏知识摘要" 段落；knowledge 目录缺失或任何步骤失败时 warn + 返回 None 降级）。无 context_task_id 时使用通用助手模板 |
 
 ---
 
@@ -901,7 +902,7 @@ CausalAgent.verify() 接收的 `tool_results` 由 `TpnCycle.collect_tool_results
 | 层 | 执行者 | 内容 | 失败语义 |
 |:---:|------|------|------|
 | **L0 机械验证** | ContractEngine（确定性，零 LLM） | file_exists / schema_valid / reference_resolves / command_succeeds 类检查项——文件存在性、schema 校验、引用完整性、可执行命令 | hard 失败 → 直接短路（BACK_TO_META / FAIL），**LLM 不可翻案** |
-| **L1 契约验证** | ContractEngine 加载 verifications/ + truths/ 结构化契约 | 契约条件匹配 → 断言机械执行 → 结构化通过/失败记录（CheckResult）；**含 TraceConsistency（V34：断言引用 → trace 工具调用存在性，§8.22）** | 同上；soft 失败注入 LLM prompt 供参考 |
+| **L1 契约验证** | ContractEngine 加载 verifications/ 结构化契约（V38 起唯一阴轨资产层——truths 已并入） | 契约条件匹配 → 断言机械执行 → 结构化通过/失败记录（CheckResult）；**含 TraceConsistency（V34：断言引用 → trace 工具调用存在性，§8.22）** | 同上；soft 失败注入 LLM prompt 供参考 |
 | **L2 LLM 验证** | CausalAgent LLM（概率层，最后兜底） | 仅 llm_judgement 类检查项（语义合理性 / 设计决策 / 跨领域一致性） | LLM 裁决只影响 llm_judgement 项；机械检查失败时 LLM 的 PASS 无效 |
 
 **裁决优先级（硬约束）**：`L0/L1 机械失败 > LLM 任何裁决`。机械检查失败直接短路（不经 LLM），LLM 只对剩余项裁决；LLM 的 PASS 不能覆盖机械 FAIL。
@@ -1378,7 +1379,7 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 
 | 本体论概念 | 归藏载体 | 工程含义 |
 |------|------|------|
-| **TBox**（概念/类/属性/关系/公理） | `verifications/`（结构化 checks）+ `truths/`（硬约束） | 「什么算验证通过」是**形式化声明**，不是 LLM 的自由裁量 |
+| **TBox**（概念/类/属性/关系/公理） | `verifications/`（结构化 checks） | 「什么算验证通过」是**形式化声明**，不是 LLM 的自由裁量 |
 | **ABox**（实例断言） | 每次 TPN 执行产生的 deliverables / trace / ContractReport | 每次执行 = 一次 ABox 填充 + 一次契约判定 |
 | **规则/公理** | CheckSpec（可机械执行的检查项） | 条件 + 检查动作 + 通过标准，机器可执行 |
 
@@ -1392,7 +1393,7 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 
 | Palantir 五层（数据升维） | taiji 对应物 | 吸收/拒绝 |
 |---|---|---|
-| L1 存在层：数据→对象双射 | truths/ 硬约束 + TPN 产出的 ABox 实例（deliverables） | 对应：概念存在与实例断言 |
+| L1 存在层：数据→对象双射 | L0 内置健全性检查（V38：原 truths/ 硬约束内置化）+ TPN 产出的 ABox 实例（deliverables） | 对应：概念存在与实例断言 |
 | L2 关系层：属性图 G=(V,E) | 资产树 parent_id/variant_of + tags 索引 | **拒绝图结构**：V22 已删关系引擎，MCTS 树 + 标签索引足够，图引入无谓复杂度 |
 | L3 时间层：状态空间演化 | AssetStats 随版本累积（backprop γ=0.5 衰减） | 对应：统计即时间沉淀，不做时序模型 |
 | L4 逻辑层：FOL 公理 + 推理器 | CheckSpec + ConstraintEngine 机械执行 | 部分吸收：检查项是**可判定断言**的子集——符号层只做机械可判定检查，不做演绎推理（无推理器） |
@@ -1413,9 +1414,9 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 │   ├── prompts/          ← 角色模板（标签匹配 + UCB 选择 → LLM 编排 system prompt。心流深层消溶）
 │   ├── workflows/        ← V32 阳轨：特殊工作流 + 稳定涌现文本 + 可执行脚本模板
 │   ├── verifications/    ← V32 阴轨：收敛验证契约（验证工具选择 + 特定工作流验收判据）
-│   ├── truths/           ← 硬约束（severity + justification + env_tags。心流全程持续）
-│   ├── models/           ← 预留层（待连山流型系统接入——当前为空目录）
-│   └── index.yaml        ← tag 反向索引（自动维护，每分区独立）
+│   ├── models/           ← 贝叶斯后验层（MVP-3.5 激活：alpha/beta，与 verification 同名关联）
+│   └── skills/           ← L1 技能统计元数据（V22 起）
+│   （无 index.yaml —— V38 移除：标签检索实时目录扫描；无 truths/ —— V38 移除：L0 检查内置）
 ├── model_stats.yaml      ← V32 元权重表：(model_key × tag) → 统计，ModelRouter 数据源
 └── (旧单根目录资产 → 迁移到默认模型分区，迁移幂等)
 ```
@@ -1427,11 +1428,11 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 | **Prompts** | 角色模板 | MetaAgent 查询（**UCB**）→ LLM 编排 → MetaContext 注入 | 消溶：角色叙事溶解，不显式出现于 prompt | 归藏文件系统（下次浅层加载） |
 | **Workflows**（V32） | 阳轨·流程模板 | 与 Prompts 同通道检索，注入 fitting prompt | 消溶 | 归藏文件系统 |
 | **Verifications**（V32） | 阴轨·验证契约 | 注入 verify/converge prompt，指导验证工具选择 | 持续 | 归藏文件系统 |
-| **Truths** | 硬约束 | ConstraintEngine 前置检查 → Hard 短路 | 持续：背景基线，全程运行 | 归藏文件系统 |
+| **Truths（V38 移除）** | ~~硬约束资产层~~ → **L0 输出健全性检查**（ConstraintEngine 内置硬编码：summary 非空/有依据/可审计 + code-safety；V38 起不再资产化、不参与 DMN 演化） | CausalAgent.verify 前置检查 → Hard 短路 | 持续：背景基线，全程运行 | 代码内置 |
 | **models/** | 预留 | 无 | 预留：连山流型发现的落点 | 预留（未来：模型权重） |
 | **Skills** | 可执行工具（硬编码） | LLM 工具调用 | 沉淀：统计更新写回归藏，success_rate 更新 | 归藏文件系统 |
 
-**模型-领域学习单元（V37 语义定稿）**：分区不只是资产隔离，而是**学习单元**——每个分区是 (模型 × 约束系统) 的绑定主体：**模型提供概率地形**（猜想源：LLM 生成候选），**约束系统**（prompts/workflows/verifications/truths）**提供机械判据**（反驳源：ContractEngine 验证候选），**分区统计**（stats / models/ 贝叶斯后验）**提供累积**（选择源：DMN 回传与演化），三者绑定为一个**独立演化的领域学习单元**——模型不变，学习发生在围绕它的符号结构。推论（机制已存在，V37 显式化）：**契约难度随模型能力自适应**——各分区统计独立 → 弱模型分区通过率低 → fork 宽松变体（`strictness="loose"`）；强模型分区通过率高 → fork 严格变体（`strictness="strict"`）；同一领域契约在不同分区按各自统计独立演化（难度 = f(模型能力)），**变体树不跨分区**（fork/merge/prune 只作用于本分区资产）。
+**模型-领域学习单元（V37 语义定稿）**：分区不只是资产隔离，而是**学习单元**——每个分区是 (模型 × 约束系统) 的绑定主体：**模型提供概率地形**（猜想源：LLM 生成候选），**约束系统**（prompts/workflows/verifications，V38 起 truths 内置化不属资产）**提供机械判据**（反驳源：ContractEngine 验证候选），**分区统计**（stats / models/ 贝叶斯后验）**提供累积**（选择源：DMN 回传与演化），三者绑定为一个**独立演化的领域学习单元**——模型不变，学习发生在围绕它的符号结构。推论（机制已存在，V37 显式化）：**契约难度随模型能力自适应**——各分区统计独立 → 弱模型分区通过率低 → fork 宽松变体（`strictness="loose"`）；强模型分区通过率高 → fork 严格变体（`strictness="strict"`）；同一领域契约在不同分区按各自统计独立演化（难度 = f(模型能力)），**变体树不跨分区**（fork/merge/prune 只作用于本分区资产）。
 
 TPN 执行期间只读，DMN Consumer 单写者更新（**分区维度：任务级路由下任务内所有 Agent 使用同一分区**——按路由模型的 model_key，MetaContext.model 是唯一载体；V37 相位级路由激活后各相位按其路由模型用对应分区，§8.8）。
 
@@ -1446,7 +1447,7 @@ TPN 执行期间只读，DMN Consumer 单写者更新（**分区维度：任务�
 |------|------|------|
 | `id` | String | 唯一标识（如 `prompt:orch-fitting`） |
 | `type` | String | prompt / truth（由目录隐式确定） |
-| `layer` | u32 | 4 / 5（沿用原层号，目录为 prompts/truths） |
+| `layer` | u32 | 4 / 5（沿用原层号；V38 起 truths 层移除，layer=4 仅存在于历史资产） |
 | `name` | String | 名称 |
 | `description` | String | 描述 |
 | `tags` | Vec[String] | 搜索标签 |
@@ -1460,7 +1461,7 @@ TPN 执行期间只读，DMN Consumer 单写者更新（**分区维度：任务�
 | Prompts | `content: String`（行为模板正文，含角色定义 + 工作流）, `agent_target: String`（"FittingAgent" \| "CausalAgent"）, `temperature: Option<f32>`（可选温度覆盖，None 时使用 Base 模板默认值）, `usage_count: u32`, `success_rate: f64`, **`stats: AssetStats`（V35：任务级 MCTS 统计，实现层补齐 §6.2 通用树字段承诺——MVP-6 回传写入）** |
 | Workflows（V32） | `content: String`（步骤序列/命令/验收要点）, `agent_target: String`, `usage_count: u32`, `success_rate: f64` |
 | Verifications（V32/V33） | `content: String`（契约语义描述，人读）, **`checks: Vec[CheckSpec]`（V33：结构化检查项，机器执行——§4）**, `agent_target: String`（"CausalAgent" 为主）, `usage_count: u32`, `success_rate: f64` |
-| Truths | `severity: String`（"Hard" \| "Soft"）; `justification: Option<String>`（此约束为什么成立——供审计，不参与运行时传播）, `env_tags: Vec<String>`（V32） |
+| Truths（V38 移除） | ~~`severity: String`; `justification`; `env_tags`~~ → 不再资产化；原语义内置为 ConstraintEngine L0 检查（severity 映射 ConstraintSeverity，justification 审计字段废弃） |
 | models/ | **贝叶斯后验层（MVP-3.5 激活，原「预留层」）** — 每验证契约一个资产（id 与 verification 同名关联）：`alpha: f64`, `beta: f64`（Beta-Bernoulli 共轭后验），`steering_vector: Option<Vec<f32>>`（介入向量，仍预留） |
 
 **V32 通用树结构字段（所有可检索资产层共享，serde default 零迁移）：**
@@ -1472,7 +1473,7 @@ TPN 执行期间只读，DMN Consumer 单写者更新（**分区维度：任务�
 | `variant_of` | `Option<String>` | 同源变体组 id（fork 树分组） |
 | `stats` | AssetStats | MCTS 统计块：`n / pass_count / cost_tokens_sum / cost_tokens_sq_sum / quality_sum / verify_rounds_sum` |
 
-index.yaml 仅保留 `tag_index`（反向索引）。`relations`、`justification_depends_on`、`dependency_index` 不在资产模型中。
+**index.yaml 已移除（V38）**：标签检索改实时目录扫描（`scan_assets` 内存构建 tag → AssetRef 映射，不落盘；资产量级几十个，扫描毫秒级）。`relations`、`justification_depends_on`、`dependency_index` 不在资产模型中（历史：V22 起 index.yaml 仅剩 tag_index，V38 整个移除）。
 
 
 ### 6.3 检索（V32：UCB 选择替代纯 confidence 排序）
@@ -1481,7 +1482,7 @@ index.yaml 仅保留 `tag_index`（反向索引）。`relations`、`justificatio
 flowchart LR
     subgraph "MetaAgent 加载归藏（当前模型分区）"
         QUERY["task_type_tags → 标签匹配 assets"]
-        QUERY --> LOAD["加载候选资产（prompts + workflows + verifications + truths）"]
+        QUERY --> LOAD["加载候选资产（prompts + workflows + verifications）"]
         LOAD --> RANK["UCB 排序（利用 + 探索）"]
         RANK --> MC["产出 → MetaContext（含 assets_used）"]
     end
@@ -1490,7 +1491,6 @@ flowchart LR
         P1["prompts/*.yaml 节点"]
         P2["workflows/*.yaml 节点（V32）"]
         P3["verifications/*.yaml 节点（V32）"]
-        T1["truths/*.yaml"]
         S["AssetStats 统计"]
     end
 
@@ -1685,7 +1685,7 @@ DMN Consumer 代码已完整实现并测试通过，但日常 `taiji run` 不启
 | 阳轨（生成侧） | prompts/ | 角色模板（行为风格） | MetaAgent 编排 → Fitting |
 | 阳轨（生成侧） | workflows/（V32） | 特殊工作流 + 稳定涌现文本 + 可执行脚本模板 | MetaAgent 编排 → Fitting |
 | 阴轨（验证侧） | verifications/（V32/V33） | 收敛验证契约：结构化 checks（file_exists / schema_valid / reference_resolves / command_succeeds / llm_judgement） | ContractEngine 机械执行（L0/L1）→ LLM 只裁决 llm_judgement（L2，§6.6） |
-| 硬约束 | truths/ | 环境事实 + 不可违反规则（env_tags 环境维度） | ConstraintEngine + MetaAgent |
+| 硬约束（V38 起内置） | ~~truths/~~ → ConstraintEngine 内置 L0 检查（summary 非空/有依据/可审计 + code-safety） | 环境事实 + 不可违反规则 | CausalAgent.verify 前置（Hard 短路），不资产化、不演化 |
 | 统计层 | models/ | 激活（MVP-3.5）：alpha/beta 贝叶斯后验，steering_vector 仍预留 | 激活 |
 
 **V33/MVP-3 契约空间定量化（实现层定稿）**：
