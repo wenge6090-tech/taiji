@@ -96,6 +96,9 @@
 - TPN 执行期间**只读**，DMN Consumer 是唯一写者。
 - `save_asset()` 前必须 `load_asset()` 确认版本不冲突，写入时 `version++`。
 - **V38 起无 index.yaml**：标签检索走实时目录扫描（`scan_assets` 内存构建 tag_index，不落盘；资产量级几十个毫秒级）。禁止重新引入 index.yaml / build_index / load_or_rebuild_index（索引漂移、损坏重建、并发 rename 冲突整类问题源头消失）。手写资产文件绕过 save_asset 也能被 search 命中（无需重建）。
+- **V39 种子复制（taiji seed）**：`taiji seed <target_key> [--from <source_key>]`——把源分区（默认 = 配置默认模型分区）的活跃种子资产（prompts/ + verifications/，status != pruned）文件级复制到目标分区（自动创建）。**不复制 models/（贝叶斯后验 = 该模型学习单元累积，新模型从零积累——复制旧统计会污染路由 UCB）**；version 保持原值（内容快照非演化写）；幂等（目标已存在同名 → 跳过不覆盖）。分区键必须校验（`validate_partition_key`：非空、无 `/\ .` 与 `..`——CLI 输入即攻击面）；源分区缺失 → 上抛。
+- **手写资产 YAML 的冒号陷阱（V39 冒烟实证）**：plain scalar 内嵌 `[证据: 工具名]`（冒号+空格在 flow collection 里非法）会导致整个资产解析失败——**该资产从未被 ContractEngine 加载过（V34 种子资产写入时就有此 bug，load_all_verifications 静默跳过）**。手写/修改资产含 `[xx: yy]` 或 `(推测)` 类内容时必须用双引号包裹整个字符串；改资产后全量 `serde_yaml` 解析验证（python yaml 也可，报错行列同源）。
+- **seed 冒烟 = 资产健康检查**：`taiji seed` 会解析源分区全部资产——解析失败的资产被 warn 跳过，`copied` 计数少于预期即提示资产层存在坏文件。
 
 ### 深层递归产物传递
 - 产出目录必须使用绝对路径。父层 deliverables 注入子 `YangPrompt.parent_deliverables`（只读）。

@@ -25,6 +25,16 @@ enum Command {
     },
     /// Initialize workspace (.taiji/ + 理络 knowledge store)
     Init,
+    /// Seed a new model partition with the default partition's active seed
+    /// assets (prompts/ + verifications/). Stats/models NOT copied — each
+    /// partition is an independent learning unit (BCP §6.1).
+    Seed {
+        /// Target model key (`{provider}-{model}` slug) for the new partition
+        model_key: String,
+        /// Source partition key (default: configured default model partition)
+        #[arg(long)]
+        from: Option<String>,
+    },
     /// Show task trace
     Trace {
         /// Task ID
@@ -69,6 +79,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             with_dmn,
         } => cmd_run(description, resume, with_dmn).await?,
         Command::Init => cmd_init().await?,
+        Command::Seed { model_key, from } => cmd_seed(&model_key, from.as_deref()).await?,
         Command::Trace {
             task_id,
             tree,
@@ -248,6 +259,45 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     println!("✓ taiji workspace initialized at {}", config.data_root);
+    Ok(())
+}
+
+/// V39：种子复制——把源分区（默认 = 配置的默认模型分区）的活跃种子资产
+/// （prompts/ + verifications/）复制到目标模型分区。stats/models 不复制
+/// （每个分区是独立学习单元，新模型从零积累——BCP §6.1）。
+async fn cmd_seed(
+    model_key: &str,
+    from: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config()?;
+    let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
+
+    let default_key = taiji::types::agent::ModelKey::from_parts(
+        if config.llm.default_provider.is_empty() {
+            "deepseek"
+        } else {
+            &config.llm.default_provider
+        },
+        if config.llm.default_model.is_empty() {
+            "deepseek-chat"
+        } else {
+            &config.llm.default_model
+        },
+    );
+    let source_key = from.unwrap_or(default_key.key());
+
+    let report =
+        taiji::infra::knowledge::seed_partition(&knowledge_dir, source_key, model_key).await?;
+
+    println!(
+        "✓ seeded {} active assets ({}) → partition '{}' ({} skipped existing, {} pruned excluded)",
+        report.copied,
+        source_key,
+        model_key,
+        report.skipped,
+        report.pruned_skipped
+    );
+    println!("  models/ 统计与贝叶斯后验未复制——新分区从零积累（学习单元语义，BCP §6.1）");
     Ok(())
 }
 

@@ -1036,6 +1036,170 @@ pub async fn migrate_to_partitioned(
     Ok(())
 }
 
+/// V39 种子复制结果报告。
+#[derive(Debug, Clone, Default)]
+pub struct SeedReport {
+    /// 实际复制到目标分区的资产数。
+    pub copied: usize,
+    /// 目标已存在而跳过的资产数（幂等）。
+    pub skipped: usize,
+    /// 源中 status=pruned 而不复制的资产数。
+    pub pruned_skipped: usize,
+}
+
+/// 分区键合法性校验（V39）——`{provider}-{model}` slug 将拼接为目录路径，
+/// 必须杜绝路径穿越与特殊字符（与 task_id 路径安全化同精神，AGENTS.md §19）。
+/// 非法 → Err 上抛（无降级原则：CLI 输入即攻击面）。
+fn validate_partition_key(key: &str) -> Result<(), TaijiError> {
+    let invalid = key.is_empty()
+        || key.contains(['/', '\\', '.', ' '])
+        || key.contains("..")
+        || key.chars().any(|c| c.is_control());
+    if invalid {
+        return Err(TaijiError::KnowledgeStoreUnavailable {
+            context: format!(
+                "invalid partition key '{key}': must be a {{provider}}-{{model}} slug \
+                 (alphanumeric + '-') and must not contain path separators or '..'"
+            ),
+        });
+    }
+    Ok(())
+}
+
+/// V39 种子复制（BCP §6.1）——把源分区的活跃种子资产（`prompts/` +
+/// `verifications/`，status != "pruned"）文件级复制到目标分区。
+///
+/// - 目标分区自动创建（`for_model` 语义：分区目录 + 四资产层）。
+/// - **不复制** `models/`（贝叶斯后验 = 该模型的学习单元累积，新单元从零
+///   开始——复制旧统计会污染路由 UCB）。
+/// - version 保持原值（种子 = 内容快照，非演化写；目标不存在同名文件）。
+/// - 幂等：目标已存在同名资产 → 跳过不覆盖。
+/// - 源分区缺失 → Err 上抛（无降级原则）；单资产文件损坏 → warn 跳过。
+///
+/// # Errors
+/// 分区键非法 / 源分区缺失 → `TaijiError::KnowledgeStoreUnavailable`。
+///
+/// 调用方：`taiji seed <target_key> [--from <source_key>]`（main.rs cmd_seed）。
+pub async fn seed_partition(
+    root: &Path,
+    source_key: &str,
+    target_key: &str,
+) -> Result<SeedReport, TaijiError> {
+    validate_partition_key(target_key)?;
+    validate_partition_key(source_key)?;
+
+    let source_dir = root.join(source_key);
+    if !fs::metadata(&source_dir).await.map(|m| m.is_dir()).unwrap_or(false) {
+        return Err(TaijiError::KnowledgeStoreUnavailable {
+            context: format!(
+                "seed_partition: source partition {:?} does not exist \
+                 (run the source model's tasks first, or check the model key)",
+                source_dir
+            ),
+        });
+    }
+
+    let partition = LiluoClient::for_model(&LiluoClient::new(root).await?, target_key).await?;
+    let mut report = SeedReport::default();
+
+    // 复制范围：prompts/ + verifications/（活跃种子资产）。
+    for type_ in &["prompt", "verification"] {
+        let layer = LiluoClient::type_dir_name(type_);
+        let src_layer = source_dir.join(layer);
+        if !fs::metadata(&src_layer).await.map(|m| m.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let dst_layer = partition.data_dir.join(layer);
+        fs::create_dir_all(&dst_layer).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("seed_partition: failed to create {:?}: {e}", dst_layer),
+            }
+        })?;
+
+        let mut read_dir = fs::read_dir(&src_layer).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("seed_partition: failed to read {:?}: {e}", src_layer),
+            }
+        })?;
+        while let Some(entry) = read_dir.next_entry().await.transpose() {
+            match entry {
+                Ok(e) => {
+                    let path = e.path();
+                    if path.extension().is_none_or(|ext| ext != "yaml") {
+                        continue;
+                    }
+                    if path
+                        .file_name()
+                        .is_none_or(|n| n.to_string_lossy().ends_with(".tmp"))
+                    {
+                        continue;
+                    }
+                    let Some(file_name) = path.file_name().map(|n| n.to_string_lossy().into_owned())
+                    else {
+                        continue;
+                    };
+
+                    // 解析验证（种子可读性）——单资产损坏仅 warn，不阻断其余。
+                    let content = match fs::read_to_string(&path).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(
+                                "seed_partition: failed to read {:?}: {e} — skipping",
+                                path
+                            );
+                            continue;
+                        }
+                    };
+                    let Ok(asset) = serde_yaml::from_str::<CognitiveAsset>(&content) else {
+                        tracing::warn!(
+                            "seed_partition: unparseable asset {:?} — skipping",
+                            path
+                        );
+                        continue;
+                    };
+                    // 过滤非活跃（pruned）资产。
+                    if match &asset {
+                        CognitiveAsset::Prompt(p) => p.status == "pruned",
+                        CognitiveAsset::Verification(v) => v.status == "pruned",
+                        _ => false,
+                    } {
+                        report.pruned_skipped += 1;
+                        continue;
+                    }
+
+                    // 幂等：目标已存在 → 跳过不覆盖（种子不覆盖演化产物）。
+                    let dst_path = dst_layer.join(&file_name);
+                    if fs::metadata(&dst_path).await.is_ok() {
+                        report.skipped += 1;
+                        continue;
+                    }
+
+                    fs::copy(&path, &dst_path).await.map_err(|e| {
+                        TaijiError::KnowledgeStoreUnavailable {
+                            context: format!(
+                                "seed_partition: failed to copy {:?} → {:?}: {e}",
+                                path, dst_path
+                            ),
+                        }
+                    })?;
+                    report.copied += 1;
+                    tracing::info!(
+                        source = %source_key,
+                        target = %target_key,
+                        file = %file_name,
+                        "seeded asset into target partition"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("seed_partition: error reading directory entry: {e}");
+                }
+            }
+        }
+    }
+
+    Ok(report)
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -1173,6 +1337,115 @@ mod tests {
         let partition = root.for_model("deepseek-deepseek-chat").await.unwrap();
         let loaded = partition.load_asset("prompt", "legacy-prompt").await;
         assert!(loaded.is_ok(), "migrated asset readable in partition");
+
+        cleanup(&dir).await;
+    }
+
+    // ── V39 种子复制（taiji seed）────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_seed_partition_copies_active_seeds_and_skips_pruned() {
+        let dir = test_dir("seed_copy").await;
+        let root = LiluoClient::new(&dir).await.unwrap();
+
+        // 源分区：一个 active prompt + 一个 pruned prompt + 一个 active verification
+        let src = root.for_model("deepseek-deepseek-src").await.unwrap();
+        let mut p = crate::types::agent::PromptAsset::new(
+            "seed-prompt",
+            "种子提示词",
+            "seed",
+            "content",
+            "FittingAgent",
+            vec!["general".into()],
+        );
+        src.save_asset(&mut CognitiveAsset::Prompt(p)).await.unwrap();
+
+        let mut pruned = crate::types::agent::PromptAsset::new(
+            "pruned-prompt",
+            "淘汰提示词",
+            "p",
+            "content",
+            "FittingAgent",
+            vec!["general".into()],
+        );
+        pruned.status = "pruned".into();
+        src.save_asset(&mut CognitiveAsset::Prompt(pruned)).await.unwrap();
+
+        let mut v = crate::types::agent::VerificationAsset::new(
+            "seed-verification",
+            "种子契约",
+            "seed",
+            "content",
+            Vec::new(),
+            vec!["general".into()],
+        );
+        src.save_asset(&mut CognitiveAsset::Verification(v)).await.unwrap();
+
+        // 目标分区：已存在一个同名资产（幂等跳过测试用）
+        let dst = root.for_model("deepseek-deepseek-dst").await.unwrap();
+        let mut existing = crate::types::agent::PromptAsset::new(
+            "seed-prompt",
+            "已存在",
+            "x",
+            "content",
+            "FittingAgent",
+            vec!["general".into()],
+        );
+        dst.save_asset(&mut CognitiveAsset::Prompt(existing))
+            .await
+            .unwrap();
+
+        let report = seed_partition(&dir, "deepseek-deepseek-src", "deepseek-deepseek-dst")
+            .await
+            .unwrap();
+        // 复制：seed-verification（seed-prompt 被目标已存在跳过，pruned 排除）
+        assert_eq!(report.copied, 1);
+        assert_eq!(report.skipped, 1);
+        assert_eq!(report.pruned_skipped, 1);
+
+        // 幂等：二次调用全部跳过
+        let report2 = seed_partition(&dir, "deepseek-deepseek-src", "deepseek-deepseek-dst")
+            .await
+            .unwrap();
+        assert_eq!(report2.copied, 0);
+        assert!(report2.skipped >= 2);
+
+        // pruned 未复制；models/ 不复制
+        let dst_loaded = dst.load_asset("prompt", "pruned-prompt").await;
+        assert!(dst_loaded.is_err(), "pruned asset must not be seeded");
+        assert!(!dir.join("deepseek-deepseek-dst/models").join("seed-verification.yaml").exists());
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_seed_partition_missing_source_errors() {
+        let dir = test_dir("seed_missing_source").await;
+        LiluoClient::new(&dir).await.unwrap();
+
+        let err = seed_partition(&dir, "deepseek-no-such-model", "deepseek-deepseek-dst")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("source partition"), "{err}");
+
+        cleanup(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_seed_partition_invalid_key_errors() {
+        let dir = test_dir("seed_invalid_key").await;
+        LiluoClient::new(&dir).await.unwrap();
+
+        // 路径穿越 / 非法字符一律拒绝（CLI 输入即攻击面）。
+        for bad in ["../evil", "a/b", "a\\b", "a b", "a.b", ""] {
+            let err = seed_partition(&dir, "deepseek-deepseek-src", bad)
+                .await
+                .unwrap_err();
+            assert!(
+                err.to_string().contains("invalid partition key"),
+                "key '{bad}' must be rejected: {err}"
+            );
+        }
 
         cleanup(&dir).await;
     }

@@ -8,9 +8,9 @@ type: verification
 id: v-assertion-evidence
 layer: 0
 name: 断言证据链
-description: 产出中的 [证据: 工具名] 引用必须对应真实工具调用记录；(推测) 标记计数作为质量信号
+description: "产出中的 [证据: 工具名] 引用必须对应真实工具调用记录；(推测) 标记计数作为质量信号"
 confidence: 0.7
-version: 1
+version: 2
 tags:
   - general
 content: 产出断言与执行轨迹绑定——证据引用存在性校验（trace 一致性，引用完整性推广）。
@@ -28,4 +28,4 @@ checks:
         - bash
       trace_glob: trace.jsonl
     severity: soft
-    pass_condition: 产出中每个 [证据: 工具名] 引用必须在 trace.jsonl 的 tool_call::* 记录中存在；推测标记不失败但计数注入 detail（质量信号）
+    pass_condition: "产出中每个 [证据: 工具名] 引用必须在 trace.jsonl 的 tool_call::* 记录中存在；推测标记不失败但计数注入 detail（质量信号）"
