@@ -97,6 +97,20 @@ pub struct RuntimeConfig {
     /// V33/MVP-3 DMN 演化配置（§6.3/§6.4：回报权重 / UCB 采样门槛 / 演化激活门槛 / 主动学习）。
     #[serde(default)]
     pub dmn: DmnConfig,
+    /// V37 多级模型路由配置（§8.8 相位级异源裁判）。
+    #[serde(default)]
+    pub model_routing: ModelRoutingConfig,
+}
+
+/// V37 多级模型路由配置（BCP §8.8 相位级）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(default)]
+pub struct ModelRoutingConfig {
+    /// 异源裁判开关（默认 false）。true 且路由候选 ≥2 时，Causal 验证/收敛
+    /// 相位用独立验证模型（裁判 ≠ 运动员——「概率系统不验证概率系统」的
+    /// 又一缓解，§1.3 self-preference 偏置）。
+    #[serde(default)]
+    pub heterogeneous_verifier: bool,
 }
 
 impl Default for RuntimeConfig {
@@ -111,6 +125,7 @@ impl Default for RuntimeConfig {
             exec_timeout: 600,
             context_limits: ContextLimits::default(),
             dmn: DmnConfig::default(),
+            model_routing: ModelRoutingConfig::default(),
         }
     }
 }

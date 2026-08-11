@@ -266,9 +266,12 @@ impl CausalVerifyAgentBuilder {
         // contracts 提升到外层作用域：一次加载，供 llm_judgement 收集复用。
         // V36 分区一致性（§8.3）：契约从路由模型分区加载（meta_ctx.model →
         // for_model 派生）；None = 根 client（legacy/未接线）。
+        // V37 异源裁判：verify_model 优先（验证契约随验证模型分区——异源模型
+        // 的分区可能持有不同的契约集，§6.1 学习单元语义）。
         let contracts: Vec<crate::types::agent::VerificationAsset> =
             if let Some(guizang) = &self.guizang {
-                match meta_ctx.model.as_ref() {
+                let contract_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
+                match contract_key {
                     Some(key) => {
                         let partition = guizang.for_model(key.key()).await?;
                         ContractEngine::load_contracts(&partition).await?

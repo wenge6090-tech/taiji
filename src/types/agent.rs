@@ -184,6 +184,14 @@ pub struct MetaContext {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelKey>,
 
+    /// V37：验证相位（Causal）专用模型——异源裁判（BCP §8.8 相位级）。
+    /// Some = CausalAgent verify/converge 用此模型（及对应分区加载契约）执行，
+    /// 与执行模型（`model`）异源——裁判 ≠ 运动员（§1.3 self-preference 偏置
+    /// 的对抗）；None = 继承 `model`（主模型）。serde default：旧 meta_ctx.json
+    /// 零迁移；默认关闭（`runtime.model_routing.heterogeneous_verifier`）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_model: Option<ModelKey>,
+
     /// Full system prompt for FittingAgent (概率拟合·阳), LLM-composed by
     /// MetaAgent.  When `None`, FittingAgent uses its mode-paired built-in
     /// template (编排模板 / 执行模板).
@@ -220,6 +228,7 @@ impl MetaContext {
             degraded: None,
             assets_used: vec![],
             model: None,
+            verify_model: None,
             fitting_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,

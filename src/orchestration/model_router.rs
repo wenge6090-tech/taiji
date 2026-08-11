@@ -95,6 +95,55 @@ impl ModelRouter {
         best.map(|(_, k)| k.clone())
             .unwrap_or_else(|| self.default_key.clone())
     }
+
+    /// V37 异源裁判决策（BCP §8.8 相位级，MVP 边界：复用任务级 stats，
+    /// (model_key × tag × phase) 相位维度后置）。
+    ///
+    /// 从**非主模型候选**中按 UCB 同公式（avg_reward + C·√(ln N_total/(n+1))）
+    /// 选验证模型——裁判 ≠ 运动员（§1.3 self-preference / position 偏置对抗）。
+    /// 候选数 < 2 → `None`（无源可异，调用方 warn 降级 = 继承主模型）。
+    /// 异源候选全无统计 → 冷启动探索分最大的非主候选（有界）。
+    pub fn route_verifier(&self, exec_key: &ModelKey) -> Option<ModelKey> {
+        let others: Vec<&ModelKey> = self
+            .candidates
+            .iter()
+            .filter(|k| k.key() != exec_key.key())
+            .collect();
+        if others.is_empty() {
+            return None;
+        }
+        let n_total: u64 = self.stats.values().map(|r| r.n).sum();
+        if n_total == 0 {
+            // 全冷启动：异源按候选声明顺序（确定性）取第一个非主候选。
+            return others.first().map(|k| (*k).clone());
+        }
+        let max_cost = self
+            .stats
+            .values()
+            .map(|r| r.avg_cost())
+            .fold(0.0_f64, f64::max);
+        let mut best: Option<(f64, &ModelKey)> = None;
+        for key in others {
+            let row = self.stats.get(key.key()).cloned().unwrap_or_default();
+            let n = row.n;
+            let cost_norm = if max_cost > 0.0 {
+                row.avg_cost() / max_cost
+            } else {
+                0.0
+            };
+            let avg_reward = self.weights.pass * row.pass_rate()
+                + self.weights.quality * row.avg_quality()
+                - self.weights.cost * cost_norm
+                - self.weights.rounds * row.avg_rounds();
+            let explore =
+                self.ucb_c * ((n_total as f64).ln() / (n as f64 + 1.0)).sqrt();
+            let score = avg_reward + explore;
+            if best.as_ref().is_none_or(|(bs, _)| score > *bs) {
+                best = Some((score, key));
+            }
+        }
+        best.map(|(_, k)| k.clone())
+    }
 }
 
 /// 模型级回传信号（BCP §6.4 元权重表）——来自 pending 负载聚合。
@@ -228,6 +277,80 @@ mod tests {
         }]);
         let router = ModelRouter::new(&providers, stats);
         assert_eq!(router.route().key(), "deepseek-deepseek-reasoner");
+    }
+
+    /// 构造带 reasoner 附加候选的 providers（V37 异源测试复用）。
+    fn make_providers_with_reasoner() -> ProviderRegistry {
+        make_providers(vec![ProviderEntry {
+            name: "deepseek".into(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "deepseek-reasoner".into(),
+        }])
+    }
+
+    #[test]
+    fn route_verifier_single_candidate_returns_none() {
+        // 候选仅默认（无附加 provider）→ 无源可异 → None（继承主模型）。
+        let providers = make_providers(vec![]);
+        let router = ModelRouter::new(&providers, BTreeMap::new());
+        let exec = ModelKey::from_parts("deepseek", "deepseek-chat");
+        assert!(router.route_verifier(&exec).is_none());
+    }
+
+    #[test]
+    fn route_verifier_cold_start_picks_first_other() {
+        // 全冷启动（无统计）：异源 = 候选声明顺序第一个非主候选（确定性）。
+        let providers = make_providers_with_reasoner();
+        let router = ModelRouter::new(&providers, BTreeMap::new());
+        let exec = ModelKey::from_parts("deepseek", "deepseek-chat");
+        let v = router.route_verifier(&exec).expect("verifier");
+        assert_eq!(v.key(), "deepseek-deepseek-reasoner");
+    }
+
+    #[test]
+    fn route_verifier_never_returns_exec_model() {
+        // 异源硬约束：验证模型必须 ≠ 执行模型（裁判 ≠ 运动员）。
+        let providers = make_providers_with_reasoner();
+        let router = ModelRouter::new(&providers, BTreeMap::new());
+        let exec = ModelKey::from_parts("deepseek", "deepseek-chat");
+        let v = router.route_verifier(&exec).expect("verifier");
+        assert_ne!(v.key(), exec.key());
+    }
+
+    #[test]
+    fn route_verifier_ucb_picks_best_other() {
+        // 有统计：reasoner 通过率高 → 异源选 reasoner（利用主导）。
+        let mut stats = BTreeMap::new();
+        stats.insert(
+            "deepseek-deepseek-chat".to_string(),
+            row(100, 80, 1_000_000, 80.0, 5),
+        );
+        stats.insert(
+            "deepseek-deepseek-reasoner".to_string(),
+            row(100, 95, 2_000_000, 95.0, 3),
+        );
+        let providers = make_providers_with_reasoner();
+        let router = ModelRouter::new(&providers, stats);
+        let exec = ModelKey::from_parts("deepseek", "deepseek-chat");
+        let v = router.route_verifier(&exec).expect("verifier");
+        assert_eq!(v.key(), "deepseek-deepseek-reasoner");
+    }
+
+    #[test]
+    fn route_verifier_ignores_exec_stats_scope() {
+        // 异源候选自身无统计但其他候选有 → 异源冷启动探索（选非主候选），
+        // 即使执行模型利用分高——异源选择只看非主候选集。
+        let mut stats = BTreeMap::new();
+        stats.insert(
+            "deepseek-deepseek-chat".to_string(),
+            row(1000, 900, 1_000_000, 900.0, 5),
+        );
+        let providers = make_providers_with_reasoner();
+        let router = ModelRouter::new(&providers, stats);
+        let exec = ModelKey::from_parts("deepseek", "deepseek-chat");
+        let v = router.route_verifier(&exec).expect("verifier");
+        assert_eq!(v.key(), "deepseek-deepseek-reasoner");
     }
 
     #[tokio::test]

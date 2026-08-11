@@ -31,6 +31,12 @@ pub struct SubtaskSpec {
     /// enforcement). Defaults to Orchestration for robustness.
     #[serde(default)]
     pub mode: crate::types::agent::AgentMode,
+    /// V37：子任务模型覆盖（BCP §8.8 子任务级路由）。父 LLM 拆解时可按
+    /// 子任务难度/领域分配不同模型；None = 继承父模型（子 TpnCycle 注入父
+    /// MetaContext，`model` 默认继承）。serde default：旧 decompose_result
+    /// 零迁移。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<crate::types::agent::ModelKey>,
     /// Explicit re-run marker: `Some(old_child_index)` means "re-run the
     /// subtask previously at `children/<old_child_index>/`". The `description`
     /// field carries the re-run reason and new requirements.

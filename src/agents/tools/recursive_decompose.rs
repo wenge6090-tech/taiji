@@ -227,6 +227,8 @@ impl RecursiveDecomposeTool {
             child_deliverables: Vec<String>,
             description: String,
             mode: AgentMode,
+            /// V37 子任务级路由：SubtaskSpec.model（None = 继承父）。
+            model: Option<crate::types::agent::ModelKey>,
             resume_history: Option<Vec<Message>>,
         }
 
@@ -297,6 +299,8 @@ impl RecursiveDecomposeTool {
                 child_deliverables: parent_deliverables.clone(),
                 description: enriched_description,
                 mode: actual_mode,
+                // V37 子任务级路由：子模型覆盖（父 LLM 按难度/领域分配）。
+                model: subtask.model,
                 resume_history,
             });
         }
@@ -324,6 +328,7 @@ impl RecursiveDecomposeTool {
             let child_index = meta.index;
             let child_description = meta.description;
             let child_mode = meta.mode;
+            let child_model = meta.model;
 
             // ── V30 会盟：收集兄弟贡品陈列室（分封时快照目录，排除自身）──
         // 无降级原则（BCP §8.20）：扫描失败 → Err 上抛，中止 decompose。
@@ -376,6 +381,11 @@ impl RecursiveDecomposeTool {
                 //    判断）或深度规则兑底后的 Execution。子 TpnCycle 的阳 Agent
                 //    据此选模板与工具注册面 ──
                 child_meta_ctx.mode = child_mode;
+                // ── V37 子任务级路由（BCP §8.8）：SubtaskSpec.model 覆盖子模型
+                //    （父 LLM 按难度/领域分配）；None = 继承父模型（默认）。
+                //    验证相位（verify_model）随子模型继承父的异源配置——子任务
+                //    的裁判语义与父一致（异源方向不逐层重决策，MVP 边界）。
+                apply_subtask_model(&mut child_meta_ctx, child_model.as_ref());
 
                 // ── Create CancellationToken child linked to parent ──
                 let child_cancel = cancel.child_token();
@@ -684,6 +694,15 @@ pub(crate) fn mark_aborted_children_failed(children_root: &Path) {
 }
 
 /// Map a TPNResult into a DecomposeResult for convergence analysis.
+/// V37 子任务级路由（BCP §8.8）：应用 `SubtaskSpec.model` 覆盖到子 MetaContext。
+/// None = 继承父模型（不变）；Some = 覆盖（父 LLM 按难度/领域分配）。
+/// 纯函数——可单测，spawn 闭包内调用。
+fn apply_subtask_model(child: &mut MetaContext, model: Option<&crate::types::agent::ModelKey>) {
+    if let Some(m) = model {
+        child.model = Some(m.clone());
+    }
+}
+
 fn map_tpn_to_decompose(result: &TPNResult) -> DecomposeResult {
     DecomposeResult {
         task_id: result.task_id.clone(),
@@ -785,10 +804,32 @@ impl Tool for RecursiveDecomposeTool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::agent::ModelKey;
 
     // V30 测试临时目录唯一性（AGENTS.md §16）：pid 基路径不唯一，需静态计数器。
     static SIBLING_TEST_COUNTER: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);
+
+    #[test]
+    fn test_apply_subtask_model_override_and_inherit() {
+        // V37 子任务级路由：Some 覆盖子模型；None 保持父模型（继承）。
+        let parent_key = ModelKey::from_parts("deepseek", "deepseek-chat");
+        let mut child = MetaContext { model: Some(parent_key.clone()), ..MetaContext::empty() };
+
+        // None → 不变（继承父）。
+        apply_subtask_model(&mut child, None);
+        assert_eq!(child.model.as_ref().map(|k| k.key()), Some("deepseek-deepseek-chat"));
+
+        // Some → 覆盖。
+        let override_key = ModelKey::from_parts("deepseek", "deepseek-reasoner");
+        apply_subtask_model(&mut child, Some(&override_key));
+        assert_eq!(
+            child.model.as_ref().map(|k| k.key()),
+            Some("deepseek-deepseek-reasoner")
+        );
+        // verify_model 不被触碰（随父继承语义）。
+        assert!(child.verify_model.is_none());
+    }
 
     #[test]
     fn test_collect_sibling_deliverables_basic() {

@@ -87,6 +87,9 @@ pub struct MetaAgentBuilder {
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
+    /// V37：异源裁判开关（BCP §8.8 相位级）——true 且路由候选 ≥2 时决策
+    /// `MetaContext.verify_model`（Causal 专用验证模型）。
+    heterogeneous_verifier: bool,
 }
 
 impl MetaAgentBuilder {
@@ -109,7 +112,17 @@ impl MetaAgentBuilder {
             max_depth: 2, // RuntimeConfig::default().max_depth
             max_turns: 6, // tool-loop headroom: collect → extract
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
+            heterogeneous_verifier: false,
         }
+    }
+
+    /// V37：异源裁判开关（BCP §8.8 相位级）——true 且路由候选 ≥2 时，
+    /// Causal 验证相位使用与执行相位不同的模型（裁判 ≠ 运动员）。
+    /// 默认 false（行为与 V36 一致）。由工厂从
+    /// `runtime.model_routing.heterogeneous_verifier` 传入。
+    pub fn heterogeneous_verifier(mut self, enabled: bool) -> Self {
+        self.heterogeneous_verifier = enabled;
+        self
     }
 
     /// Inject the current recursion depth (root = 0) — part of the
@@ -175,6 +188,35 @@ impl MetaAgentBuilder {
             model_key = %model_key,
             "MetaAgent: model routed (分区检索目标)"
         );
+        // V37 异源裁判（BCP §8.8 相位级）：开关开启时从非主候选按 UCB 同公式
+        // 选 Causal 专用验证模型（裁判 ≠ 运动员，§1.3 偏置对抗）；候选 <2 →
+        // None（继承主模型，warn 提示）。
+        let verify_model = if self.heterogeneous_verifier {
+            let stats = self.liluo.load_model_stats().await?;
+            let router =
+                crate::orchestration::model_router::ModelRouter::new(&self.provider, stats);
+            match router.route_verifier(&model_key) {
+                Some(v) => {
+                    tracing::info!(
+                        task_id = %self.task_id,
+                        exec_model = %model_key,
+                        verify_model = %v,
+                        "MetaAgent: heterogeneous verifier routed (异源裁判)"
+                    );
+                    Some(v)
+                }
+                None => {
+                    tracing::warn!(
+                        task_id = %self.task_id,
+                        exec_model = %model_key,
+                        "heterogeneous_verifier enabled but <2 routing candidates — verifier inherits exec model"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
 
         // ── 1. Query 理絡 for prompt assets（按路由模型分区）──
         let partition = self.liluo.for_model(model_key.key()).await?;
@@ -197,6 +239,8 @@ impl MetaAgentBuilder {
             let mut empty = MetaContext::empty();
             // V36：分区空 ≠ 路由失败——模型选择保持（Fitting/Causal 按路由模型执行）。
             empty.model = Some(model_key.clone());
+            // V37：降级路径同样保持异源裁判决策（模型选择与资产编排解耦）。
+            empty.verify_model = verify_model.clone();
             return Ok(empty);
         }
 
@@ -339,6 +383,9 @@ impl MetaAgentBuilder {
                     // 结果：模型选择与资产编排解耦，Fitting/Causal 仍按路由模型
                     // 执行；仅路由异常时 None = 配置默认）。
                     model: Some(model_key.clone()),
+                    // V37：异源裁判（BCP §8.8 相位级）——Causal 专用验证模型；
+                    // 开关关闭 / 候选不足时 None = 继承主模型。
+                    verify_model,
                     fitting_system_prompt: result.fitting_system_prompt,
                     verify_system_prompt: result.verify_system_prompt,
                     converge_system_prompt: result.converge_system_prompt,
@@ -369,6 +416,8 @@ impl MetaAgentBuilder {
                 // V36：降级路径保持模型路由结果（§8.8 第 8 步——模型选择与
                 // 资产编排解耦；None 仅当路由异常/未执行）。
                 empty.model = Some(model_key.clone());
+                // V37：降级路径保持异源裁判决策。
+                empty.verify_model = verify_model.clone();
                 empty
             }
         };
@@ -479,6 +528,8 @@ mod tests {
     use super::*;
     use crate::infra::provider::ProviderRegistry;
     use crate::infra::config::TaijiConfig;
+    use crate::types::agent::ModelKey;
+    use crate::types::task::SubtaskSpec;
 
     fn make_config() -> TaijiConfig {
         TaijiConfig {
@@ -498,6 +549,66 @@ mod tests {
             safety: crate::infra::config::SafetyConfig::default(),
             mcp_servers: vec![],
         }
+    }
+
+    #[test]
+    fn verify_model_serde_roundtrip_and_default() {
+        // V37 异源裁判字段：完整 round-trip + 缺字段反序列化 → None（零迁移）。
+        let ctx = MetaContext {
+            model: Some(ModelKey::from_parts("deepseek", "deepseek-chat")),
+            verify_model: Some(ModelKey::from_parts("deepseek", "deepseek-reasoner")),
+            ..MetaContext::empty()
+        };
+        let json = serde_json::to_string(&ctx).expect("serialize");
+        assert!(json.contains("verify_model")); // Some → 序列化含字段
+        let back: MetaContext = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(
+            back.verify_model.as_ref().map(|k| k.key()),
+            Some("deepseek-deepseek-reasoner")
+        );
+
+        // None 时省略（skip_serializing_if）。
+        let no_vm = MetaContext { verify_model: None, ..ctx.clone() };
+        let json2 = serde_json::to_string(&no_vm).expect("serialize");
+        assert!(!json2.contains("verify_model"));
+
+        // 旧文件（无 verify_model 键）→ None。
+        let legacy = r#"{"constraints":[],"matched_skills":[],"yang_prompt":{"task_description":"t","constraint_summaries":[],"parent_deliverables":[],"sibling_deliverables":[]},"mode":"Orchestration"}"#;
+        let parsed: MetaContext = serde_json::from_str(legacy).expect("legacy parse");
+        assert!(parsed.verify_model.is_none());
+        assert!(parsed.model.is_none());
+    }
+
+    #[test]
+    fn subtask_spec_model_serde_default() {
+        // V37 子任务级路由字段：缺字段 → None；字符串 ModelKey 直读。
+        let spec: SubtaskSpec = serde_json::from_str(
+            r#"{"description":"d","verification_spec":"v"}"#,
+        )
+        .expect("legacy parse");
+        assert!(spec.model.is_none());
+
+        let spec2: SubtaskSpec = serde_json::from_str(
+            r#"{"description":"d","verification_spec":"v","model":"deepseek-deepseek-reasoner"}"#,
+        )
+        .expect("parse with model");
+        assert_eq!(spec2.model.as_ref().map(|k| k.key()), Some("deepseek-deepseek-reasoner"));
+
+        let round_trip: SubtaskSpec =
+            serde_json::from_str(&serde_json::to_string(&spec2).unwrap()).unwrap();
+        assert_eq!(round_trip.model.as_ref().map(|k| k.key()), Some("deepseek-deepseek-reasoner"));
+    }
+
+    #[test]
+    fn model_routing_config_serde_default() {
+        // V37 配置：缺字段 → 默认 false（行为与 V36 一致）；显式 true 可解析。
+        use crate::infra::config::ModelRoutingConfig;
+        let parsed: ModelRoutingConfig =
+            serde_json::from_str("{}").expect("empty default");
+        assert!(!parsed.heterogeneous_verifier);
+        let on: ModelRoutingConfig =
+            serde_json::from_str(r#"{"heterogeneous_verifier":true}"#).expect("on");
+        assert!(on.heterogeneous_verifier);
     }
 
     #[tokio::test]

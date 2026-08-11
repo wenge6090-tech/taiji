@@ -135,6 +135,9 @@ impl AgentFactory {
         .max_turns(6)
         .depth(depth)
         .max_depth(max_depth)
+        // V37 异源裁判开关（BCP §8.8 相位级）：从 runtime 配置注入——true 且
+        // 路由候选 ≥2 时决策 MetaContext.verify_model（Causal 专用验证模型）。
+        .heterogeneous_verifier(self.config.runtime.model_routing.heterogeneous_verifier)
         .safety_hook(self.safety_hook.clone()))
     }
 
@@ -219,7 +222,10 @@ impl AgentFactory {
         engine_ctx: &EngineContext,
         meta_ctx: &MetaContext,
     ) -> Result<CausalVerifyAgentBuilder, TaijiError> {
-        let (provider, model) = self.agent_llm_config_with("causal", meta_ctx.model.as_ref());
+        // V37 异源裁判（BCP §8.8 相位级）：verify_model 优先（Causal 用独立
+        // 验证模型，裁判 ≠ 运动员）；None = 继承执行模型（主模型）。
+        let causal_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
+        let (provider, model) = self.agent_llm_config_with("causal", causal_key);
         tracing::debug!(
             task_id = %engine_ctx.task_id,
             provider = %provider,
@@ -249,7 +255,9 @@ impl AgentFactory {
         engine_ctx: &EngineContext,
         meta_ctx: &MetaContext,
     ) -> Result<CausalConvergeAgentBuilder, TaijiError> {
-        let (provider, model) = self.agent_llm_config_with("causal", meta_ctx.model.as_ref());
+        // V37 异源裁判：verify_model 优先（与 verify 同语义——收敛判定也是裁判）。
+        let causal_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
+        let (provider, model) = self.agent_llm_config_with("causal", causal_key);
         tracing::debug!(
             task_id = %engine_ctx.task_id,
             provider = %provider,
@@ -539,6 +547,44 @@ mod tests {
         let (provider, model) = factory.agent_llm_config("meta");
         assert_eq!(provider, "deepseek");
         assert_eq!(model, "deepseek-reasoner");
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_causal_llm_config_prefers_verify_model() {
+        // V37 异源裁判：verify_model 优先于 model（Causal 用独立验证模型）。
+        use crate::infra::config::ProviderEntry;
+        use crate::types::agent::{MetaContext, ModelKey};
+        let mut config = make_config();
+        config.llm.providers.push(ProviderEntry {
+            name: "deepseek".into(),
+            base_url: String::new(),
+            api_key: String::new(),
+            model: "deepseek-reasoner".into(),
+        });
+        let (factory, tmp_dir) = build_factory(config).await;
+
+        let meta_ctx = MetaContext {
+            model: Some(ModelKey::from_parts("deepseek", "deepseek-chat")),
+            verify_model: Some(ModelKey::from_parts("deepseek", "deepseek-reasoner")),
+            ..MetaContext::empty()
+        };
+        // 与 factory Causal 构造同式：verify_model 优先，None 继承 model。
+        let causal_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
+        let (_provider, model) =
+            factory.agent_llm_config_with("causal", causal_key);
+        assert_eq!(model, "deepseek-reasoner");
+
+        // None → 继承主模型。
+        let no_vm = MetaContext {
+            verify_model: None,
+            ..meta_ctx
+        };
+        let causal_key2 = no_vm.verify_model.as_ref().or(no_vm.model.as_ref());
+        let (_provider, model2) =
+            factory.agent_llm_config_with("causal", causal_key2);
+        assert_eq!(model2, "deepseek-chat");
 
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }

@@ -383,6 +383,7 @@ mod tests {
             degraded: None,
             assets_used: vec![],
             model: None,
+            verify_model: None,
             fitting_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,

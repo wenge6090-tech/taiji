@@ -350,3 +350,14 @@ TpnCycle 恢复历史时严格按此顺序（V28 产出继承，BCP §1.4 / §8.
 - **DMN 回传分区**：pending 负载带 `model_key`（serde default 零迁移）；dmn_consumer 解析后传 `backprop_checks`/`backprop_prompts`/`evolve_contracts`（各加 model_key 参数，内部 `partition_liluo(model_key)` 派生）；backprop 成功后按 checks 首项四维聚合回传 model_stats（`update_model_stats`，失败仅 warn——增强层不阻断频率主流程）。bayesian_update 加 liluo 参数（分区后 models/ 也在分区内）。
 - **`--with-dmn` 等待 pending 清空**（轮询 60s/1s，dead/ 子目录不计）——固定 3s 对长任务失效（消费者 backoff 指数增长到 32-60s，任务结束时 3s 内不会扫描到新 pending，实测 pending 滞留）。
 - **探索任务回传**：active_learning 的 liluo 由 main.rs 传默认分区 client（变体资产迁移后落位分区）；enqueue 带 `liluo.partition_key()`。
+
+## 25. V37 多级路由（异源裁判 + 子任务级覆盖，2026-08 实现轮）
+
+- **相位级异源裁判**：`MetaContext.verify_model: Option<ModelKey>`（serde default + skip_serializing_if，None = 继承 `model`）——Causal verify/converge 优先用 verify_model（factory 两处构造同式：`meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref())`）；**Causal 契约加载分区同样 verify_model 优先**（causal.rs Step 1.5——异源模型的分区可能持有不同契约集，§6.1 学习单元语义）。
+- **开关**：`runtime.model_routing.heterogeneous_verifier`（serde default false）；factory `create_meta_agent` 经 `.heterogeneous_verifier(config.runtime.model_routing.heterogeneous_verifier)` 注入 MetaAgentBuilder。
+- **`ModelRouter.route_verifier(&exec_key)`**：从非主候选按 UCB 同公式选验证模型；候选 <2 → None（warn 降级继承主模型）；全冷启动（N_total=0）→ 声明顺序第一个非主候选（确定性）。MVP 边界：复用任务级 stats，相位维度 (model_key × tag × phase) 后置。
+- **子任务级**：`SubtaskSpec.model`（serde default None）经 `apply_subtask_model(child_meta_ctx, model)` 纯函数覆盖（spawn 闭包内调用，可单测）；None 继承父；**verify_model 随父继承**（异源方向不逐层重决策）。子任务 meta 传递链：SubtaskMeta（局部 struct）加 `model` 字段。
+- **ModelKey 是 transparent 字符串**（`{provider}-{model}` slug）——LLM 输出 `"model":"deepseek-deepseek-reasoner"` 直接解析，无嵌套结构。
+- **冒烟要点**：单候选环境异源恒 None（无源可异）；双模型（同 provider 不同 model 即可，无需第二个 API key 供应商）才可验证；**model_stats 有历史统计时 UCB 可能探索新候选**（N_total 小时探索分大——冒烟实测 N_total=3 时 reasoner 探索分 1.48 > v4-flash 利用分 1.30，执行模型变成 reasoner）——异源断言目标是 `verify_model ≠ model`，不是"验证模型=默认模型"。
+- **MetaContext 构造点全量检查**：加新字段后 grep `MetaContext {` 逐个补（types/agent.rs empty()、meta.rs 组装、fitting.rs 测试、constraint_engine.rs 测试——漏一个就是 E0063）。
+- **`skip_serializing_if` 断言方向**：Some 时序列化含字段，None 时省略——测试断言 `json.contains("verify_model")` 只在 Some 分支成立。
