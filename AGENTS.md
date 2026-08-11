@@ -185,7 +185,7 @@ TpnCycle 恢复历史时严格按此顺序（V28 产出继承，BCP §1.4 / §8.
 - **WS 流式聊天协议**：`ClientMessage::ChatMessage` 带 `sessionId`/`contextTaskId`（无 session 时服务端 Uuid 生成并经 `stream_done` 帧的 `data.sessionId` 返回前端）；流式响应为中间帧 `{requestId, ok, chunk}`（文本增量）+ 最终帧 `{requestId, ok, data:{text, sessionId}, chunk:"", streamDone:true}`；`chunk`/`stream_done` 均 `skip_serializing_if`，非聊天请求 JSON 不变；chatMessage 走 `CHAT_TIMEOUT_MS = 120s`，不得用默认 30s。
 - **ChatAgent 会话历史**：`{data_root}/chat/{session_id}.json` 原子写入（`save_json_atomic`）；历史经 Rig `stream_chat` 的 `FinalResponse.history()` 回填，为 None 时手动 push user+assistant 消息；新代码命名用 `GuizangClient`（`LiluoClient as GuizangClient` 别名仅允许出现在 chat.rs 主代码与测试各 1 处，其余文件既有旧名不改）。
 - **多 Provider**：`LlmConfig.providers: Vec<ProviderEntry>`——`name="deepseek"` 或无 `base_url` 走 deepseek map，其余走 OpenAI 兼容 map（`base_url` 必填否则 `LLMCallFailed`）；`ChatAgentBuilder` 经 `resolve_chat_provider` 双 map 解析。
-- **任务感知**：`build_system_prompt` 注入 `context_task_id` 对应 `meta.json`（description/status/depth）+ 归藏摘要（L5 prompts top-3 confidence 排序，knowledge 目录缺失时降级；V38 起不再取 truths——资产层已移除）。
+- **任务感知（V40 简化）**：`build_system_prompt`（同步 fn）注入 `context_task_id` 对应 `meta.json`（description/status/depth）——**不再注入归藏摘要**（guizang_digest 已删：归藏 prompts/verifications 是任务执行链的编排模板，ChatAgent 是对话角色，语义错配；会话记忆在 `.taiji/chat/{session_id}.json`，经 stream_chat history 回填）。
 
 ## 9. BCP V22 精简产物（grid/relation 移除）
 

@@ -20,7 +20,6 @@ use crate::agents::tools::skills::SkillRegistry;
 use crate::hooks::safety::SafetyHook;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
-use crate::infra::knowledge::LiluoClient as GuizangClient;
 use crate::infra::provider::{ChatProvider, ProviderRegistry};
 use crate::infra::trace::save_json_atomic;
 
@@ -109,7 +108,7 @@ impl ChatAgentBuilder {
         chat_history: &mut Vec<Message>,
         on_chunk: Box<dyn Fn(String) + Send + Sync>,
     ) -> Result<String, TaijiError> {
-        let system_prompt = self.build_system_prompt().await;
+        let system_prompt = self.build_system_prompt();
         let max_turns = self
             .config
             .llm
@@ -208,10 +207,11 @@ impl ChatAgentBuilder {
 
     /// Build the ChatAgent system prompt.
     ///
-    /// When a `context_task_id` is set, task context (description / status /
-    /// depth) plus a Guizang knowledge digest are injected so the agent is
-    /// aware of the task the user is currently looking at.
-    async fn build_system_prompt(&self) -> String {
+    /// V40：提示词简单化——不注入归藏资产（归藏 prompts/verifications 是
+    /// 任务执行链 Meta/Fitting/Causal 的编排模板，对对话角色语义错配）；
+    /// 仅保留任务感知（context_task_id → meta.json 的 description/status/depth）
+    /// 与会话历史（.taiji/chat/{session_id}.json，stream_chat history 回填）。
+    fn build_system_prompt(&self) -> String {
         let mut prompt = String::from(
             "你是归藏认知内核驱动的智能体助手，与用户协作完成任务。\n\
              你可以使用工具读写文件、执行命令、搜索网页来辅助回答。\n\
@@ -230,68 +230,7 @@ impl ChatAgentBuilder {
                 ));
             }
         }
-        // Guizang knowledge digest (L5 prompts + L4 active truths).  Degrades
-        // silently to the base template when the store is unavailable.
-        if let Some(digest) = self.guizang_digest().await {
-            prompt.push_str(&digest);
-        }
         prompt
-    }
-
-    /// Build a digest of Guizang knowledge assets (L5 prompt templates) for
-    /// the chat system prompt. V38：truths 资产层已移除，仅取 prompts。
-    ///
-    /// Returns `None` when the knowledge directory is missing or unusable so
-    /// the caller falls back to the base template without erroring.
-    async fn guizang_digest(&self) -> Option<String> {
-        let guizang_dir = PathBuf::from(&self.config.knowledge.data_dir);
-        let prompts_dir = guizang_dir.join("prompts");
-        if !prompts_dir.is_dir() {
-            return None;
-        }
-        let guizang = match GuizangClient::new_sparse(&guizang_dir).await {
-            Ok(client) => client,
-            Err(e) => {
-                tracing::warn!("guizang digest unavailable: {e}");
-                return None;
-            }
-        };
-
-        let mut sections: Vec<String> = Vec::new();
-
-        // L5 prompt templates: scan the prompts/ directory, top-3 by
-        // confidence (no index.yaml dependency — best effort).
-        let mut prompts = Vec::new();
-        if let Ok(mut read_dir) = tokio::fs::read_dir(&prompts_dir).await {
-            while let Ok(Some(entry)) = read_dir.next_entry().await {
-                let path = entry.path();
-                if path.extension().is_none_or(|ext| ext != "yaml") {
-                    continue;
-                }
-                let Some(stem) = path.file_stem().map(|s| s.to_string_lossy().into_owned())
-                else {
-                    continue;
-                };
-                match guizang.load_prompt(&stem).await {
-                    Ok(Some(p)) => prompts.push(p),
-                    Ok(None) => {}
-                    Err(e) => tracing::warn!("guizang digest: load_prompt {stem}: {e}"),
-                }
-            }
-        }
-        prompts.sort_by(|a, b| {
-            b.confidence
-                .partial_cmp(&a.confidence)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        for p in prompts.into_iter().take(3) {
-            sections.push(format!("- [L5 提示词] {}: {}", p.name, p.description));
-        }
-
-        if sections.is_empty() {
-            return None;
-        }
-        Some(format!("\n\n## 归藏知识摘要\n{}", sections.join("\n")))
     }
 
     /// Load lightweight task context from `{data_root}/tasks/{id}/meta.json`.
@@ -400,10 +339,10 @@ mod tests {
     #[test]
     fn test_build_system_prompt_baseline() {
         let (builder, tmp_dir) = make_builder(None);
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let prompt = rt.block_on(builder.build_system_prompt());
+        let prompt = builder.build_system_prompt();
         assert!(prompt.contains("归藏认知内核"));
         assert!(!prompt.contains("正在查看任务"));
+        // V40：不再注入归藏资产摘要。
         assert!(!prompt.contains("归藏知识摘要"));
         std::fs::remove_dir_all(&tmp_dir).ok();
     }
@@ -411,42 +350,8 @@ mod tests {
     #[test]
     fn test_build_system_prompt_with_task_context() {
         let (builder, tmp_dir) = make_builder(Some("task-123".into()));
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let prompt = rt.block_on(builder.build_system_prompt());
+        let prompt = builder.build_system_prompt();
         assert!(prompt.contains("任务-123") || !prompt.contains("正在查看任务"));
-        std::fs::remove_dir_all(&tmp_dir).ok();
-    }
-
-    #[test]
-    fn test_build_system_prompt_with_guizang_digest() {
-        let (mut builder, tmp_dir) = make_builder(None);
-        // make_builder already initialised a knowledge layout under tmp_dir
-        // (models/skills/prompts/verifications — V38 无 truths/index.yaml) —
-        // write real assets.
-        std::fs::create_dir_all(tmp_dir.join("prompts")).expect("prompts dir");
-        std::fs::write(
-            tmp_dir.join("prompts").join("test-prompt.yaml"),
-            "type: prompt\n\
-             layer: 1\n\
-             id: test-prompt\n\
-             name: 测试提示词\n\
-             description: 用于测试的提示词\n\
-             tags: []\n\
-             confidence: 0.9\n\
-             version: 1\n\
-             content: 测试内容\n\
-             agent_target: FittingAgent\n\
-             usage_count: 0\n\
-             success_rate: 0.0\n",
-        )
-        .expect("write prompt asset");
-        builder.config.knowledge.data_dir = tmp_dir.display().to_string();
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let prompt = rt.block_on(builder.build_system_prompt());
-        assert!(prompt.contains("归藏知识摘要"));
-        assert!(prompt.contains("测试提示词"));
-        // V38：truths 资产层已移除——摘要不再含约束段。
-        assert!(!prompt.contains("测试约束"));
         std::fs::remove_dir_all(&tmp_dir).ok();
     }
 }

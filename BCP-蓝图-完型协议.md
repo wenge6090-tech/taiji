@@ -9,6 +9,7 @@
 > **架构定论（不可推翻）**：① 概率系统不能验证概率系统——收敛验证符号化（L0/L1 机械失败 > LLM 任何裁决，§6.6）；② 归藏 = 规范性本体论（验证契约库 + 生成资产库），拒绝向量库/图库/推理器/分布式/并行写/随机采样（§6.0/§8.3）；③ 激励问题不需要 ground truth——断言证据链（断言 vs 执行轨迹一致性）机械可判定（§8.22）；④ 最小 MVP 开发范式：每步可独立验收（§8.23）；⑤ 权重微调是模型厂家的事——taiji 不设计微调通道，models/ 层 steering_vector 仅预留（§6.2）；⑥ 一个模型 + 它的约束系统 = 一个领域学习单元——分区独立演化，契约难度随模型能力自适应（§6.1）。
 >
 > **版本历史**（全文见文末附录 A）：
+> - **V40**：ChatAgent 提示词简单化——移除归藏摘要注入（对话角色不消费任务编排资产；会话记忆在 `.taiji/chat/`），`build_system_prompt` 降为同步函数
 > - **V39**：种子复制命令 `taiji seed`——模型切换路径命令化（活跃种子资产跨分区复制，stats 不复制）
 > - **V38**：归藏瘦身——移除 index.yaml 反向索引（实时目录扫描替代）+ 移除 truths 资产层（L0 输出健全性检查内置化，验证契约统一归 verifications/）
 > - **V37**：模型-领域学习单元 + 多级路由定稿 + 微调边界
@@ -444,7 +445,7 @@ flowchart TB
 | 12 | `TaijiMcpServer.handle_explain(task_id) -> ExplainReport` | 读取 `meta.json` + 递归 `trace.jsonl` + `deliverables/` 目录，解析 TraceRecord 的 phase/cycle/round 字段构建阶段时间线和路由决策树，产出人类可读 ExplainReport（含 summary 自然语言总结） |
 | 13 | `AgentFactory.create_chat_agent(session_id, context_task_id, model, provider_name) -> ChatAgentBuilder` | 创建前端聊天面板的 ChatAgent builder。LLM 配置从 `agent_overrides["chat"]` 解析（model/provider_name 为 None 时使用解析后的默认值）。构造出的 builder 持有 `session_id`、`context_task_id`、`providers: Arc<ProviderRegistry>`、`safety_hook`、`config`、`data_root`、`model`、`provider_name` 八个字段（**不持有 AgentFactory 引用**——AgentFactory 无 Clone）。自动注册 5 个 L1 Skills + SafetyHook。`max_turns=20`。**不进 TPN 循环** |
 | 14 | `ChatAgentBuilder.chat(message, chat_history: &mut Vec<Message>, on_chunk: Box<dyn Fn(String) + Send + Sync>) -> Result<String, TaijiError>` | 单轮对话执行。`on_chunk` 回调接收每个文本 delta（Rig `StreamedAssistantContent::Text` 解包后的纯文本），需 `Send + Sync` 以跨 await 传递到 WS mpsc 通道。内部使用 `agent.stream_chat()` → 遍历 `MultiTurnStreamItem` → 提取 Text/ReasoningDelta → 回调。`chat_history` 可变借用，完成后内部自动 `save_json_atomic` 持久化。返回完整响应文本。`context_task_id` 是 builder 构造时字段，非 per-message 参数 |
-| 15 | `ChatAgentBuilder.build_system_prompt() -> String`（`async fn`） | 构建 ChatAgent 的 system prompt。若 `context_task_id` 非空，注入任务描述（从 `{data_root}/tasks/{id}/meta.json` 读取 description/status/depth）+ 归藏知识摘要（内部调用 `async fn guizang_digest(&self) -> Option<String>`：使用 `LiluoClient::new_sparse` 降级扫描 `prompts/` 目录按 confidence 降序取 top-3 Prompts（V38 起不再取 truths——资产层已移除），拼接 "## 归藏知识摘要" 段落；knowledge 目录缺失或任何步骤失败时 warn + 返回 None 降级）。无 context_task_id 时使用通用助手模板 |
+| 15 | `ChatAgentBuilder.build_system_prompt() -> String`（**同步** `fn`，V40 降级） | 构建 ChatAgent 的 system prompt。若 `context_task_id` 非空，注入任务描述（从 `{data_root}/tasks/{id}/meta.json` 读取 description/status/depth）。**V40 起不再注入归藏摘要**（guizang_digest 已删除：归藏 prompts/verifications 是任务执行链 Meta/Fitting/Causal 的编排模板，对对话角色语义错配；ChatAgent 的记忆 = 会话历史 `.taiji/chat/{session_id}.json`，经 stream_chat history 回填）。无 context_task_id 时使用通用助手模板 |
 
 ---
 
@@ -1144,7 +1145,7 @@ ChatAgent 与 TPN Agent 的根本差异：
 | 工具集 | 5 Skills + recursive_decompose + causal_verify | 5 Skills 纯（无递归拆解/因果验证工具） |
 | 循环 | TPN 三相循环（Meta→Fitting→Causal） | 无循环（纯对话轮次，`max_turns=20`） |
 | 历史 | task_dir/chat_history.json（TPN 内 STATE） | `{data_root}/chat/{session_id}.json`（会话独立） |
-| 认知注入 | MetaAgent 编排的 MetaContext | 任务 meta + 归藏摘要（直接注入 system prompt） |
+| 认知注入 | MetaAgent 编排的 MetaContext | 任务 meta（V40 起 ChatAgent 不再注入归藏摘要——对话角色不消费编排资产） |
 
 ChatAgent **不进 TPN 循环**：它是旁路对话系统，不参与三相递归。ChatMessage 处理中不注册 `recursive_decompose` 和 `causal_verify` 工具。
 
