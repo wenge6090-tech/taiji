@@ -450,7 +450,10 @@ impl RecursiveDecomposeTool {
         }
 
         // ── Converge via CausalAgent (with ALL results, old + new) ──────
-        let converge_agent = self.factory.create_causal_converge_agent(&self.engine_ctx)?;
+        // V36：converge 在父分区执行（parent_meta_ctx.model 路由 provider）。
+        let converge_agent =
+            self.factory
+                .create_causal_converge_agent(&self.engine_ctx, &self.parent_meta_ctx)?;
         let all_decompose_results: Vec<DecomposeResult> =
             prior_results.values().cloned().collect();
         let decision = converge_agent

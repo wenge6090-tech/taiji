@@ -41,14 +41,17 @@ use crate::hooks::safety::SafetyHook;
 use crate::infra::config::SafetyConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::json_util::parse_llm_json;
+use crate::infra::knowledge::LiluoClient;
 use crate::infra::trace::save_json_atomic;
 use crate::infra::provider::ProviderRegistry;
 use crate::orchestration::constraint_engine::ConstraintEngine;
+use crate::orchestration::contract_engine::ContractEngine;
 use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 use crate::types::task::DecomposeResult;
 use crate::types::verification::{
-    ConvergenceDecision, ConvergenceStatus, VerificationReport, VerificationRoute,
+    CheckKind, CheckSpec, ContractReport, ConvergenceDecision, ConvergenceStatus,
+    VerificationReport, VerificationRoute,
 };
 
 // ---------------------------------------------------------------------------
@@ -71,10 +74,16 @@ pub struct CausalVerifyAgentBuilder {
     engine_ctx: EngineContext,
     model: String,
     provider: Arc<ProviderRegistry>,
+    /// V36 模型路由：provider 名（MetaContext.model 解析结果；默认 deepseek）。
+    provider_name: String,
     max_turns: u32,
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
+    /// 归藏客户端（V33 ContractEngine 加载验证契约）。工厂总是设置；
+    /// None = 未接线（测试/异常路径）→ 契约层跳过并 warn（BCP §8.22
+    /// 无契约资产时退化为纯 LLM 验证）。
+    guizang: Option<Arc<LiluoClient>>,
 }
 
 impl CausalVerifyAgentBuilder {
@@ -92,14 +101,28 @@ impl CausalVerifyAgentBuilder {
             engine_ctx,
             model: model.to_string(),
             provider,
+            provider_name: "deepseek".to_string(),
             max_turns: 10,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
+            guizang: None,
         }
+    }
+
+    /// V36：设置 LLM provider 名（MetaContext.model 路由结果；默认 deepseek）。
+    pub fn provider_name(mut self, provider: &str) -> Self {
+        self.provider_name = provider.to_string();
+        self
     }
 
     /// Override the SafetyHook with the shared process-wide singleton.
     pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self {
         self.safety_hook = hook;
+        self
+    }
+
+    /// Wire the 归藏 client (V33 ContractEngine 契约加载通道)。
+    pub fn guizang(mut self, guizang: Arc<LiluoClient>) -> Self {
+        self.guizang = Some(guizang);
         self
     }
 
@@ -236,6 +259,75 @@ impl CausalVerifyAgentBuilder {
             );
         }
 
+        // ── Step 1.5: ContractEngine 机械执行验证契约（V33 §6.6/§8.22）──
+        // L0 机械 + L1 契约：确定性裁决，任一 hard 机械项失败直接短路，
+        // LLM 不可翻案。契约加载失败上抛（无降级原则 — §8.20）；
+        // guizang 未接线（None）→ 契约层跳过并 warn（测试/异常路径）。
+        // contracts 提升到外层作用域：一次加载，供 llm_judgement 收集复用。
+        // V36 分区一致性（§8.3）：契约从路由模型分区加载（meta_ctx.model →
+        // for_model 派生）；None = 根 client（legacy/未接线）。
+        let contracts: Vec<crate::types::agent::VerificationAsset> =
+            if let Some(guizang) = &self.guizang {
+                match meta_ctx.model.as_ref() {
+                    Some(key) => {
+                        let partition = guizang.for_model(key.key()).await?;
+                        ContractEngine::load_contracts(&partition).await?
+                    }
+                    None => ContractEngine::load_contracts(guizang).await?,
+                }
+            } else {
+                tracing::warn!(
+                    task_id = %self.engine_ctx.task_id,
+                    "CausalVerifyAgent: guizang not wired — contract layer skipped"
+                );
+                Vec::new()
+            };
+        let contract_report: ContractReport =
+            ContractEngine::run_checks(&contracts, &self.engine_ctx.task_dir).await;
+
+        if !contract_report.passed {
+            tracing::warn!(
+                task_id = %self.engine_ctx.task_id,
+                summary = %contract_report.summary,
+                "Contract check failed (hard short-circuit) — returning BackToMeta"
+            );
+            let failed_checks: Vec<String> = contract_report
+                .results
+                .iter()
+                .filter(|r| !r.passed)
+                .map(|r| format!("{}: {}", r.check_id, r.detail))
+                .collect();
+            return Ok(VerificationReport {
+                route: VerificationRoute::BackToMeta,
+                confidence: 1.0,
+                summary: format!("Contract check failed: {}", contract_report.summary),
+                constraint_violations: failed_checks,
+            });
+        }
+
+        // llm_judgement 项收集（L2 兜底 — 唯一留给 LLM 的检查项类型）。
+        // 机械全过 + 有契约 + 无 llm_judgement 项 → 直接 PASS（LLM 零调用）：
+        // 契约完备即收敛（验证符号化的直接收益，§8.23 MVP-1 验收）。
+        let llm_judgements: Vec<&CheckSpec> = contracts
+            .iter()
+            .flat_map(|v| v.checks.iter())
+            .filter(|c| c.kind == CheckKind::LlmJudgement)
+            .collect();
+
+        if !contract_report.results.is_empty() && llm_judgements.is_empty() {
+            tracing::info!(
+                task_id = %self.engine_ctx.task_id,
+                checks = contract_report.results.len(),
+                "All mechanical checks passed, no llm_judgement — direct PASS (LLM zero-call)"
+            );
+            return Ok(VerificationReport {
+                route: VerificationRoute::Pass,
+                confidence: 1.0,
+                summary: contract_report.summary,
+                constraint_violations: vec![],
+            });
+        }
+
         // ── Step 2: Select prompt — prefer MetaAgent-composed, fallback to
         //    mode-paired template (V27 阴阳配对: 执行-验证 / 编排-验证) ──
         let system_prompt = match &meta_ctx.verify_system_prompt {
@@ -254,8 +346,8 @@ impl CausalVerifyAgentBuilder {
             .map(|v| format!("[Soft] {}: {}", v.truth_name, v.reason))
             .collect();
 
-        // Call the LLM for verification
-        let client: Arc<deepseek::Client> = self.provider.client("deepseek")?;
+        // Call the LLM for verification（V36：按路由 provider 选择）
+        let client: Arc<deepseek::Client> = self.provider.client_for(&self.provider_name)?;
 
         // ── 收集工具（只读）：read + webfetch — 逐文件核验 deliverables、
         //    联网核实外部事实（V25 权限分工：收集工具三相共有）。
@@ -275,8 +367,52 @@ impl CausalVerifyAgentBuilder {
             .tools(skill_tools)
             .build();
 
+        // 契约执行结果注入 LLM（机械全过部分 + llm_judgement 判据 + 反偏置）。
+        let contract_section = if contract_report.results.is_empty() && llm_judgements.is_empty() {
+            String::new()
+        } else {
+            let results_summary: Vec<String> = contract_report
+                .results
+                .iter()
+                .map(|r| format!("[{}] {}: {}", if r.passed { "PASS" } else { "FAIL" }, r.check_id, r.detail))
+                .collect();
+            let criteria: Vec<String> = llm_judgements
+                .iter()
+                .map(|c| {
+                    // V33/MVP-3: fork 变体 strictness 档位注入（§8.21「收紧判据」机械实现）——
+                    // params.strictness == "strict" → 从严裁决指令（证据不足即 FAIL）。
+                    let strict = c.params.get("strictness").and_then(|v| v.as_str())
+                        == Some("strict");
+                    if strict {
+                        format!(
+                            "[{}] {}（从严档：证据不足即判 FAIL，禁止宽松推断）",
+                            c.id, c.pass_condition
+                        )
+                    } else {
+                        format!("[{}] {}", c.id, c.pass_condition)
+                    }
+                })
+                .collect();
+            let mut section = format!(
+                "\n\nContract report (mechanical checks — deterministic, cannot be overridden):\n{}",
+                if results_summary.is_empty() {
+                    contract_report.summary.clone()
+                } else {
+                    results_summary.join("\n")
+                }
+            );
+            if !criteria.is_empty() {
+                section.push_str("\n\nLlmJudgement criteria (your sole discretionary remit):\n");
+                section.push_str(&criteria.join("\n"));
+                section.push_str(
+                    "\n\n反偏置指令（V33 §6.6）：表面流畅不算数，必须引用具体证据；\n禁止因篇幅长 / 风格好加分；逐文件用 read 工具取证后裁决。",
+                );
+            }
+            section
+        };
+
         let input = format!(
-            "Task output:\n{task_output}\n\nTool results:\n{results}\n\nSoft violations:\n{soft}",
+            "Task output:\n{task_output}\n\nTool results:\n{results}\n\nSoft violations:\n{soft}{contract}",
             task_output = task_output,
             results = tool_results.join("\n---\n"),
             soft = if soft_context.is_empty() {
@@ -284,6 +420,7 @@ impl CausalVerifyAgentBuilder {
             } else {
                 soft_context.join("\n")
             },
+            contract = contract_section,
         );
 
         let response = agent.prompt(&input).await.map_err(|e| {
@@ -314,6 +451,7 @@ impl CausalVerifyAgentBuilder {
             "report": &report,
             "round": self.engine_ctx.round,
             "cycle": self.engine_ctx.cycle,
+            "checks": &contract_report.results,
         });
         let verify_path = self.engine_ctx.task_dir.join("verify_state.json");
         if let Err(e) = save_json_atomic(&verify_state, &verify_path) {
@@ -425,6 +563,8 @@ pub struct CausalConvergeAgentBuilder {
     engine_ctx: EngineContext,
     model: String,
     provider: Arc<ProviderRegistry>,
+    /// V36 模型路由：provider 名（MetaContext.model 解析结果；默认 deepseek）。
+    provider_name: String,
     max_turns: u32,
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
@@ -446,9 +586,16 @@ impl CausalConvergeAgentBuilder {
             engine_ctx,
             model: model.to_string(),
             provider,
+            provider_name: "deepseek".to_string(),
             max_turns: 10,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
         }
+    }
+
+    /// V36：设置 LLM provider 名（MetaContext.model 路由结果；默认 deepseek）。
+    pub fn provider_name(mut self, provider: &str) -> Self {
+        self.provider_name = provider.to_string();
+        self
     }
 
     /// Override the SafetyHook with the shared process-wide singleton.
@@ -525,7 +672,7 @@ impl CausalConvergeAgentBuilder {
         };
 
         // ── Production path: LLM convergence judgment ──
-        let client: Arc<deepseek::Client> = self.provider.client("deepseek")?;
+        let client: Arc<deepseek::Client> = self.provider.client_for(&self.provider_name)?;
 
         // ── 收集工具（只读）：read + webfetch — 逐文件核验 deliverables、
         //    联网核实外部事实（V25 权限分工：收集工具三相共有）。

@@ -19,6 +19,9 @@ enum Command {
         /// Resume an interrupted/failed task by ID (reuses task dir + recovery chain)
         #[arg(long)]
         resume: Option<String>,
+        /// Activate the DMN Consumer (passive learning — backprop check stats)
+        #[arg(long)]
+        with_dmn: bool,
     },
     /// Initialize workspace (.taiji/ + 理络 knowledge store)
     Init,
@@ -60,7 +63,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Run { description, resume } => cmd_run(description, resume).await?,
+        Command::Run {
+            description,
+            resume,
+            with_dmn,
+        } => cmd_run(description, resume, with_dmn).await?,
         Command::Init => cmd_init().await?,
         Command::Trace {
             task_id,
@@ -83,12 +90,68 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn cmd_run(
     description: Vec<String>,
     resume: Option<String>,
+    with_dmn: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let desc = description.join(" ");
     let config = load_config()?;
+    let data_root = std::path::PathBuf::from(&config.data_root);
 
     // Provider registry (LLM clients).
     let factory = build_engine(&config).await?;
+
+    // ── V33/MVP-2: --with-dmn 激活 DMN Consumer（被动学习 — BCP §6.4/§8.23）──
+    // TPN PASS 入队 pending/（tpn_cycle.rs enqueue_dmn_pending）→ 本进程内
+    // 消费者单写归藏统计。MVP 时序：任务结束后等待 3s（消费者 1s 首扫 + 处理）
+    // 再退出；正式生命周期（serve 常驻/主动学习）归 MVP-3。
+    let mut dmn_handle: Option<(
+        tokio::task::JoinHandle<()>,
+        tokio::task::JoinHandle<()>,
+        tokio_util::sync::CancellationToken,
+    )> = None;
+    if with_dmn {
+        // V36：默认模型分区键（与 build_engine 迁移目标一致）。
+        let default_key = taiji::types::agent::ModelKey::from_parts(
+            if config.llm.default_provider.is_empty() {
+                "deepseek"
+            } else {
+                &config.llm.default_provider
+            },
+            if config.llm.default_model.is_empty() {
+                "deepseek-chat"
+            } else {
+                &config.llm.default_model
+            },
+        );
+        let evolver = Arc::new(
+            taiji::orchestration::cognition_evolver::CognitionEvolver::new(
+                factory.liluo.clone(),
+            ),
+        );
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let dmn_config = config.runtime.dmn.clone();
+        let consumer = taiji::orchestration::dmn_consumer::DmnConsumer::new(
+            evolver,
+            cancel.clone(),
+            &data_root,
+            dmn_config.clone(),
+        );
+        // V33/MVP-3 主动学习执行器（默认关闭；开启时消费 experiments/ 队列）
+        // V36：探索目标从默认模型分区加载（变体资产已随迁移落位分区）。
+        let al_liluo = Arc::new(factory.liluo.for_model(default_key.key()).await?);
+        let al_handle = taiji::orchestration::active_learning::spawn_runner(
+            factory.clone(),
+            config.clone(),
+            &data_root,
+            cancel.clone(),
+            al_liluo,
+        );
+        dmn_handle = Some((consumer.spawn(), al_handle.unwrap_or_else(|| tokio::task::spawn(async {})), cancel));
+        tracing::info!(
+            pending_dir = %data_root.join("pending").display(),
+            active_learning = dmn_config.active_learning_enabled,
+            "--with-dmn: DMN Consumer spawned (passive learning)"
+        );
+    }
 
     // Execute task via RecursiveRunner (V26: --resume reuses task dir + recovery chain).
     let runner = taiji::orchestration::runner::RecursiveRunner::new(factory, config);
@@ -97,6 +160,39 @@ async fn cmd_run(
     println!("✓ Task completed: {}", result.task_id);
     println!("  Content: {}", result.content);
     println!("  Tools used: {}", result.tools_used.join(", "));
+
+    // ── 等待 DMN Consumer 处理 pending 后退出（MVP 时序修正）──
+    // 固定 3s 不够：消费者 backoff 指数增长（1,2,4,8,16,32,60s），长任务
+    // 结束时 backoff 已大，3s 内不会扫描到新 pending。改为轮询 pending
+    // 清空（上限 60s，1s 间隔）——pending 目录下的 dead/ 子目录不计。
+    if let Some((handle, al_handle, cancel)) = dmn_handle {
+        tracing::info!("--with-dmn: waiting for DMN Consumer to drain pending/");
+        let pending_dir = data_root.join("pending");
+        for _ in 0..60 {
+            let mut remaining = 0usize;
+            if let Ok(mut rd) = tokio::fs::read_dir(&pending_dir).await {
+                while let Ok(Some(entry)) = rd.next_entry().await {
+                    let is_dead = entry
+                        .file_name()
+                        .to_string_lossy()
+                        .starts_with("dead");
+                    if entry.file_type().await.map(|t| t.is_file()).unwrap_or(false)
+                        && !is_dead
+                    {
+                        remaining += 1;
+                    }
+                }
+            }
+            if remaining == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
+        cancel.cancel();
+        let _ = handle.await;
+        let _ = al_handle.await;
+        tracing::info!("--with-dmn: DMN Consumer stopped");
+    }
 
     Ok(())
 }
@@ -118,6 +214,28 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
     let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
     match taiji::infra::knowledge::LiluoClient::new(&knowledge_dir).await {
         Ok(_) => {
+            // V36：旧根资产迁移到默认模型分区（幂等；init 是人工可重跑步骤，
+            // 失败仅提示不中断——build_engine 运行时迁移失败才上抛）。
+            let default_key = taiji::types::agent::ModelKey::from_parts(
+                if config.llm.default_provider.is_empty() {
+                    "deepseek"
+                } else {
+                    &config.llm.default_provider
+                },
+                if config.llm.default_model.is_empty() {
+                    "deepseek-chat"
+                } else {
+                    &config.llm.default_model
+                },
+            );
+            if let Err(e) = taiji::infra::knowledge::migrate_to_partitioned(
+                &knowledge_dir,
+                default_key.key(),
+            )
+            .await
+            {
+                println!("⚠ legacy knowledge migration to default partition failed: {e}");
+            }
             println!(
                 "✓ 理络 knowledge store initialised at {}",
                 knowledge_dir.display()
@@ -306,6 +424,31 @@ async fn build_engine(
             Arc::new(taiji::infra::knowledge::LiluoClient::new_sparse(&knowledge_dir).await?)
         }
     };
+
+    // V36 分区落地：旧根资产迁移到默认模型分区（幂等——目标存在即跳过）。
+    // 无降级原则（AGENTS.md §23）：迁移是数据完整性操作，失败上抛（部分迁移
+    // 会导致根/分区资产不一致，检索结果不可信）。
+    let default_key = taiji::types::agent::ModelKey::from_parts(
+        if config.llm.default_provider.is_empty() {
+            "deepseek"
+        } else {
+            &config.llm.default_provider
+        },
+        if config.llm.default_model.is_empty() {
+            "deepseek-chat"
+        } else {
+            &config.llm.default_model
+        },
+    );
+    if let Err(e) =
+        taiji::infra::knowledge::migrate_to_partitioned(&knowledge_dir, default_key.key()).await
+    {
+        tracing::error!(
+            error = %e,
+            "legacy knowledge migration to default partition failed"
+        );
+        return Err(Box::new(e));
+    }
 
     let safety_hook = Arc::new(taiji::hooks::safety::SafetyHook::new(&config.safety));
     let worker_pool = Arc::new(taiji::orchestration::worker_pool::WorkerPool::new(

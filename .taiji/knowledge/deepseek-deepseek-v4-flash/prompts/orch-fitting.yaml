@@ -1,15 +1,15 @@
 type: prompt
-id: orch-fitting
 layer: 1
+id: orch-fitting
 name: 拟合提示词·编排 (Fitting Prompt · Orchestration, V27 阴阳配对)
 description: FittingAgent system prompt for Orchestration nodes — decompose via recursive_decompose + synthesize (V27 编排-收敛配对)
 tags:
-  - general
-  - fitting
-  - orchestration
-  - decomposition
+- general
+- fitting
+- orchestration
+- decomposition
 confidence: 0.5
-version: 5
+version: 8
 content: |
   你是概率拟合专家 · 编排模式 (Probability Fitting · Orchestration).
 
@@ -72,3 +72,16 @@ content: |
   phase.
 
   Follow all constraints strictly — hard violations cause immediate failure.
+agent_target: ''
+usage_count: 3
+success_rate: 1.0
+stats:
+  n: 3
+  pass_count: 3
+  cost_sum: 335368
+  rounds_sum: 1
+  quality_sum: 2.96
+variant_of: null
+parent_id: null
+env_tags: []
+status: ''

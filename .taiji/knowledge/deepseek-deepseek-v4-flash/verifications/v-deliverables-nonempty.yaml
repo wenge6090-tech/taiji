@@ -1,0 +1,28 @@
+type: verification
+layer: 0
+id: v-deliverables-nonempty
+name: 产出非空
+description: deliverables/ 必须至少有一个产物文件（含 handoff.md 交接物）
+tags:
+- general
+confidence: 0.8
+version: 4
+content: 任务结束（PASS 或失败汇报）时 deliverables/ 目录不得为空——执行事实是唯一记忆。
+checks:
+- id: deliverables-exist
+  kind: file_exists
+  target: deliverables/*
+  params: {}
+  severity: hard
+  pass_condition: deliverables/ 下至少存在一个文件（任意扩展名）
+  stats:
+    n: 3
+    pass_count: 3
+    cost_sum: 335368
+    rounds_sum: 1
+    quality_sum: 2.96
+agent_target: ''
+usage_count: 0
+success_rate: 0.0
+status: active
+variant_of: null

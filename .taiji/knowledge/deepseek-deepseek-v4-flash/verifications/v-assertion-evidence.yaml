@@ -1,0 +1,31 @@
+# 阴轨验证契约（V34/MVP-4 断言证据链 — 委托-代理机制设计，BCP §8.22）
+# 断言引用完整性：产出 [证据: 工具名] 引用必须在任务 trace.jsonl tool_call::*
+# 记录中存在——「编造虚假事实」的机械检测入口（激励相容，诚实成为占优策略）。
+# severity=soft 起步：失败注入 LLM prompt 供参考不短路（防误伤纯推理任务，
+# hard 档留给 DMN 演化升级——§8.23 MVP-4 验收）。
+# 消费方：ContractEngine check_trace_consistency（纯机械零 LLM）。
+type: verification
+id: v-assertion-evidence
+layer: 0
+name: 断言证据链
+description: 产出中的 [证据: 工具名] 引用必须对应真实工具调用记录；(推测) 标记计数作为质量信号
+confidence: 0.7
+version: 1
+tags:
+  - general
+content: 产出断言与执行轨迹绑定——证据引用存在性校验（trace 一致性，引用完整性推广）。
+checks:
+  - id: assertion-evidence-trace
+    kind: trace_consistency
+    target: deliverables/*.md
+    params:
+      evidence_pattern: "[证据: {tool}]"
+      speculation_marker: "(推测)"
+      allowed_tools:
+        - webfetch
+        - search
+        - read
+        - bash
+      trace_glob: trace.jsonl
+    severity: soft
+    pass_condition: 产出中每个 [证据: 工具名] 引用必须在 trace.jsonl 的 tool_call::* 记录中存在；推测标记不失败但计数注入 detail（质量信号）

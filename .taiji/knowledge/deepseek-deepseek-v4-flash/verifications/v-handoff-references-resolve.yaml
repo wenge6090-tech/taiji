@@ -1,0 +1,29 @@
+type: verification
+layer: 0
+id: v-handoff-references-resolve
+name: 交接引用完整
+description: deliverables/handoff.md 的 output_refs 必须全部解析为真实文件
+tags:
+- general
+confidence: 0.7
+version: 4
+content: 交接文件的 front matter 中 output_refs 数组内每个路径必须真实存在于任务目录。
+checks:
+- id: handoff-output-refs-resolve
+  kind: reference_resolves
+  target: deliverables/handoff.md
+  params:
+    field: output_refs
+  severity: soft
+  pass_condition: output_refs 内每个路径均存在（相对路径按任务目录解析）
+  stats:
+    n: 3
+    pass_count: 3
+    cost_sum: 335368
+    rounds_sum: 1
+    quality_sum: 2.96
+agent_target: ''
+usage_count: 0
+success_rate: 0.0
+status: active
+variant_of: null

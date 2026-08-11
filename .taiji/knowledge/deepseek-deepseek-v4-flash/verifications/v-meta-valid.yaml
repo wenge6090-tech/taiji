@@ -1,0 +1,34 @@
+type: verification
+layer: 0
+id: v-meta-valid
+name: 任务册合法
+description: meta.json 必须存在且字段完整（runner 写入，保底防线——任意任务的验证前提）
+tags:
+- general
+confidence: 0.8
+version: 4
+content: 任务元数据文件 meta.json 必须可解析为合法 JSON 且包含核心字段。
+checks:
+- id: meta-json-schema
+  kind: schema_valid
+  target: meta.json
+  params:
+    format: json
+    required_fields:
+    - id
+    - description
+    - depth
+    - status
+  severity: hard
+  pass_condition: meta.json 必须可解析且包含 id/description/depth/status 字段
+  stats:
+    n: 3
+    pass_count: 3
+    cost_sum: 335368
+    rounds_sum: 1
+    quality_sum: 2.96
+agent_target: ''
+usage_count: 0
+success_rate: 0.0
+status: active
+variant_of: null

@@ -1,9 +1,12 @@
 pub mod runner;
 pub mod constraint_engine;
+pub mod contract_engine;
 pub mod trigger_engine;
 pub mod worker_pool;
 pub mod cognition_evolver;
 pub mod dmn_consumer;
 pub mod tpn_cycle;
+pub mod active_learning;
+pub mod model_router;
 pub mod event_bus;
 pub mod task_tree_builder;

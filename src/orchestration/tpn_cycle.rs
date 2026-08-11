@@ -35,11 +35,13 @@ use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::trace::{load_json_optional, save_json_atomic};
 use crate::orchestration::event_bus;
-use crate::types::agent::MetaContext;
+use crate::types::agent::{AssetRef, MetaContext};
 use crate::types::execution::EngineContext;
 use crate::types::frontend::{TpnPhase, YinIntervention};
 use crate::types::task::{Checkpoint, CyclePhase, DecomposeResult, Task, TaskStatus, TPNResult};
-use crate::types::verification::{ConvergenceStatus, VerificationReport, VerificationRoute};
+use crate::types::verification::{
+    CheckResult, ConvergenceStatus, VerificationReport, VerificationRoute,
+};
 use crate::ws::types::TaskEvent;
 
 /// Reusable TPN cycle that executes the three-phase loop for a task at any
@@ -401,7 +403,8 @@ impl TpnCycle {
                             task_id = %engine_ctx.task_id,
                             "verify_state.json not found — re-running verify"
                         );
-                        let verify_agent = self.factory.create_causal_verify_agent(engine_ctx)?;
+                        let verify_agent =
+                            self.factory.create_causal_verify_agent(engine_ctx, &meta_ctx)?;
                         let tool_results = collect_tool_results(&engine_ctx.task_dir);
                         verify_agent
                             .verify(&fitting_result.content, &tool_results, &meta_ctx)
@@ -409,7 +412,7 @@ impl TpnCycle {
                     }
                 }
             } else {
-                let verify_agent = self.factory.create_causal_verify_agent(engine_ctx)?;
+                let verify_agent = self.factory.create_causal_verify_agent(engine_ctx, &meta_ctx)?;
                 let tool_results = collect_tool_results(&engine_ctx.task_dir);
                 let report = verify_agent
                     .verify(&fitting_result.content, &tool_results, &meta_ctx)
@@ -467,6 +470,81 @@ impl TpnCycle {
 
                     // Clean up checkpoint (task is done).
                     let _ = std::fs::remove_file(&checkpoint_path);
+
+                    // ── V33/MVP-2: enqueue DMN pending（被动学习 — BCP §6.4/§8.23）──
+                    // 读 verify_state.json 的 checks（CausalAgent 已写，MVP-1）→
+                    // 原子写 pending/{task_id}.json。TPN 只读归藏（§8.3 硬约束）：
+                    // 入队只写 pending/，归藏 YAML 由 DMN Consumer 单写。
+                    // I/O 失败仅 warn —— 学习是增强层，不阻断 PASS。
+                    let data_root = engine_ctx
+                        .task_dir
+                        .parent()
+                        .and_then(|p| p.parent());
+                    if let Some(data_root) = data_root {
+                        // ── V33/MVP-3: 四维信号摊派（BCP §6.4）──
+                        // cost = trace usage.input_tokens 求和；rounds = verify_state.round；
+                        // quality = route 映射（Pass=1.0/BackToTpn=0.4/BackToMeta=0.2）× confidence——
+                        // 全部既有数据，零新增持久化文件。任务级信号摊派给同任务所有检查项。
+                        let checks: Vec<CheckResult> =
+                            match load_json_optional::<serde_json::Value>(
+                                &engine_ctx.task_dir.join("verify_state.json"),
+                            ) {
+                                Ok(Some(state)) => {
+                                    let rounds = state
+                                        .get("round")
+                                        .and_then(|v| v.as_u64())
+                                        .unwrap_or(0) as u32;
+                                    let confidence = state
+                                        .get("report")
+                                        .and_then(|r| r.get("confidence"))
+                                        .and_then(|v| v.as_f64())
+                                        .unwrap_or(0.0);
+                                    let route_mult = match state
+                                        .get("report")
+                                        .and_then(|r| r.get("route"))
+                                        .and_then(|v| v.as_str())
+                                    {
+                                        Some("BackToMeta") => 0.2,
+                                        Some("BackToTpn") => 0.4,
+                                        _ => 1.0, // Pass
+                                    };
+                                    let quality = route_mult * confidence;
+                                    let cost = sum_trace_input_tokens(&engine_ctx.task_dir);
+                                    let mut checks: Vec<CheckResult> = state
+                                        .get("checks")
+                                        .and_then(|c| serde_json::from_value(c.clone()).ok())
+                                        .unwrap_or_default();
+                                    for c in &mut checks {
+                                        c.cost_tokens = cost;
+                                        c.verify_rounds = rounds;
+                                        c.quality = quality;
+                                    }
+                                    checks
+                                }
+                                _ => vec![],
+                            };
+                        if let Err(e) = enqueue_dmn_pending(
+                            &data_root,
+                            &engine_ctx.task_id,
+                            &checks,
+                            &meta_ctx.assets_used,
+                            true,
+                            meta_ctx.model.as_ref().map(|m| m.key()),
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                task_id = %engine_ctx.task_id,
+                                error = %e,
+                                "Failed to enqueue DMN pending — learning skipped (non-blocking)"
+                            );
+                        }
+                    } else {
+                        tracing::warn!(
+                            task_dir = %engine_ctx.task_dir.display(),
+                            "Cannot derive data_root from task_dir — DMN pending enqueue skipped"
+                        );
+                    }
 
                     return Ok(fitting_result);
                 }
@@ -877,6 +955,28 @@ fn list_deliverables(task_dir: &Path) -> Vec<String> {
 }
 
 /// Load the cached verification report from verify_state.json.
+/// 读 trace.jsonl，累加 `completion_response` 记录的 `output.usage.input_tokens`
+/// （token 成本信号，§6.4 回报函数 avg_cost_tokens 数据源）。
+/// 读失败/无记录 → 0（I/O 问题不阻断学习，成本维度退化）。
+fn sum_trace_input_tokens(task_dir: &Path) -> u64 {
+    let Ok(content) = std::fs::read_to_string(task_dir.join("trace.jsonl")) else {
+        return 0;
+    };
+    content
+        .lines()
+        .filter_map(|line| {
+            let v: serde_json::Value = serde_json::from_str(line).ok()?;
+            if v.get("phase").and_then(|p| p.as_str()) != Some("completion_response") {
+                return None;
+            }
+            v.get("output")
+                .and_then(|o| o.get("usage"))
+                .and_then(|u| u.get("input_tokens"))
+                .and_then(|t| t.as_u64())
+        })
+        .sum()
+}
+
 fn load_verify_report(task_dir: &Path) -> Option<VerificationReport> {
     let path = task_dir.join("verify_state.json");
     match load_json_optional::<serde_json::Value>(&path) {
@@ -958,6 +1058,48 @@ fn trunc(s: &str, max_len: usize) -> String {
     } else {
         chars[..max_len].iter().collect()
     }
+}
+
+/// V33/MVP-2：将检查项结果入队 DMN pending（被动学习 — BCP §6.4/§8.23）。
+///
+/// 写 `{data_root}/pending/{task_id}.json`，内容 = `{task_id, source, checks, assets_used, passed, model_key}`。
+/// 同 task_id 覆盖写（幂等——重跑任务不产生重复学习）；原子写（save_json_atomic）。
+/// 调用方为 TPN PASS 分支；I/O 失败由调用方 warn（学习是增强层，不阻断 PASS）。
+/// V35/MVP-6：assets_used（编排所选资产，DMN 回传依据 §8.21）与 passed（任务级
+/// PASS 信号——prompts 任务级归因；serde default 旧 pending 零迁移）。
+/// V36：model_key（分区一致性 §8.3——DMN 按路由模型分区回传；serde default
+/// 旧 pending 零迁移，None = 根/未分区）。
+pub(crate) async fn enqueue_dmn_pending(
+    data_root: &Path,
+    task_id: &str,
+    checks: &[CheckResult],
+    assets_used: &[AssetRef],
+    passed: bool,
+    model_key: Option<&str>,
+) -> Result<(), TaijiError> {
+    let pending_dir = data_root.join("pending");
+    tokio::fs::create_dir_all(&pending_dir).await.map_err(|e| {
+        TaijiError::Other(format!(
+            "failed to create pending dir {:?}: {e}",
+            pending_dir
+        ))
+    })?;
+
+    let payload = serde_json::json!({
+        "task_id": task_id,
+        "source": "tpn",
+        "checks": checks,
+        "assets_used": assets_used,
+        "passed": passed,
+        "model_key": model_key,
+    });
+    let path = pending_dir.join(format!("{task_id}.json"));
+    save_json_atomic(&payload, &path).map_err(|e| {
+        TaijiError::Other(format!(
+            "failed to write pending file {:?}: {e}",
+            path
+        ))
+    })
 }
 
 #[cfg(test)]
@@ -1074,6 +1216,97 @@ mod tests {
     }
 
     // ── TpnCycle status 终态落盘（根/子同构）─────────────────────────
+
+    #[tokio::test]
+    async fn test_enqueue_dmn_pending_writes_file_and_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "taiji_enqueue_pending_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+
+        let checks = vec![CheckResult {
+            check_id: "meta-json-schema".into(),
+            kind: crate::types::verification::CheckKind::SchemaValid,
+            passed: true,
+            detail: "schema valid (json)".into(),
+            duration_ms: 1,
+            cost_tokens: 0,
+            verify_rounds: 0,
+            quality: 0.0,
+        }];
+
+        // 首次入队：文件结构断言
+        super::enqueue_dmn_pending(&dir, "task-1", &checks, &[], true, Some("deepseek-deepseek-chat"))
+            .await
+            .unwrap();
+        let path = dir.join("pending").join("task-1.json");
+        assert!(path.exists(), "pending file should exist");
+        let content: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(content["task_id"], "task-1");
+        assert_eq!(content["source"], "tpn");
+        assert_eq!(content["checks"].as_array().unwrap().len(), 1);
+        assert_eq!(content["checks"][0]["check_id"], "meta-json-schema");
+        assert_eq!(content["checks"][0]["passed"], true);
+        // V36：model_key 随 pending 入队（DMN 分区回传依据）
+        assert_eq!(content["model_key"], "deepseek-deepseek-chat");
+
+        // 幂等：同 task_id 覆盖写（不产生第二文件）
+        super::enqueue_dmn_pending(&dir, "task-1", &[], &[], true, None)
+            .await
+            .unwrap();
+        let files: Vec<_> = std::fs::read_dir(dir.join("pending"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .collect();
+        assert_eq!(files.len(), 1, "idempotent overwrite — single file");
+        let content2: serde_json::Value =
+            serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
+        assert_eq!(content2["checks"].as_array().unwrap().len(), 0);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_sum_trace_input_tokens_accumulates_usage() {
+        let dir = std::env::temp_dir().join(format!(
+            "taiji_sum_trace_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&dir).await.unwrap();
+        let trace = dir.join("trace.jsonl");
+        // 两条 completion_response 带 usage + 一条无关记录
+        tokio::fs::write(
+            &trace,
+            concat!(
+                r#"{"ts":"t1","cycle":0,"depth":0,"task_id":"t","phase":"completion_response","provider_model":"m","duration_ms":1,"input":{},"output":{"usage":{"input_tokens":1234,"output_tokens":10,"total_tokens":1244}},"degraded":false}"#,
+                "\n",
+                r#"{"ts":"t2","cycle":0,"depth":0,"task_id":"t","phase":"completion_response","provider_model":"m","duration_ms":1,"input":{},"output":{"usage":{"input_tokens":666,"output_tokens":5,"total_tokens":671}},"degraded":false}"#,
+                "\n",
+                r#"{"ts":"t3","cycle":0,"depth":0,"task_id":"t","phase":"tool_call::read","provider_model":"m","duration_ms":1,"input":{},"output":{},"degraded":false}"#,
+                "\n",
+            ),
+        )
+        .await
+        .unwrap();
+        assert_eq!(super::sum_trace_input_tokens(&dir), 1234 + 666);
+
+        // 无 trace 文件 / 无记录 → 0
+        let empty = dir.join("empty");
+        tokio::fs::create_dir_all(&empty).await.unwrap();
+        assert_eq!(super::sum_trace_input_tokens(&empty), 0);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
 
     #[tokio::test]
     async fn test_execute_writes_cancelled_on_cancelled_token() {

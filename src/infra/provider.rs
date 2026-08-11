@@ -27,6 +27,11 @@ pub struct ProviderRegistry {
     openai_clients: HashMap<String, Arc<openai::Client>>,
     default_name: String,
     default_client: Arc<deepseek::Client>,
+    /// V36 模型路由候选表：(provider, model)——default + `llm.providers` 中
+    /// deepseek 系条目（base_url 为 None 或 name=="deepseek"）。
+    /// ModelRouter 据此生成 ModelKey 候选；`resolve_model` 查表解析（模型名可
+    /// 含连字符，不做字符串拆解——查表匹配无歧义）。
+    model_candidates: Vec<(String, String)>,
 }
 
 impl ProviderRegistry {
@@ -49,6 +54,15 @@ impl ProviderRegistry {
 
         let mut clients: HashMap<String, Arc<deepseek::Client>> = HashMap::new();
         clients.insert(default_name.clone(), default_client.clone());
+
+        // V36 路由候选初始化（default 先——tie 时确定性首选）。
+        let default_model = if llm.default_model.is_empty() {
+            "deepseek-chat"
+        } else {
+            &llm.default_model
+        };
+        let mut model_candidates: Vec<(String, String)> =
+            vec![(default_name.clone(), default_model.to_string())];
 
         // Build override clients for each agent that specifies a different provider/model config.
         for (agent_name, override_cfg) in &llm.agent_overrides {
@@ -93,7 +107,14 @@ impl ProviderRegistry {
             if key == "deepseek" || base_url.is_none() {
                 // A deepseek-flavored extra entry reuses the deepseek client map.
                 let client = build_deepseek_client(&entry.api_key, base_url, &key)?;
-                clients.insert(key, client);
+                clients.insert(key.clone(), client);
+                // deepseek 系条目参与模型路由候选（模型名缺省 → 默认模型）。
+                let entry_model = if entry.model.is_empty() {
+                    default_model.to_string()
+                } else {
+                    entry.model.clone()
+                };
+                model_candidates.push((key, entry_model));
                 continue;
             }
             let client = build_openai_compat_client(&entry.api_key, base_url, &key)?;
@@ -112,6 +133,7 @@ impl ProviderRegistry {
             openai_clients,
             default_name,
             default_client,
+            model_candidates,
         })
     }
 
@@ -136,6 +158,42 @@ impl ProviderRegistry {
     /// Return a reference-counted handle to the default DeepSeek client.
     pub fn default_client(&self) -> Arc<deepseek::Client> {
         self.default_client.clone()
+    }
+
+    // ── V36 模型路由候选表（§8.8 第 1 步）──────────────────────────────
+
+    /// 路由候选 ModelKey 列表（default 在前，tie 时确定性首选）。
+    /// 仅含 deepseek 系候选——OpenAI-compat 条目不参与路由（执行层
+    /// Fitting/Causal 仅从 deepseek client map 建 agent，跨类型 agent builder
+    /// 动态分发未实现，MVP 边界）。
+    pub fn model_keys(&self) -> Vec<crate::types::agent::ModelKey> {
+        self.model_candidates
+            .iter()
+            .map(|(p, m)| crate::types::agent::ModelKey::from_parts(p, m))
+            .collect()
+    }
+
+    /// 默认模型键（config.llm.default_provider × default_model）。
+    pub fn default_model_key(&self) -> crate::types::agent::ModelKey {
+        let (p, m) = &self.model_candidates[0];
+        crate::types::agent::ModelKey::from_parts(p, m)
+    }
+
+    /// 按候选表解析 ModelKey → (provider, model)。未命中 → None（路由结果
+    /// 指向已从配置移除的模型——调用方回退配置默认）。
+    pub fn resolve_model(&self, key: &crate::types::agent::ModelKey) -> Option<(String, String)> {
+        self.model_candidates
+            .iter()
+            .find(|(p, m)| {
+                crate::types::agent::ModelKey::from_parts(p, m).0 == key.0
+            })
+            .cloned()
+    }
+
+    /// 按 provider 名取 deepseek 系 client（模型路由执行层消费；未知名回退
+    /// 默认 client + warn——与 [`Self::client`] 同语义，命名强调路由用途）。
+    pub fn client_for(&self, provider: &str) -> Result<Arc<deepseek::Client>, TaijiError> {
+        self.client(provider)
     }
 
     /// Retrieve an OpenAI-compatible client by provider name.

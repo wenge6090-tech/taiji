@@ -1,0 +1,21 @@
+# 阴轨验证契约（V33 归藏本体论重构 — MVP-1 通用种子）
+# L2 LLM 语义裁决（唯一留给 LLM 的检查项类型，BCP §6.6）：
+# 机械检查全过后，语义合理性/跨产物一致性仍由 CausalAgent LLM 把关——
+# 保证三权分立接线正确（LLM 只裁决语义项，且须逐文件取证）。
+type: verification
+id: v-semantic-coherence
+layer: 0
+name: 语义一致性裁决
+description: 综合产出与 deliverables 文件内容必须一致，不得虚构产物（LLM 裁决项）
+confidence: 0.7
+version: 1
+tags:
+  - general
+content: 编排/执行节点的最终产出必须与 deliverables/ 实际文件内容一致。
+checks:
+  - id: semantic-coherence
+    kind: llm_judgement
+    target: deliverables
+    params: {}
+    severity: hard
+    pass_condition: 综合报告/任务输出必须与 deliverables/ 文件内容一致；引用的每个产物必须真实存在；不得虚构或美化未完成的产出

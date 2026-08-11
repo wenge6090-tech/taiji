@@ -64,7 +64,7 @@ impl CausalVerifyTool {
         task_output: &str,
         tool_results: &[String],
     ) -> Result<String, TaijiError> {
-        let builder = self.factory.create_causal_verify_agent(&self.engine_ctx)?;
+        let builder = self.factory.create_causal_verify_agent(&self.engine_ctx, &self.meta_ctx)?;
         let report = builder.verify(task_output, tool_results, &self.meta_ctx).await?;
         serde_json::to_string(&report).map_err(TaijiError::Serde)
     }

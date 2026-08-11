@@ -184,11 +184,12 @@ impl AgentFactory {
         engine_ctx: &EngineContext,
         cancel: CancellationToken,
     ) -> Result<FittingAgentBuilder, TaijiError> {
-        let (_provider, model) = self.agent_llm_config("fitting");
+        let (provider, model) = self.agent_llm_config_with("fitting", meta_ctx.model.as_ref());
         tracing::debug!(
             task_id = %engine_ctx.task_id,
             depth,
             mode = ?meta_ctx.mode,
+            provider = %provider,
             model = %model,
             "Creating FittingAgent"
         );
@@ -200,7 +201,8 @@ impl AgentFactory {
             self.clone(),
             &model,
             cancel,
-        ))
+        )
+        .provider_name(&provider))
     }
 
     /// Create a [`CausalVerifyAgentBuilder`] (因果验证·阴, verify mode).
@@ -215,10 +217,12 @@ impl AgentFactory {
     pub fn create_causal_verify_agent(
         &self,
         engine_ctx: &EngineContext,
+        meta_ctx: &MetaContext,
     ) -> Result<CausalVerifyAgentBuilder, TaijiError> {
-        let (_provider, model) = self.agent_llm_config("causal");
+        let (provider, model) = self.agent_llm_config_with("causal", meta_ctx.model.as_ref());
         tracing::debug!(
             task_id = %engine_ctx.task_id,
+            provider = %provider,
             model = %model,
             "Creating CausalVerifyAgent"
         );
@@ -227,7 +231,9 @@ impl AgentFactory {
             self.providers.clone(),
             &model,
         )
-        .safety_hook(self.safety_hook.clone()))
+        .provider_name(&provider)
+        .safety_hook(self.safety_hook.clone())
+        .guizang(self.liluo.clone()))
     }
 
     /// Create a [`CausalConvergeAgentBuilder`] (收敛判定, converge mode).
@@ -241,10 +247,12 @@ impl AgentFactory {
     pub fn create_causal_converge_agent(
         &self,
         engine_ctx: &EngineContext,
+        meta_ctx: &MetaContext,
     ) -> Result<CausalConvergeAgentBuilder, TaijiError> {
-        let (_provider, model) = self.agent_llm_config("causal");
+        let (provider, model) = self.agent_llm_config_with("causal", meta_ctx.model.as_ref());
         tracing::debug!(
             task_id = %engine_ctx.task_id,
+            provider = %provider,
             model = %model,
             "Creating CausalConvergeAgent"
         );
@@ -253,6 +261,7 @@ impl AgentFactory {
             self.providers.clone(),
             &model,
         )
+        .provider_name(&provider)
         .safety_hook(self.safety_hook.clone()))
     }
 
@@ -309,6 +318,41 @@ impl AgentFactory {
     /// // → ("deepseek", "deepseek-chat")       if using defaults
     /// ```
     pub fn agent_llm_config(&self, agent_type: &str) -> (String, String) {
+        self.agent_llm_config_with(agent_type, None)
+    }
+
+    /// V36：按 MetaContext.model 路由结果解析 LLM 配置（BCP §8.8 下游消费）。
+    ///
+    /// `model_key = Some` 且可在候选表解析 → 返回路由的 (provider, model)，
+    /// **覆盖** agent_overrides（路由是元权重决策，优先级高于静态配置）；
+    /// 未命中候选表（模型已从配置移除）→ warn + 回退静态配置。
+    /// `model_key = None` → 既有静态配置逻辑。
+    ///
+    /// 注意：fallback 必须内联静态逻辑——不得调 `agent_llm_config`（它会转发
+    /// 回本方法，无限递归）。
+    pub fn agent_llm_config_with(
+        &self,
+        agent_type: &str,
+        model_key: Option<&crate::types::agent::ModelKey>,
+    ) -> (String, String) {
+        if let Some(key) = model_key {
+            if let Some((provider, model)) = self.providers.resolve_model(key) {
+                tracing::debug!(
+                    agent_type,
+                    model_key = %key,
+                    provider = %provider,
+                    model = %model,
+                    "routed model resolved for agent"
+                );
+                return (provider, model);
+            }
+            tracing::warn!(
+                agent_type,
+                model_key = %key,
+                "routed model not in candidate table — falling back to config default"
+            );
+        }
+
         let default_provider = if self.config.llm.default_provider.is_empty() {
             "deepseek"
         } else {

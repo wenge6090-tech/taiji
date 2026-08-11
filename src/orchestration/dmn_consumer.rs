@@ -6,6 +6,7 @@
 //! feeds them to the CognitionEvolver, and moves processed/dead files accordingly.
 //! Backoff starts at 1 s and caps at 60 s (1, 2, 4, 8, 16, 32, 60, 60, …).
 
+use crate::infra::config::DmnConfig;
 use crate::infra::error::TaijiError;
 use crate::orchestration::cognition_evolver::CognitionEvolver;
 use std::path::{Path, PathBuf};
@@ -25,6 +26,8 @@ pub struct DmnConsumer {
     cancel: CancellationToken,
     /// Root directory under which `pending/` and `pending/dead/` live.
     data_root: PathBuf,
+    /// V33/MVP-3: DMN 演化配置（回报权重 / 门槛 / 主动学习开关）。
+    dmn_config: DmnConfig,
 }
 
 impl DmnConsumer {
@@ -33,15 +36,18 @@ impl DmnConsumer {
     /// * `evolver` — shared cognition evolver for δ₀–δ₃ operations.
     /// * `cancel` — cancellation token; the loop exits when this is signalled.
     /// * `data_root` — root directory containing the `pending/` subdirectory.
+    /// * `dmn_config` — V33/MVP-3 演化配置（§6.3/§6.4/§8.12）。
     pub fn new(
         evolver: Arc<CognitionEvolver>,
         cancel: CancellationToken,
         data_root: &Path,
+        dmn_config: DmnConfig,
     ) -> Self {
         Self {
             evolver,
             cancel,
             data_root: data_root.to_path_buf(),
+            dmn_config,
         }
     }
 
@@ -187,15 +193,119 @@ impl DmnConsumer {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&file_name);
 
-                // Evolve with retry (3 attempts for transient errors).
+                // ── V33/MVP-2 分发：pending 携带 checks → backprop 检查项统计；
+                //    无 checks → 既有 evolve（δ₀-δ₂ 占位路径，MVP-3 统一重构）──
+                // backprop 单次执行（不重试）：统计累加不可重复，失败进死信供人工诊断。
+                // V35/MVP-6: assets_used → backprop_prompts（任务级信号，§8.21）——
+                // 与 checks 同 pending 负载，同一单次不重试语义（统计不可重复累加）。
+                let is_backprop = value.get("checks").is_some();
+                let mut evolve_result: Result<
+                    crate::orchestration::cognition_evolver::EvolutionReport,
+                    TaijiError,
+                > = if is_backprop {
+                    match serde_json::from_value::<Vec<crate::types::verification::CheckResult>>(
+                        value["checks"].clone(),
+                    ) {
+                        Ok(checks) => {
+                            // V36 分区一致性（§8.3）：pending 携带 model_key（MetaAgent
+                            // 路由结果）——回传与演化落到路由模型分区；None = 根/legacy。
+                            let model_key = value.get("model_key").and_then(|v| v.as_str());
+                            // V35/MVP-6: prompts 任务级回传（assets_used + passed；
+                            // 失败仅 warn 不阻断 checks 路径——prompts 回传是增强层）
+                            let assets_used: Vec<crate::types::agent::AssetRef> = value
+                                .get("assets_used")
+                                .and_then(|v| serde_json::from_value(v.clone()).ok())
+                                .unwrap_or_default();
+                            let passed = value
+                                .get("passed")
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(true);
+                            if !assets_used.is_empty() {
+                                match self
+                                    .evolver
+                                    .backprop_prompts(
+                                        &task_id,
+                                        &assets_used,
+                                        passed,
+                                        &checks,
+                                        &self.dmn_config,
+                                        model_key,
+                                    )
+                                    .await
+                                {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        tracing::warn!(
+                                            task_id = %task_id,
+                                            error = %e,
+                                            "[dmn_consumer] backprop_prompts failed — checks path continues"
+                                        );
+                                    }
+                                }
+                            }
+                            match self
+                                .evolver
+                                .backprop_checks(&task_id, &checks, &self.dmn_config, model_key)
+                                .await
+                            {
+                                Ok(_updated) => {
+                                    // ── V36: model_stats 元权重表回传（BCP §6.4——路由数据源）。
+                                    // checks 首项聚合（同任务摊派值一致）；失败仅 warn（增强层，
+                                    // 不阻断 backprop 主流程——频率统计已持久化）。
+                                    if let Some(key) = model_key {
+                                        let first = checks.first();
+                                        let signal =
+                                            crate::orchestration::model_router::ModelStatsSignal {
+                                                passed,
+                                                cost_tokens: first.map(|c| c.cost_tokens).unwrap_or(0),
+                                                verify_rounds: first.map(|c| c.verify_rounds).unwrap_or(0),
+                                                quality: first.map(|c| c.quality).unwrap_or(0.0),
+                                            };
+                                        if let Err(e) = crate::orchestration::model_router::update_model_stats(
+                                            &self.evolver.liluo(),
+                                            &crate::types::agent::ModelKey(key.to_string()),
+                                            &signal,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                task_id = %task_id,
+                                                model_key = %key,
+                                                error = %e,
+                                                "[dmn_consumer] model_stats update failed — checks path continues"
+                                            );
+                                        }
+                                    }
+                                    // ── V33/MVP-3: backprop 后尝试契约演化（单次、激活门槛内）──
+                                    // 演化失败（I/O）→ 错误上抛 → pending 进死信：backprop 已成功
+                                    // 统计已回传，死信移动防止重复 backprop（幂等性保持）。
+                                    self.evolver
+                                        .evolve_contracts(&self.dmn_config, model_key)
+                                        .await
+                                }
+                                Err(e) => Err(e),
+                            }
+                        }
+                        Err(e) => Err(TaijiError::Other(format!(
+                            "pending checks parse failed: {e}"
+                        ))),
+                    }
+                } else {
+                    Err(TaijiError::Other("not started".into()))
+                };
+
+                // Evolve with retry (3 attempts for transient errors) —
+                // backprop 路径不重试（统计不可重复累加）。
                 const MAX_EVOLVE_RETRIES: u32 = 3;
-                let mut evolve_result = Err(TaijiError::Other("not started".into()));
                 for attempt in 1..=MAX_EVOLVE_RETRIES {
+                    if evolve_result.is_ok() || is_backprop {
+                        break;
+                    }
                     if attempt > 1 {
                         let delay_ms = 500 * attempt; // 1s, 1.5s
                         Self::backoff_sleep(&self.cancel, delay_ms as u64).await;
                     }
-                    evolve_result = self.evolver.evolve(task_id, &[]).await;
+                    evolve_result = self.evolver.evolve(&task_id, &[]).await;
                     if evolve_result.is_ok() {
                         break;
                     }
@@ -346,7 +456,7 @@ mod tests {
                 .expect("LiluoClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client));
-        let consumer = DmnConsumer::new(evolver, CancellationToken::new(), data_root);
+        let consumer = DmnConsumer::new(evolver, CancellationToken::new(), data_root, DmnConfig::default());
         (consumer, knowledge_dir)
     }
 
@@ -393,7 +503,7 @@ mod tests {
 
         // Recreate consumer with the external cancellation token.
         let evolver = consumer.evolver; // reuse the evolver
-        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root);
+        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
         let handle = consumer.spawn();
 
         // Give the loop time to spin once.
@@ -439,7 +549,7 @@ mod tests {
                 .expect("LiluoClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client));
-        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root);
+        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
         let handle = consumer.spawn();
 
         // Allow one processing cycle.
@@ -452,6 +562,69 @@ mod tests {
 
         // The file should have been deleted (processed successfully).
         assert!(!task_file.exists(), "expected processed file to be deleted");
+
+        cleanup(&data_root).await;
+        cleanup(&knowledge_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_backprop_updates_model_stats_in_partition() {
+        // V36 元权重表回传（BCP §6.4）：pending 带 model_key + checks →
+        // backprop 后 model_stats.yaml 出现该 model_key 行（首项四维聚合）。
+        let data_root = create_test_root("model_stats_backprop").await;
+        let pending = data_root.join("pending");
+        let cancel = CancellationToken::new();
+
+        let task_file = pending.join("task_stats.json");
+        let checks = serde_json::json!([{
+            "check_id": "c1", "kind": "file_exists", "passed": true,
+            "detail": "ok", "duration_ms": 1, "cost_tokens": 100,
+            "verify_rounds": 2, "quality": 1.0
+        }]);
+        let payload = serde_json::json!({
+            "task_id": "task_stats",
+            "source": "tpn",
+            "checks": checks,
+            "assets_used": [],
+            "passed": true,
+            "model_key": "deepseek-deepseek-v4-flash",
+        });
+        fs::write(&task_file, serde_json::to_string(&payload).unwrap())
+            .await
+            .unwrap();
+
+        let knowledge_dir = std::env::temp_dir().join(format!(
+            "taiji_dmn_knowledge_ms_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let client = Arc::new(
+            LiluoClient::new(&knowledge_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let evolver = Arc::new(CognitionEvolver::new(client.clone()));
+        let consumer =
+            DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+        let handle = consumer.spawn();
+
+        tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
+        cancel.cancel();
+        tokio::time::timeout(tokio::time::Duration::from_secs(5), handle)
+            .await
+            .expect("consumer did not shut down")
+            .expect("consumer panicked");
+
+        // model_stats.yaml 根级生成，含路由 model_key 行
+        assert!(!task_file.exists(), "expected processed file to be deleted");
+        let stats = client.load_model_stats().await.unwrap();
+        let row = stats.get("deepseek-deepseek-v4-flash").expect("model stats row");
+        assert_eq!(row.n, 1);
+        assert_eq!(row.pass_count, 1);
+        assert_eq!(row.cost_sum, 100);
+        assert_eq!(row.rounds_sum, 2);
 
         cleanup(&data_root).await;
         cleanup(&knowledge_dir).await;
@@ -480,7 +653,7 @@ mod tests {
                 .expect("LiluoClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client));
-        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root);
+        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
         let handle = consumer.spawn();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
@@ -503,6 +676,153 @@ mod tests {
             path.to_string_lossy().contains("corrupt"),
             "dead-letter filename should reference original file"
         );
+
+        cleanup(&data_root).await;
+        cleanup(&knowledge_dir).await;
+    }
+
+    // ── V33/MVP-2: checks 格式 pending 处理（backprop 闭环）──
+
+    #[tokio::test]
+    async fn test_process_checks_pending_backprops_stats() {
+        use crate::types::agent::VerificationAsset;
+        use crate::types::verification::{
+            CheckKind, CheckSeverity, CheckSpec,
+        };
+
+        let data_root = create_test_root("checks_backprop").await;
+        let pending = data_root.join("pending");
+
+        // 知识库种一棵契约资产（与 consumer 共享同一 client）
+        let knowledge_dir = std::env::temp_dir().join(format!(
+            "taiji_dmn_knowledge_cb_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let client = Arc::new(
+            LiluoClient::new(&knowledge_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let mut v = VerificationAsset::new(
+            "v-closed-loop",
+            "闭环契约",
+            "test",
+            "contract",
+            vec![CheckSpec {
+                id: "check-loop".into(),
+                kind: CheckKind::FileExists,
+                target: "deliverables/out.md".into(),
+                params: serde_json::json!({}),
+                severity: CheckSeverity::Hard,
+                pass_condition: "p".into(),
+                stats: Default::default(),
+            }],
+            vec!["general".into()],
+        );
+        client.save_verification(&mut v).await.unwrap();
+
+        let evolver = Arc::new(CognitionEvolver::new(client.clone()));
+        let cancel = CancellationToken::new();
+        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+        let handle = consumer.spawn();
+
+        // 写 checks 格式 pending（模拟 TPN PASS 入队）
+        let task_file = pending.join("task_loop_1.json");
+        let payload = serde_json::json!({
+            "task_id": "task_loop_1",
+            "source": "tpn",
+            "checks": [
+                {
+                    "check_id": "check-loop",
+                    "kind": "file_exists",
+                    "passed": true,
+                    "detail": "ok",
+                    "duration_ms": 1,
+                }
+            ],
+        });
+        fs::write(&task_file, serde_json::to_string(&payload).unwrap())
+            .await
+            .unwrap();
+
+        // 等待消费者处理（1s 首扫 + 处理）
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("consumer did not shut down")
+            .expect("consumer panicked");
+
+        // 断言：pending 已删除（处理成功）+ 归藏统计更新
+        assert!(!task_file.exists(), "expected processed file to be deleted");
+        let loaded = client
+            .load_verification("v-closed-loop")
+            .await
+            .unwrap()
+            .expect("asset should exist");
+        let check = loaded
+            .checks
+            .iter()
+            .find(|c| c.id == "check-loop")
+            .unwrap();
+        assert_eq!(check.stats.n, 1, "check stats must be backpropagated");
+        assert_eq!(check.stats.pass_count, 1);
+
+        cleanup(&data_root).await;
+        cleanup(&knowledge_dir).await;
+    }
+
+    #[tokio::test]
+    async fn test_process_checks_pending_parse_failure_moves_to_dead() {
+        let data_root = create_test_root("checks_bad").await;
+        let pending = data_root.join("pending");
+
+        let knowledge_dir = std::env::temp_dir().join(format!(
+            "taiji_dmn_knowledge_cbd_{}",
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let client = Arc::new(
+            LiluoClient::new(&knowledge_dir)
+                .await
+                .expect("LiluoClient should initialise"),
+        );
+        let evolver = Arc::new(CognitionEvolver::new(client));
+        let cancel = CancellationToken::new();
+        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+        let handle = consumer.spawn();
+
+        // checks 字段格式错误（非数组）→ 解析失败 → 死信
+        let task_file = pending.join("task_bad_checks.json");
+        let payload = serde_json::json!({
+            "task_id": "task_bad_checks",
+            "checks": "not-an-array",
+        });
+        fs::write(&task_file, serde_json::to_string(&payload).unwrap())
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("consumer did not shut down")
+            .expect("consumer panicked");
+
+        // 原文件不残留（处理或死信）；死信目录应有文件
+        assert!(!task_file.exists(), "bad checks file must be moved");
+        let dead_dir = pending.join("dead");
+        let dead_count = if dead_dir.exists() {
+            fs::read_dir(&dead_dir).await.unwrap().next_entry().await.unwrap().is_some()
+        } else {
+            false
+        };
+        assert!(dead_count, "bad checks file should land in dead-letter");
 
         cleanup(&data_root).await;
         cleanup(&knowledge_dir).await;

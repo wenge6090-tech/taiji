@@ -63,6 +63,8 @@ pub struct FittingAgentBuilder {
     engine_ctx: EngineContext,
     factory: Arc<AgentFactory>,
     model: String,
+    /// V36 模型路由：provider 名（MetaContext.model 解析结果；默认 deepseek）。
+    provider_name: String,
     /// Cancellation token propagated from the runner.
     /// Used by [`RecursiveDecomposeTool`] to signal cancellation to subtasks.
     cancel: CancellationToken,
@@ -89,8 +91,15 @@ impl FittingAgentBuilder {
             engine_ctx,
             factory,
             model: model.to_string(),
+            provider_name: "deepseek".to_string(),
             cancel,
         }
+    }
+
+    /// V36：设置 LLM provider 名（MetaContext.model 路由结果；默认 deepseek）。
+    pub fn provider_name(mut self, provider: &str) -> Self {
+        self.provider_name = provider.to_string();
+        self
     }
 
     /// Run the FittingAgent: execute the task along reasoning paths.
@@ -198,9 +207,15 @@ impl FittingAgentBuilder {
             &self.meta_ctx,
             max_depth,
         )?);
+        // V34/MVP-4 断言分级教学（BCP §8.22）：证据断言必须附 [证据: 工具名]（引用
+        // 真实工具调用）、推测必须标 (推测)、禁止编造证据引用——与 ContractEngine
+        // TraceConsistency 检查构成双保险：教学层降低违规频率，检查层独立判定。
+        system_prompt.push_str(&build_assertion_discipline_prompt());
 
-        // ── Obtain LLM client ──
-        let client: Arc<deepseek::Client> = self.factory.providers.client("deepseek")?;
+        // ── Obtain LLM client（V36：按路由 provider 选择——MetaContext.model
+        //    经 factory.agent_llm_config_with 解析为 provider_name）──
+        let client: Arc<deepseek::Client> =
+            self.factory.providers.client_for(&self.provider_name)?;
 
         // ── Build Rig agent with preamble, max_turns, max_tokens, temperature ──
         // V29 上下文预算（BCP §8.19）：max_turns 不再承担上下文管理——轮次与
@@ -246,8 +261,18 @@ impl FittingAgentBuilder {
         );
         // V29 上下文窗口预算：精确 token 统计替换 max_turns（BCP §8.19）。
         let limits = self.factory.config.runtime.context_limits;
+        // V32 第一性原理：编排节点的职责是「快拆」，不是「大干」——信息收集是
+        // 子任务的职责。编排节点 handoff 阈值远小于执行节点（60k）：超限 =
+        // 任务粒度错误 = 编排失败的硬证据 → BACK_TO_TPN → 带交接重入拆解。
+        // 执行节点保持配置阈值（250k）。教学层（模板“先拆解后收集”）已实测
+        // 拦不住 LLM 的“先理解再拆解”心理模型，必须注册面强制。
+        const ORCH_HANDOFF_TOKENS: u64 = 60_000;
+        let handoff = match self.mode {
+            AgentMode::Orchestration => limits.handoff_tokens.min(ORCH_HANDOFF_TOKENS),
+            AgentMode::Execution => limits.handoff_tokens,
+        };
         let limiter = crate::hooks::context_limiter::ContextLimiter::new(
-            limits.handoff_tokens,
+            handoff,
             limits.hard_cutoff_tokens,
         );
         let hook_set = crate::hooks::fitting_hook_set::FittingHookSet::new(
@@ -478,7 +503,14 @@ fn build_system_prompt(
 ) -> String {
     // Prefer MetaAgent-composed prompt if available.
     if let Some(ref composed) = meta_ctx.fitting_system_prompt {
-        return composed.clone();
+        // V32：MetaAgent 编排的 prompt 不含 task_dir 上下文——产物路径以
+        // 占位符 {deliverables_dir} 表示。必须替换为真实绝对路径，否则 LLM
+        // 会猜测产出目录（实测：编排查 761 字符，LLM 写到项目根 deliverables/）。
+        let deliverables_dir = task_dir.join("deliverables");
+        let dir_str = deliverables_dir.display().to_string();
+        return composed
+            .replace("{deliverables_dir}", &dir_str)
+            .replace("${deliverables_dir}", &dir_str);
     }
 
     // Fallback: build from mode-paired template (V27).
@@ -511,6 +543,26 @@ fn build_budget_discipline(limits: crate::infra::config::ContextLimits) -> Strin
          - 预算紧张时宁可提前交出残缺产出（交接文件），不要耗尽预算空手而归。\n",
         limits.handoff_tokens, limits.hard_cutoff_tokens
     )
+}
+
+/// V34/MVP-4 断言分级教学段（BCP §8.22）：让 LLM 感知产出断言必须与执行
+/// 轨迹绑定——证据断言附 `[证据: 工具名]`（引用真实工具调用）、推测断言
+/// 标 `(推测)`、禁止编造证据引用。教学层与 ContractEngine TraceConsistency
+/// 检查构成双保险：教学层降低违规频率，检查层独立判定（LLM 不遵循时
+/// 检查退化为空转——推测计数作为质量信号进 DMN 演化）。
+fn build_assertion_discipline_prompt() -> String {
+    "\n\n## 断言分级 (Assertion Discipline)\n\
+     产出中的事实性断言必须与你的真实执行轨迹绑定：\n\
+     - **证据断言**（你通过工具核实过的事实）：紧邻断言处附 `[证据: 工具名]`，\n\
+       工具名必须是本任务中真实调用过的工具（webfetch / search / read / bash）——\n\
+       例：`调研了 5 个竞品 [证据: webfetch]`；\n\
+     - **推测断言**（未核实、推断或估计的内容）：紧邻断言处标 `(推测)`——\n\
+       例：`该趋势预计持续（推测）`；\n\
+     - **禁止编造证据**：不得引用未调用过的工具——`[证据: X]` 会被机械校验，\n\
+       引用不存在的工具调用 = 验证失败；\n\
+     - 证据断言优先于推测：能用工具核实的不要标推测；核实不了的就明说。\n\
+     格式约定：`[证据: 工具名]` 与 `(推测)` 是唯一合法标记，紧跟断言（同行或紧邻行）。\n"
+        .to_string()
 }
 
 /// V30 分封制（BCP §8.20）：任务自我认知——「身份与地位」段。
@@ -780,6 +832,20 @@ fn build_orchestration_prompt(
            ✓ 单次执行无法覆盖，需要继续拆解\n\n\
          ⚠️ 深度规则：当 depth+1 >= max_depth 时，子任务模式会被工具**强制**\n\
          覆盖为 Execution（叶节点无法再拆解），计划时需考虑。\n\n\
+         ### 先拆解，后收集（最高优先级，V32）\n\
+         你的上下文是**一次性预算**，不是无限仓库——信息收集是**子任务的职责**，\n\
+         不是你的职责。拆解前禁止大规模读取：\n\
+         1. 🚫 **不读全文**：不要 read 源码文件/文档全文（每个 read 都可能消耗数万\n\
+            token）。用 search 一次性定位关键词，只看命中片段。\n\
+         2. 🚫 **不收集全局**：不需要理解整个项目的每个文件才能拆解——拆解\n\
+            依据任务描述 + 文件清单 + search 命中即可。\n\
+         3. ✅ **立即拆解**：读完任务描述后**第一步就调用 `recursive_decompose`**，\n\
+            把每个子任务的 description 写清楚（含目标文件路径与要求）。子任务\n\
+            会在自己的执行中读取自己需要的文件。\n\
+         4. 🔁 子任务失败汇报回来时，基于交接产物再指导（rerun_of）——不要亲自\n\
+            去读失败子任务的文件来“补救”。\n\
+         **预算红线**：若已消耗超过 60k token 仍未拆解，立即停止收集，要么拆解\n\
+         要么写交接文件返回——继续收集必然硬截止失败。\n\n\
          ### 子任务协作原则（V30 分封制：能看不能写）\n\
          1. 🏰 兄弟封地自治 — 子任务之间**不能互相写入**（write 被限制在本任务\n\
             目录内），但**可以读取**兄弟贡品（会盟：身份段会列出兄弟的\n\
@@ -953,6 +1019,9 @@ mod tests {
                 sibling_deliverables: vec![],
             },
             mode: AgentMode::Orchestration,
+            degraded: None,
+            assets_used: vec![],
+            model: None,
             fitting_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
@@ -1302,3 +1371,14 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 }
+
+    /// V34/MVP-4：断言分级教学段注入断言（教学层与检查层双保险，§8.22）。
+    #[test]
+    fn assertion_discipline_prompt_injected() {
+        let text = build_assertion_discipline_prompt();
+        assert!(text.contains("断言分级"), "section header present");
+        assert!(text.contains("[证据: 工具名]"), "evidence marker taught");
+        assert!(text.contains("(推测)"), "speculation marker taught");
+        assert!(text.contains("禁止编造证据"), "fabrication prohibition taught");
+        assert!(text.contains("webfetch"), "allowed tools enumerated");
+    }

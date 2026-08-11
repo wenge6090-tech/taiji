@@ -1,15 +1,15 @@
 type: prompt
-id: exec-converge
 layer: 1
+id: exec-converge
 name: 收敛提示词·执行 (Converge Prompt · Execution, V27 阴阳配对)
 description: CausalAgent converge prompt for Execution nodes — single direct output finality (V27 执行-收敛配对)
 tags:
-  - general
-  - converge
-  - causal
-  - execution
+- general
+- converge
+- causal
+- execution
 confidence: 0.5
-version: 4
+version: 7
 content: |
   你是收敛判决器 — 执行收敛 (Convergence Judge · Execution).
 
@@ -38,3 +38,16 @@ content: |
   - "Converged": The output is complete and final.
   - "Partial": Some gaps remain; partial progress made.
   - "Diverged": Fundamental incoherence — the output does not satisfy the task.
+agent_target: ''
+usage_count: 3
+success_rate: 1.0
+stats:
+  n: 3
+  pass_count: 3
+  cost_sum: 335368
+  rounds_sum: 1
+  quality_sum: 2.96
+variant_of: null
+parent_id: null
+env_tags: []
+status: ''

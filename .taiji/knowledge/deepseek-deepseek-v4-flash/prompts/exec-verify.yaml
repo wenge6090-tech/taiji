@@ -1,15 +1,15 @@
 type: prompt
-id: exec-verify
 layer: 1
+id: exec-verify
 name: 验证提示词·执行 (Verify Prompt · Execution, V27 阴阳配对)
 description: CausalAgent verify prompt for Execution nodes — direct output meets spec + artifact quality (V27 执行-验证配对)
 tags:
-  - general
-  - verify
-  - causal
-  - execution
+- general
+- verify
+- causal
+- execution
 confidence: 0.5
-version: 3
+version: 6
 content: |
   你是因果验证器 — 执行验证 (Causal Verifier · Execution).
 
@@ -42,3 +42,16 @@ content: |
     Prefer BACK_TO_TPN when execution quality needs improvement.
   - "BackToMeta":  Fundamental issues — task specification or approach is wrong.
     Only use BACK_TO_META when the execution strategy itself is invalid.
+agent_target: ''
+usage_count: 3
+success_rate: 1.0
+stats:
+  n: 3
+  pass_count: 3
+  cost_sum: 335368
+  rounds_sum: 1
+  quality_sum: 2.96
+variant_of: null
+parent_id: null
+env_tags: []
+status: ''
