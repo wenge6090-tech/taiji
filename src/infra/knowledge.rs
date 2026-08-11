@@ -195,18 +195,26 @@ impl LiluoClient {
 
     // ── Constructors ──────────────────────────────────────────────────
 
-    /// Create a new `LiluoClient`, ensuring the directory structure exists.
+    /// Create a new `LiluoClient`, ensuring the root directory exists.
+    ///
+    /// V41：根 client **不再创建资产层目录**（models/prompts/skills/
+    /// verifications）——资产检索/写入全部走 `for_model` 分区 client（分区
+    /// ensure_dirs 建层）；根目录只保留 `model_stats.yaml`（跨分区共享）与
+    /// 分区子目录。未分区写路径仍可用（`save_asset` 内部自建父目录）。
     ///
     /// # Errors
-    /// Returns `TaijiError::IO` if the data directory cannot be created.
+    /// Returns `TaijiError::IO` if the root directory cannot be created.
     pub async fn new(data_dir: &Path) -> Result<Self, TaijiError> {
-        let this = Self {
+        fs::create_dir_all(data_dir).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to create knowledge root {:?}: {e}", data_dir),
+            }
+        })?;
+        Ok(Self {
             root_dir: data_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
             partition: None,
-        };
-        this.ensure_dirs().await?;
-        Ok(this)
+        })
     }
 
     /// 派生指定模型分区 client（V36，BCP §6.1）——`data_dir = root/{model_key}`，
@@ -237,18 +245,14 @@ impl LiluoClient {
 
     /// Create a sparse `LiluoClient` that skips index building.
     ///
-    /// Use this variant when the data directory already exists and its
-    /// contents have been initialised externally (e.g. by `cmd_init()`).
-    /// Operations that rely on the index (`search_by_tags`) will trigger a
-    /// lazy rebuild if `index.yaml` is missing or corrupted.
+    /// V41：与 [`new`](Self::new) 同语义——不创建资产层目录（根 client 只
+    /// 服务 model_stats / for_model 派生；分区 client 才建资产层）。
     pub async fn new_sparse(data_dir: &Path) -> Result<Self, TaijiError> {
-        let this = Self {
+        Ok(Self {
             root_dir: data_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
             partition: None,
-        };
-        this.ensure_dirs().await?;
-        Ok(this)
+        })
     }
 
     /// Create directories for the asset types under `data_dir`
@@ -1229,13 +1233,20 @@ mod tests {
     #[tokio::test]
     async fn test_new_creates_dirs() {
         let dir = test_dir("new_creates_dirs").await;
-        let _client = LiluoClient::new(&dir).await.unwrap();
-        assert!(dir.join("models").exists());
-        assert!(dir.join("skills").exists());
-        assert!(dir.join("verifications").exists());
-        // V38：不再创建 truths/ 与 index.yaml
+        let root = LiluoClient::new(&dir).await.unwrap();
+        // V41：根 client 不创建资产层目录（根只保留 model_stats 与分区子目录）
+        assert!(dir.exists());
+        assert!(!dir.join("models").exists());
+        assert!(!dir.join("skills").exists());
+        assert!(!dir.join("prompts").exists());
+        assert!(!dir.join("verifications").exists());
         assert!(!dir.join("truths").exists());
         assert!(!dir.join("index.yaml").exists());
+        // 分区 client 创建资产层
+        let partition = root.for_model("deepseek-deepseek-chat").await.unwrap();
+        assert!(dir.join("deepseek-deepseek-chat/prompts").exists());
+        assert!(dir.join("deepseek-deepseek-chat/verifications").exists());
+        assert!(dir.join("deepseek-deepseek-chat/models").exists());
         cleanup(&dir).await;
     }
 
@@ -1737,7 +1748,10 @@ tags:
   - general
 content: 手写内容
 "#;
-        let path = dir.join("prompts").join("hand-written-prompt.yaml");
+        // V41：new() 不再创建资产层——测试手写文件需自建目录（模拟真实分区资产）。
+        let prompts_dir = dir.join("prompts");
+        fs::create_dir_all(&prompts_dir).await.unwrap();
+        let path = prompts_dir.join("hand-written-prompt.yaml");
         fs::write(&path, yaml).await.unwrap();
 
         // load_prompt 必须成功，缺失字段取默认值。
