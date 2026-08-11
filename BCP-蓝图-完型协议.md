@@ -21,6 +21,85 @@
 
 ---
 
+## 0. 阅读指南
+
+> 本文档 = taiji 架构唯一事实。实施约束与避坑规则见 [`AGENTS.md`](./AGENTS.md)。
+
+### 0.1 目录
+
+- **1. 设计哲学** — 1.1 异层同构 / 1.2 三相互补 / 1.3 神经与符号统一 / 1.4 产物契约 / 1.5 第一性原理 / 1.6 心流 / 1.7 类比与隐喻（1.7.1 TPN-MCMC / 1.7.2 DMN-MCTS / 1.7.3 变与藏）
+- **2. 系统概览** — 核心概念 / 技术栈 / 架构总纲
+- **3. 模块架构** — 七层模块图 / 模块职责 / 关键接口契约（#1-15）
+- **4. 核心类型契约** — 类图 + 全部类型定义
+- **5. TPN 执行流** — 5.1 根任务序列 / 5.2 递归分解序列 / 5.3 路由决策表
+- **6. 归藏认知仓库** — 6.0 本体论定性 / 6.1 按模型分区 / 6.2 字段契约 / 6.3 检索(UCB) / 6.4 演化(MCTS四算子) / 6.4.1 贝叶斯后验 / 6.5 真值维护 / 6.6 验证三权分立
+- **7. 运行时布局** — 7.1 递归同构目录树 / 7.2 双层追踪系统
+- **8. 关键架构决策** — 23 项决策，按主题分为 7 类（见 §8 正文分类导航）：
+  - *生命周期与恢复：* 8.1 任务节点 · 8.8 提示词编排 · 8.10 温度
+  - *同构与权限：* 8.2 异层同构 · 8.5 安全钩子 · 8.9 路径传递 · 8.20 分封会盟
+  - *循环与防护：* 8.3 TPN只读/DMN单写 · 8.4 路由内部化 · 8.6 递归防护
+  - *预算与交接：* 8.18 交接文件机制 · 8.19 上下文窗口预算
+  - *ChatAgent：* 8.14 流式协议 · 8.15 多Provider · 8.16 生命周期隔离 · 8.17 会话持久化
+  - *DMN 与契约：* 8.12 DMN延迟接入 · 8.21 DMN-MCTS认知树 · 8.22 ContractEngine · 8.23 MVP路径
+  - *资源：* 8.7 Rig Vendor · 8.11 心流分层通道 · 8.13 真值维护精简
+- **9. 前端架构** — 9.1 设计哲学 / 9.2 项目结构 / 9.3 数据流 / 9.4 WS 协议 / 9.5 serve 命令 / 9.6 三个核心视图 / 9.7 ChatAgent / 9.8 决策 / 9.9 接口契约（#16-23） / 9.10 MVP 范围
+- **附录 A** — 版本历史（V28-V36 全文）
+
+### 0.2 术语表
+
+| 术语 | 英文/缩写 | 含义 |
+|------|----------|------|
+| TPN | Tri-Phase Network | 三相认知网络：Meta（权重更新）→ Fitting（概率拟合）→ Causal（因果验证）循环 |
+| DMN | Dual Memory Network | 双忆网络：后台学习进程，从 TPN 执行轨迹中反向更新归藏资产（§6.4） |
+| 归藏 | Guizang | 本体论工程——验证契约库 + 生成资产库，按模型分区的 YAML 文件系统（§6） |
+| MCTS | Monte Carlo Tree Search | DMN 四算子（backprop/fork/merge/prune）的数学对应——资产变体空间的探索-利用搜索（§6.4） |
+| UCB | Upper Confidence Bound | 检索排序公式：μ + C·√(ln N/(n+1))（§6.3） |
+| MetaAgent | 权重更新·元 | TPN 第一相：UCB 检索归藏 → LLM 编排 system prompt → 决策阴阳配对模式 + 模型路由（§8.8） |
+| FittingAgent | 概率拟合·阳 | TPN 第二相：LLM 概率采样，注册 5 L1 Skills + causal_verify + recursive_decompose（仅编排模式） |
+| CausalAgent | 因果验证·阴 | TPN 第三相：verify（ContractEngine 机械检查 + LLM 裁决）或 converge（子结果聚合） |
+| 阴阳配对 | Yin-Yang Pairing | 节点按 MetaAgent 决策分配配对模板：Orchestration=编排+收敛 / Execution=执行+验证（§8.2） |
+| 交接文件 | handoff.md | 上下文超限/失败时的残缺产出载体，置于 deliverables/（§1.4 / §8.18） |
+| 会盟 | Assembly | 分封制中兄弟任务 deliverables/ 目录的公开只读互指（§8.20） |
+| ContractEngine | — | 确定性验证执行器：机械执行 checks（L0/L1），hard 失败直接短路（§6.6 / §8.22） |
+| 上下文预算 | ContextBudget | token 计数取代 max_turns：handoff_tokens=250k / hard_cutoff=300k（§8.19） |
+| 连山 | Lianshan | 预留的流型系统，models/ steering_vector 字段为其落点（§1.6 / §6.1） |
+
+### 0.3 实现状态总表
+
+| 模块/特性 | 状态 | 说明 |
+|-----------|:---:|------|
+| **TPN 核心** | | |
+| TPN 三相循环（Meta→Fitting→Causal） | ✅ | |
+| RecursiveDecomposeTool / CausalVerifyTool | ✅ | |
+| 5 L1 Skills（read/write/bash/search/webfetch） | ✅ | |
+| 阴阳配对 + 上下文预算 + 交接文件（V27-29） | ✅ | |
+| 恢复优先级链 + 失败分流 + 失败汇报（V28/V31） | ✅ | |
+| **安全与追踪** | | |
+| SafetyHook / TraceHook / FittingHookSet / ContextLimiter | ✅ | |
+| **归藏本体论** | | |
+| 按模型分区 + ModelRouter + model_stats（V36） | ✅ | |
+| 验证三权分立 + ContractEngine（V33） | ✅ | |
+| TraceConsistency 断言证据链（V34） | ✅ | |
+| UCB 检索 + prompts 对称演化 + 贝叶斯后验（V35/MVP-3.5） | ✅ | |
+| 多 Provider 配置（V25） | ✅ | |
+| **DMN 演化** | | |
+| DMN Consumer（四算子 backprop/fork/merge/prune） | 🔧 | 需 `--with-dmn`；激活门槛：资产≥5 + 采样≥50 |
+| 主动学习（exploration tasks） | 🔧 | `active_learning_enabled=false`（默认） |
+| **前端** | | |
+| taiji-web（React + WS + 纺锤树 + 太极图 + TPN 弹窗） | ✅ | |
+| ChatAgent（流式聊天 + 任务感知 + 会话持久化） | ✅ | |
+| WS 事件总线（广播 + 请求-响应双向） | ✅ | |
+| **预留/未来** | | |
+| 连山流型系统（steering_vector） | ⏳ | models/ 字段预留 |
+| 随机审计（audit_rate） | ⏳ | P2 |
+| TRUTH PROPAGATE 真值传播 | ⏳ | 连山接入后重新评估 |
+| 归藏星云图 3D / 多任务并行 | ⏳ | V2/未来 |
+| **已拒绝/删除** | | |
+| 向量嵌入/向量库、图数据库/关系引擎、推理器 | ❌ | §6.0 定论 |
+| GridAsset / ReasoningPath / Chain / dependency_index | ❌ | V22 删除 |
+
+---
+
 ## 1. 设计哲学
 
 ### 1.1 异层同构 (Isomorphic Recursion)
@@ -1104,6 +1183,15 @@ TraceHook 的 `on_tool_call` 同时收集**真实工具调用名**：FittingAgen
 
 ## 8. 关键架构决策
 
+> **分类导航**（编号不变，按主题分为 7 类；详细编目见 §0.1 目录）：
+> - **生命周期与恢复**：8.1 任务节点 · 8.8 提示词编排 · 8.10 温度
+> - **同构与权限**：8.2 异层同构 · 8.5 安全钩子 · 8.9 路径传递 · 8.20 分封会盟
+> - **循环与防护**：8.3 TPN只读/DMN单写 · 8.4 路由内部化 · 8.6 递归防护
+> - **预算与交接**：8.18 交接文件机制 · 8.19 上下文窗口预算
+> - **ChatAgent**：8.14 流式输出协议 · 8.15 多Provider · 8.16 生命周期隔离 · 8.17 会话持久化
+> - **DMN 与契约**：8.12 DMN延迟接入 · 8.21 DMN-MCTS认知树 · 8.22 验证契约引擎 · 8.23 MVP路径
+> - **资源**：8.7 Rig Vendor · 8.11 心流分层通道 · 8.13 真值维护精简
+
 ### 8.1 瞬态任务节点生命周期
 
 **任务节点 = 单个三相循环（TpnCycle 实例），而非循环内的某个 Agent。** 生成树 / 收敛树的每个节点是完整的「权重更新 → 概率拟合 → 因果验证 → 路由决策」循环（`TpnCycle.execute()`），递归分解 spawn 的是**子循环节点**（`TpnCycle::new`，同一段代码），不是子 Agent。
@@ -1790,95 +1878,21 @@ pub struct ServeState {
 ### 9.6 三个核心视图
 
 #### 9.6.1 太极背景图（TaijiBg）
-
-- **形态**：极淡线框太极图 `rgba(255,255,255,0.05)`，位于页面最底层 `z-index: 0`
-- **动画**：CSS `@keyframes rotate` 60 秒匀速旋转一圈，象征系统"呼吸"
-- **状态联动**：
-  - 阳鱼：当 TPN 在 Fitting 相（发散）时，泛起暖色光晕（淡黄/淡红，`opacity 0→0.15` 渐变）
-  - 阴鱼：当 TPN 在 Causal 相（收敛）时，泛起冷色光晕（淡蓝/淡绿，`opacity 0→0.15` 渐变）
-  - 常态：无光晕，仅为背景水印
-- **实现**：纯 SVG `<path>` 描边太极图，CSS transition 控制光晕透明度
+- 极淡线框太极图，位于页面最底层，60 秒匀速旋转（CSS 动画）
+- 状态联动：Fitting 相 → 暖色光晕；Causal 相 → 冷色光晕；其余常态无光晕
+- 纯 SVG/CSS 实现，无外部依赖
 
 #### 9.6.2 纺锤状递归树（SpindleTree）
-
-**布局算法（SpindleLayout）**：
-
-```
-// 伪代码
-fn spindle_layout(nodes: Vec<SpindleNode>) -> Vec<PositionedNode> {
-    let by_depth: BTreeMap<u32, Vec<SpindleNode>> = group_by(nodes, |n| n.depth);
-    let max_depth = by_depth.keys().max();
-    // Y 轴：depth 线性映射  depth=0→top(8%)  max_depth/2→center(50%)  max_depth→bottom(85%)
-    // X 轴：depth 越大→越宽（纺锤上半），超过半高→收窄（纺锤下半）
-    // spread = sin(π * depth / max_depth) * MAX_SPREAD(容器宽度 70%)
-    // 每层内节点均匀分布
-}
-```
-
-**节点视觉**：
-- 每个 `SpindleNode` 渲染为圆角矩形卡片
-- 颜色由 `status` 决定：绿（`#4ade80`）/ 黄（`#facc15`）/ 红（`#f87171`）
-- 状态过渡使用 Framer Motion `animate` 颜色渐变
-- 叶子节点（children_count=0）右下角有小圆点指示器
-
-**连线**：
-- 父子连线为贝塞尔曲线，颜色与子节点状态一致
-- 动画：新建连线有"生长"效果（Framer Motion `pathLength` 动画）
-
-**交互**：
-- 鼠标悬停：节点放大 1.05x，显示 tooltip（描述 + 轮次 + 工具）
-- 点击节点：弹出 TpnPopup 模态框
-- 双击空白区：重置视图（zoom to fit）
-- 滚轮：缩放
+- **布局**：纺锤形——depth=0 顶部、中间深度最宽、max_depth 底部收窄（`spread = sin(π·depth/max_depth)`）
+- **节点**：圆角矩形卡片，status 决定颜色（绿/黄/红），Framer Motion 过渡动画
+- **连线**：父子贝塞尔曲线，颜色跟随子节点状态，新建连线有生长动画
+- **交互**：悬停放大+tooltip；点击弹出 TpnPopup；双击缩放归位
 
 #### 9.6.3 TPN 三相流程弹窗（TpnPopup）
-
-**布局**：
-
-```
-┌──────────────────────────────────────────────┐
-│  任务: "实现并发网页爬虫"  [depth=1]  🟡 Fitting  │  ← 标题栏（状态徽章 + 关闭按钮）
-├──────────────────┬───────────────────────────┤
-│   ┌──────────┐   │  详情面板                  │
-│   │ ① 元 (Meta)│   │  (根据选中的相动态切换)    │
-│   │  ✅ 完成   │   │  • trace.jsonl 最近 8 条   │
-│   └────┬───────┘   │  • deliverables/ 文件列表 │
-│        │           │  • 工具调用摘要            │
-│   ┌────▼───────┐   │  • 当前 LLM 输出预览      │
-│   │ ② 阳 (Fitting)│ │                           │
-│   │  🔄 进行中  │   │                           │
-│   └────┬───────┘   │                           │
-│        │           │                           │
-│   ┌────▼───────┐   │                           │
-│   │ ③ 阴 (Causal)│  │                           │
-│   │  ⏳ 等待    │   │                           │
-│   └───────────┘   │                           │
-├──────────────────┴───────────────────────────┤
-│  阴极干预区                                    │
-│  ┌─────────────────────────────────────────┐ │
-│  │ 输入建议（如"缺少超时机制，请重试"）       │ │  ← TextArea
-│  └─────────────────────────────────────────┘ │
-│  [✅ 批准收敛]  [❌ 驳回重试]  [❌ 驳回改道]   │  ← 按钮组
-└──────────────────────────────────────────────┘
-```
-
-**三相流程图（左侧）**：
-- 垂直排列的三个卡片：元（Meta）→ 阳（Fitting）→ 阴（Causal）
-- 卡片间有箭头连线
-- 当前执行中相有脉冲动画（`@keyframes pulse` + 黄色光晕）
-- 已完成相显示 ✅ 绿色勾，失败相显示 ❌ 红色叉
-- 点击任一相卡片，右侧详情面板切换为该相的 trace 信息
-
-**详情面板（右侧）**：
-- 根据左侧选中的相显示对应内容
-- Meta 相：推理路径摘要、归藏资产列表、编排的 prompt 预览
-- Fitting 相：工具调用日志、LLM 输出片段、子任务 spawn 状态
-- Causal 相：验证报告（CausalVerdict）、约束违反列表、置信度
-
-**阴极干预区（底部）**：
-- 仅在节点 `status = AwaitingHumanReview` 或 `phase = Causal` 时激活
-- TextArea 输入框（placeholder："给阴的建议——会注入下一轮 TPN 循环"）
-- 三个按钮：**✅ 批准收敛** / **❌ 驳回重试** / **❌ 驳回改道**
+- **布局**：左侧三相流程图（Meta→Fitting→Causal 垂直排列）+ 右侧详情面板（随选中相切换）+ 底部阴极干预区
+- **三相流程**：卡片间箭头连线，当前执行中相有脉冲动画，已完成/失败相用 ✅/❌ 标记
+- **详情面板**：根据选中相显示对应 trace 信息（Meta: prompt 预览；Fitting: 工具调用日志；Causal: 验证报告/约束违反列表）
+- **阴极干预区**：在 AwaitingHumanReview 或 Causal 相激活——输入建议（注入下一轮 TPN 循环）+ 三个按钮（批准收敛/驳回重试/驳回改道）
 
 ### 9.7 前端 Agent 聊天面板（ChatAgent）
 
