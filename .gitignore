@@ -7,3 +7,8 @@
 /.taiji/chat/
 /.taiji/tasks/
 /.taiji/knowledge/index.yaml
+/.taiji/knowledge/model_stats.yaml
+/.taiji/knowledge/**/index.yaml
+/.taiji/knowledge/**/models/
+# 冒烟测试/任务运行产物
+/deliverables/
