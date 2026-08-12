@@ -398,21 +398,23 @@ ModelRouter（读 model_stats 元权重表，纯符号层）
 | 编号 | 内容 | 章节 |
 |------|------|------|
 | §1 · §2 | 设计哲学 · 系统概览 | 本文档开头 |
-| §3 · §4 · §5 | 模块架构 · 核心类型 · 周易执行流 | 一、TPN |
-| §6.6 | 验证三权分立（周易验证机制） | 一、TPN |
-| §7 | 运行时布局 | 一、TPN |
-| §8（周易侧 16 项） | 8.1/8.2/8.4-8.6/8.9-8.11/8.14-8.20/8.22 | 一、TPN |
-| §8.7 | Rig Vendor（工程基建） | 一、TPN 末尾 |
-| §9 | 前端架构 | 一、TPN |
-| §6（0-5, 6.4.1） | 归藏本体 · 检索 · 演化 · 真值维护 | 二、DMN |
-| §8侧 5 项） | 8.3/8.8/8.12/8.21/8.23（8.13 并入 §6.5） | 二、DMN |
+| §3 · §4 · §5 | 模块架构 · 核心类型 · 周易执行流 | 一、周易执行层 |
+| §6.6 | 验证三权分立（周易验证机制） | 一、周易执行层 |
+| §7 | 运行时布局 | 一、周易执行层 |
+| §8（周易侧 16 项） | 8.1/8.4-8.6/8.9-8.10/8.14-8.20/8.22 | 一、周易执行层 |
+| §8.7 | Rig Vendor（工程基建） | 一、周易执行层末尾 |
+| §9 | 前端架构 | 一、周易执行层 |
+| §6（0-5, 6.4.1） | 归藏本体 · 检索 · 演化 · 真值维护 | 二、归藏与连山 |
+| §8侧 5 项） | 8.3/8.8/8.12/8.21/8.23（8.13 并入 §6.5） | 二、归藏与连山 |
 | 附录 A | 版本历史 | 文末 |
 
 ---
 
 ---
 
-## 一、TPN（任务处理网络）
+## 一、周易执行层
+
+> 周易 = 泛化执行。万物流变，每一次任务执行 = 一次蒙特卡洛 rollout。包括 Agent 体系、三相循环、递归拆解、验证管线、分封制、ChatAgent 旁路。
 
 ## 3. 模块架构
 
@@ -518,7 +520,7 @@ flowchart TB
 | L3 | agents/tools | recursive_decompose / causal_verify（Skills 不再内置于此模块） |
 | L3 | agents/plan | PlanBuilder：MetaAgent + LLM 编排执行计划，输出 PlanSummary（不进 周易循环） |
 | L4 | orchestration/runner | RecursiveRunner：创建根任务 + 周易循环 |
-| L4 | orchestration/constraint_engine | 加载 Truths 约束 + 前置检查 |
+| L4 | orchestration/constraint_engine | 加载 L0 内置检查 + 前置检查 |
 | L4 | orchestration/contract_engine | **V33 新增**：加载 verifications/ 结构化验证契约 → 机械执行 checks（file_exists / schema_valid / reference_resolves / command_succeeds / llm_judgement）→ 产出 ContractReport（L0 机械 + L1 契约确定性裁决，hard 失败直接短路，LLM 不可翻案——§6.6/§8.22） |
 | L4 | orchestration/trigger_engine | 正则 + 标签匹配 Skills |
 | L4 | orchestration/worker_pool | Semaphore 限并发 + RateLimiter |
@@ -542,7 +544,7 @@ flowchart TB
 | 5 | `ConstraintEngine.check_constraints(output, constraints) -> ConstraintResult` | CausalAgent.verify 前置检查，Hard 违反直接短路返回 BACK_TO_META |
 | 6 | `MetaAgentBuilder.run(task_description, task_type_tags, handoff: Option<HandoffContext>) -> MetaContext`（builder 经 `depth()` / `max_depth()` 注入递归层数规则） | 查询归藏 Prompts 标签匹配 → 置信度排序 → **按深度规则 + 难度决策配对模式** → LLM 编排三份 system prompt（fitting/verify/converge，与所选模式配对）→ 注入 MetaContext（含 mode）；无归藏资产时降级返回 MetaContext::empty()（mode 默认 Orchestration）。**V28：BACK_TO_META 重跑时 `handoff` 注入前一瞬态产出摘要**（deliverables/ 索引 + handoff.md 内容），基于产出校准权重与资产，不再空手重跑 |
 | 7 | `连山压缩算子 (独立 tokio::spawn)` | 指数退避轮询 pending/ 队列（被动学习）+ experiments/ 队列（主动学习，空闲窗口 + 预算上限），执行 **MCTS 四算子**：δ-backprop（trace 统计回传，父节点 γ=0.5 衰减）→ δ-fork（低回报资产扩展变体，复制+降权，内容修订走人工通道）→ δ-merge（相似变体合并）→ δ-prune（N≥5 且低于组内最优 >2σ 淘汰）——单写者更新归藏 + model_stats。**纯符号层确定性操作，不涉及 LLM**。数据源：`pending/{id}.json` 携带 assets_used 链 → TraceRewardExtractor 提取 (资产 × 回报) |
-| 8 | `CausalVerifyAgentBuilder.verify(output, tool_results, meta_ctx) -> VerificationReport` | **V33 前置管线（§6.6/§8.22）**：ConstraintEngine（Truths Hard 短路）→ ContractEngine 机械执行 verifications checks（hard 失败直接短路，LLM 不可翻案）→ 剩余 llm_judgement 项 + ContractReport 注入 LLM 裁决。优先使用 meta_ctx.verify_system_prompt，None 时按 `meta_ctx.mode` 降级到 VERIFY_ORC / VERIFY_EXEC 硬编码模板（编排-验证 / 执行-验证配对）。`tool_results` 由 `TpnCycle.collect_tool_results()` 从 trace.jsonl 自动提取最近 10 条工具调用输出，非空数组 |
+| 8 | `CausalVerifyAgentBuilder.verify(output, tool_results, meta_ctx) -> VerificationReport` | **V33 前置管线（§6.6/§8.22）**：ConstraintEngine（L0 内置检查 Hard 短路）→ ContractEngine 机械执行 verifications checks（hard 失败直接短路，LLM 不可翻案）→ 剩余 llm_judgement 项 + ContractReport 注入 LLM 裁决。优先使用 meta_ctx.verify_system_prompt，None 时按 `meta_ctx.mode` 降级到 VERIFY_ORC / VERIFY_EXEC 硬编码模板（编排-验证 / 执行-验证配对）。`tool_results` 由 `TpnCycle.collect_tool_results()` 从 trace.jsonl 自动提取最近 10 条工具调用输出，非空数组 |
 | 9 | `CausalConvergeAgentBuilder.converge(subtask_results, meta_ctx) -> ConvergenceDecision` | 优先使用 meta_ctx.converge_system_prompt，None 时按 `meta_ctx.mode` 降级到 CONVERGE_ORC / CONVERGE_EXEC 硬编码模板（编排-收敛 / 执行-收敛配对）。**V31 完整汇报输入**：subtask_results 含成功与失败（Diverged）条目——LLM 基于失败原因/交接产物裁决 Partial/Diverged，并把**失败分析与 rerun 建议输出到 task_summary**（决策进 LLM，不加结构化字段）；父阳（阳·管理）据此 rerun_of 再启用或接受残缺综合 |
 | 10 | `RecursiveRunner.execute(description, external_ctx, max_depth) -> TPNResult` | runner.execute() 的增强版本，接受来自前端 agent 的 ExternalContext（文件、工具结果、对话总结），将文件物化到 `task_dir/context/files/` 并写入 `context/meta.json`，设置 `engine_ctx.context_dir` → FittingAgent 模板注入 External Context 节。可选 `max_depth` 参数覆盖配置中的递归深度限制 |
 | 11 | `PlanBuilder.plan(description, task_type_tags) -> PlanSummary` | 运行 MetaAgent（权重更新+提示词编排）获取 MetaContext，随后调用 LLM 将 MetaContext + 任务描述编排为结构化的 PlanSummary（含子任务预估、技能推荐、复杂度评估），**不进 周易循环**，不触发 FittingAgent/CausalAgent |
@@ -1106,19 +1108,6 @@ AgentFactory.create_*_agent() → AgentBuilder.run() → 结构化输出 → Age
 
 **子任务状态一致性**：RecursiveDecomposeTool 错误路径 `abort_all()` 终止子任务后，`children/` 下 status=Running 的子任务必须统一落盘为 Failed（写失败仅 warn，不阻断父任务错误传播）——「超时/失败/取消正确落盘」声明覆盖所有任务节点，含被父任务中止的子任务；中止不产生虚假的 Running 残留。
 
-### 8.2 异层同构（结构同构，提示词按模式配对）
-
-`depth` 只改变编号，不改变目录布局、周易循环结构、上下文预算与恢复路径。根任务和子任务执行**同一段代码、同一套配置**。但每个节点的**提示词与工具注册面由元 Agent 权重更新时决策的阴阳配对模式决定**：
-
-- **模式决策**：MetaAgent 按递归层数规则（depth/max_depth，叶节点 `depth+1 >= max_depth` 硬性强制 Execution）+ 任务难易程度（复杂/多步/跨多维→Orchestration，原子/单步→Execution）决策 `MetaContext.mode`。根节点与 BACK_TO_META 重跑时由 MetaAgent 决策；子节点由父 LLM 在 `SubtaskSpec.mode` 按难度分配，`RecursiveDecomposeTool` 按深度规则兜底强制叶节点 Execution
-- **配对提示词**：Orchestration → 阳用编排模板（拆解+综合）、阴用收敛模板；Execution → 阳用执行模板（直接产出）、阴用验证模板
-- **工具面随模式分化**：`recursive_decompose` 仅编排模式注册（执行模式 LLM 不可见拆解工具，工具内部 mode guard 兜底）；5 L1 Skills + causal_verify 两模式均注册
-- 单上下文预算：全相位（Meta / Fitting / Causal）统一 250k 交接 / 300k 硬截止（V29 §8.19）；不再使用 max_turns 轮次限制
-- 递归层间通过 `MetaContext`（推理偏置注入 + mode）和 `ConvergenceDecision`（收敛结果上浮）传递信息
-- 递归终止仅靠 depth guard：`depth >= max_depth` 时 RecursiveDecomposeTool 拒绝拆解（MaxDepthExceeded）
-
-**权限同构（异层同构的权限维度）**：任务节点在任意深度保持相同的三相分工与权限配置——每个子循环节点与根节点一样：Fitting 相位持有执行工具（5 L1 Skills + causal_verify；编排模式另加 recursive_decompose）并受同一 SafetyHook 约束、Meta / Causal 相位持有只读收集工具（read / search / webfetch）且无执行工具。**权限模式与配置不随 depth 变化，权限边界随位置（task_dir）变化**（见 §8.9 工作区即权限边界）——不同深度不存在任何权限梯度，模式分化只影响提示词内容与拆解工具可见性。
-
 ### 8.4 路由内部化（结构化信号 + LLM 裁决）
 
 周易循环的路由决策（PASS / BACK_TO_TPN / BACK_TO_META）由 CausalAgent 的 LLM 根据 VerificationReport 裁决。RecursiveRunner 只执行路由结果（递增循环计数器、重入对应阶段），不硬编码路由逻辑。**V28：结构化失败信号优先**——`failure_reason`（context_overflow / output_missing / constraint_violation / cognitive / degraded / other）由交接文件携带，命中分流表（§8.18）时直接路由；仅模糊地带（degraded / other）交 LLM 裁决兜底。
@@ -1208,12 +1197,6 @@ DecomposeResult.deliverables → 父 CausalAgent.converge() 逐文件检查
 | CausalAgent 收敛（converge，两模式） | `0.2` | 低温度严格判决，不引入额外噪声 |
 
 温度优先级：`PromptAsset.temperature`（最高）→ Base 模板默认值 → `TaijiConfig` 全局默认值（`0.7`）。
-
-### 8.11 心流分层通道 (Flow Channel)
-
-分层资产全部运行在符号通道（归藏文件系统，V32 起按模型分区）。周易循环操作符号通道：Prompts/Workflows（行为与流程模板）是引导脚手架，在深层执行中消溶；Verifications（验证契约）与 Truths 持续；Skills 的统计信息通过 连山压缩算子 在 YAML 中维护和更新。纯云端架构下所有资产更新限于归藏文件系统，不涉及模型权重。
-
-**选择理由：** Prompts（含原 L5 叙事 + L3 角色定义）是提示词层面的软引导——它们在任务开始时提供方向，但深层执行需要精准的、无干扰的纯技能驱动。消溶不是"移除"，而是"不再显式注入 prompt"——角色和叙事的信息密度已达到饱和，转为背景知识。
 
 ### 8.14 流式输出协议 (ChatAgent Streaming)
 
@@ -1319,7 +1302,7 @@ output_refs: [deliverables/xxx.md]
 |---|---|---|
 | context_overflow | BACK_TO_TPN | 粒度错误 → 阳基于产出递归分解 |
 | output_missing | BACK_TO_TPN | 同上（无产出 = 任务未拆到位） |
-| constraint_violation (Hard) | BACK_TO_META | 约束缺失 → 元校准 Truths 与权重 |
+| constraint_violation (Hard) | BACK_TO_META | 约束缺失 → 元校准约束与权重 |
 | cognitive | BACK_TO_META | 策略/资产问题 → 元基于产出校准 |
 | degraded | LLM 裁决 | 降级产物质量存疑 |
 | other | LLM 裁决 | 兜底 |
@@ -1389,7 +1372,7 @@ output_refs: [deliverables/xxx.md]
 **执行顺序（verify 内部管线，V33 修订）**：
 
 ```
-ConstraintEngine（Truths Hard 短路）→ ContractEngine（verifications checks 机械执行）
+ConstraintEngine（L0 内置检查 Hard 短路）→ ContractEngine（verifications checks 机械执行）
     → 若 hard 项全过 → LLM 裁决 llm_judgement 项 → VerificationReport
 ```
 
