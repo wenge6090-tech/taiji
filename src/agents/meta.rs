@@ -29,7 +29,7 @@ use crate::hooks::safety::SafetyHook;
 use crate::infra::config::SafetyConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::json_util::parse_llm_json;
-use crate::infra::knowledge::LiluoClient;
+use crate::infra::knowledge::GuizangClient;
 use crate::infra::provider::ProviderRegistry;
 use crate::types::agent::{AgentMode, MetaContext, PromptAsset, YangPrompt};
 use serde::{Deserialize, Serialize};
@@ -72,7 +72,7 @@ struct MetaComposeResult {
 /// injected) — "带工具必有安全钩子" is a type-level guarantee.
 pub struct MetaAgentBuilder {
     task_id: String,
-    liluo: Arc<LiluoClient>,
+    guizang: Arc<GuizangClient>,
     provider: Arc<ProviderRegistry>,
     model: String,
     /// Recursion depth of the current node (root = 0) — injected into the
@@ -99,13 +99,13 @@ impl MetaAgentBuilder {
     /// callers should use the factory rather than constructing this directly.
     pub fn new(
         task_id: &str,
-        liluo: Arc<LiluoClient>,
+        guizang: Arc<GuizangClient>,
         provider: Arc<ProviderRegistry>,
         model: &str,
     ) -> Self {
         Self {
             task_id: task_id.to_string(),
-            liluo,
+            guizang,
             provider,
             model: model.to_string(),
             depth: 0,
@@ -180,7 +180,7 @@ impl MetaAgentBuilder {
         // 不需要 LLM）。model_stats 损坏 → 空表（load_model_stats 内 warn），
         // 路由退化为默认模型。
         let model_key = {
-            let stats = self.liluo.load_model_stats().await?;
+            let stats = self.guizang.load_model_stats().await?;
             crate::orchestration::model_router::ModelRouter::new(&self.provider, stats).route()
         };
         tracing::debug!(
@@ -192,7 +192,7 @@ impl MetaAgentBuilder {
         // 选 Causal 专用验证模型（裁判 ≠ 运动员，§1.3 偏置对抗）；候选 <2 →
         // None（继承主模型，warn 提示）。
         let verify_model = if self.heterogeneous_verifier {
-            let stats = self.liluo.load_model_stats().await?;
+            let stats = self.guizang.load_model_stats().await?;
             let router =
                 crate::orchestration::model_router::ModelRouter::new(&self.provider, stats);
             match router.route_verifier(&model_key) {
@@ -219,7 +219,7 @@ impl MetaAgentBuilder {
         };
 
         // ── 1. Query 理絡 for prompt assets（按路由模型分区）──
-        let partition = self.liluo.for_model(model_key.key()).await?;
+        let partition = self.guizang.for_model(model_key.key()).await?;
         let prompt_assets = partition.search_prompts(task_type_tags).await?;
 
         // ── 2. Confidence filter ──
@@ -495,31 +495,26 @@ fn build_llm_input(
 ) -> String {
     let mut parts = Vec::new();
     parts.push(format!(
-        "## Task Description\n\n{}\n\n## Recursion Depth Rules\n\n- current depth: {depth}\n- max depth: {max_depth}\n- leaf rule: depth+1 >= max_depth → mode must be Execution\n\n## Prompt Assets (ranked by UCB score — 数学排序：后验均值 + 探索项，序即优先级)\n",
-        task_description
+        "## Task Description\n\n{task_description}\n\n\
+         ## Recursion Depth\n\
+         - current depth: {depth}\n\
+         - max depth: {max_depth}\n\
+         - leaf rule: depth+1 >= max_depth → mode must be Execution\n\
+         \n## Prompt Assets (UCB-ranked)\n"
     ));
 
     for (i, asset) in matched.iter().enumerate() {
         parts.push(format!(
-            "\n### Asset {idx}\n\
-             - id: {id}\n\
-             - name: {name}\n\
-             - agent_target: {target}\n\
-             - confidence: {conf}\n\
-             - content:\n```\n{content}\n```",
+            "\n### {idx}. {name} (id={id}, target={target})\n```\n{content}\n```",
             idx = i + 1,
             id = asset.id,
             name = asset.name,
             target = asset.agent_target,
-            conf = asset.confidence,
             content = asset.content,
         ));
     }
 
-    parts.push(
-        "\n\nBased on the above, produce the MetaContext JSON as instructed.".into(),
-    );
-
+    parts.push("\n\nProduce the MetaContext JSON as instructed.".into());
     parts.join("\n")
 }
 
@@ -619,16 +614,16 @@ mod tests {
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()));
-        let liluo = Arc::new(
-            LiluoClient::new(&tmp_dir)
+        let guizang = Arc::new(
+            GuizangClient::new(&tmp_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let provider = Arc::new(
             ProviderRegistry::new(&config).expect("ProviderRegistry"),
         );
 
-        let builder = MetaAgentBuilder::new("test-task", liluo, provider, "deepseek-chat");
+        let builder = MetaAgentBuilder::new("test-task", guizang, provider, "deepseek-chat");
         // Empty tags → fallback path → empty MetaContext.
         let ctx = builder
             .run("test task description", &[], None)
@@ -697,16 +692,16 @@ mod tests {
                     .unwrap()
                     .as_nanos()
             ));
-        let liluo = Arc::new(
-            LiluoClient::new(&tmp_dir)
+        let guizang = Arc::new(
+            GuizangClient::new(&tmp_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let provider = Arc::new(
             ProviderRegistry::new(&config).expect("ProviderRegistry"),
         );
 
-        let builder = MetaAgentBuilder::new("test-task", liluo, provider, "deepseek-chat");
+        let builder = MetaAgentBuilder::new("test-task", guizang, provider, "deepseek-chat");
         // 默认值：max_turns=6，depth=0，max_depth=2，且 safety_hook 恒有值（默认配置实例）。
         assert_eq!(builder.max_turns, 6);
         assert_eq!(builder.depth, 0);

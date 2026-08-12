@@ -263,12 +263,12 @@ mod tests {
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&knowledge_dir);
-        let liluo = Arc::new(
+        let guizang = Arc::new(
             LiluoClient::new(&knowledge_dir).await.expect("LiluoClient should initialise"),
         );
         let providers = ProviderRegistry::new(config).expect("ProviderRegistry");
         Arc::new(AgentFactory {
-            liluo,
+            guizang,
             providers: Arc::new(providers),
             config: config.clone(),
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),

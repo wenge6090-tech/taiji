@@ -41,16 +41,16 @@ use crate::hooks::safety::SafetyHook;
 use crate::infra::config::SafetyConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::json_util::parse_llm_json;
-use crate::infra::knowledge::LiluoClient;
+use crate::infra::knowledge::GuizangClient;
 use crate::infra::trace::save_json_atomic;
 use crate::infra::provider::ProviderRegistry;
 use crate::orchestration::constraint_engine::ConstraintEngine;
-use crate::orchestration::contract_engine::ContractEngine;
+use crate::orchestration::skill_engine::SkillEngine;
 use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 use crate::types::task::DecomposeResult;
 use crate::types::verification::{
-    CheckKind, CheckSpec, ContractReport, ConvergenceDecision, ConvergenceStatus,
+    CheckKind, CheckSpec, SkillCategory, SkillReport, ConvergenceDecision, ConvergenceStatus,
     VerificationReport, VerificationRoute,
 };
 
@@ -80,10 +80,10 @@ pub struct CausalVerifyAgentBuilder {
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
-    /// 归藏客户端（V33 ContractEngine 加载验证契约）。工厂总是设置；
+    /// 归藏客户端（V33 SkillEngine 加载验证契约）。工厂总是设置；
     /// None = 未接线（测试/异常路径）→ 契约层跳过并 warn（BCP §8.22
     /// 无契约资产时退化为纯 LLM 验证）。
-    guizang: Option<Arc<LiluoClient>>,
+    guizang: Option<Arc<GuizangClient>>,
 }
 
 impl CausalVerifyAgentBuilder {
@@ -120,8 +120,8 @@ impl CausalVerifyAgentBuilder {
         self
     }
 
-    /// Wire the 归藏 client (V33 ContractEngine 契约加载通道)。
-    pub fn guizang(mut self, guizang: Arc<LiluoClient>) -> Self {
+    /// Wire the 归藏 client (V33 SkillEngine 契约加载通道)。
+    pub fn guizang(mut self, guizang: Arc<GuizangClient>) -> Self {
         self.guizang = Some(guizang);
         self
     }
@@ -259,7 +259,7 @@ impl CausalVerifyAgentBuilder {
             );
         }
 
-        // ── Step 1.5: ContractEngine 机械执行验证契约（V33 §6.6/§8.22）──
+        // ── Step 1.5: SkillEngine 机械执行验证契约（V33 §6.6/§8.22）──
         // L0 机械 + L1 契约：确定性裁决，任一 hard 机械项失败直接短路，
         // LLM 不可翻案。契约加载失败上抛（无降级原则 — §8.20）；
         // guizang 未接线（None）→ 契约层跳过并 warn（测试/异常路径）。
@@ -274,9 +274,9 @@ impl CausalVerifyAgentBuilder {
                 match contract_key {
                     Some(key) => {
                         let partition = guizang.for_model(key.key()).await?;
-                        ContractEngine::load_contracts(&partition).await?
+                        SkillEngine::load_skills(&partition).await?
                     }
-                    None => ContractEngine::load_contracts(guizang).await?,
+                    None => SkillEngine::load_skills(guizang).await?,
                 }
             } else {
                 tracing::warn!(
@@ -285,16 +285,16 @@ impl CausalVerifyAgentBuilder {
                 );
                 Vec::new()
             };
-        let contract_report: ContractReport =
-            ContractEngine::run_checks(&contracts, &self.engine_ctx.task_dir).await;
+        let skill_report: SkillReport =
+            SkillEngine::run_checks(&contracts, &self.engine_ctx.task_dir).await;
 
-        if !contract_report.passed {
+        if !skill_report.passed {
             tracing::warn!(
                 task_id = %self.engine_ctx.task_id,
-                summary = %contract_report.summary,
+                summary = %skill_report.summary,
                 "Contract check failed (hard short-circuit) — returning BackToMeta"
             );
-            let failed_checks: Vec<String> = contract_report
+            let failed_checks: Vec<String> = skill_report
                 .results
                 .iter()
                 .filter(|r| !r.passed)
@@ -303,7 +303,7 @@ impl CausalVerifyAgentBuilder {
             return Ok(VerificationReport {
                 route: VerificationRoute::BackToMeta,
                 confidence: 1.0,
-                summary: format!("Contract check failed: {}", contract_report.summary),
+                summary: format!("Contract check failed: {}", skill_report.summary),
                 constraint_violations: failed_checks,
             });
         }
@@ -317,16 +317,16 @@ impl CausalVerifyAgentBuilder {
             .filter(|c| c.kind == CheckKind::LlmJudgement)
             .collect();
 
-        if !contract_report.results.is_empty() && llm_judgements.is_empty() {
+        if !skill_report.results.is_empty() && llm_judgements.is_empty() {
             tracing::info!(
                 task_id = %self.engine_ctx.task_id,
-                checks = contract_report.results.len(),
+                checks = skill_report.results.len(),
                 "All mechanical checks passed, no llm_judgement — direct PASS (LLM zero-call)"
             );
             return Ok(VerificationReport {
                 route: VerificationRoute::Pass,
                 confidence: 1.0,
-                summary: contract_report.summary,
+                summary: skill_report.summary,
                 constraint_violations: vec![],
             });
         }
@@ -371,10 +371,10 @@ impl CausalVerifyAgentBuilder {
             .build();
 
         // 契约执行结果注入 LLM（机械全过部分 + llm_judgement 判据 + 反偏置）。
-        let contract_section = if contract_report.results.is_empty() && llm_judgements.is_empty() {
+        let contract_section = if skill_report.results.is_empty() && llm_judgements.is_empty() {
             String::new()
         } else {
-            let results_summary: Vec<String> = contract_report
+            let results_summary: Vec<String> = skill_report
                 .results
                 .iter()
                 .map(|r| format!("[{}] {}: {}", if r.passed { "PASS" } else { "FAIL" }, r.check_id, r.detail))
@@ -399,7 +399,7 @@ impl CausalVerifyAgentBuilder {
             let mut section = format!(
                 "\n\nContract report (mechanical checks — deterministic, cannot be overridden):\n{}",
                 if results_summary.is_empty() {
-                    contract_report.summary.clone()
+                    skill_report.summary.clone()
                 } else {
                     results_summary.join("\n")
                 }
@@ -454,7 +454,7 @@ impl CausalVerifyAgentBuilder {
             "report": &report,
             "round": self.engine_ctx.round,
             "cycle": self.engine_ctx.cycle,
-            "checks": &contract_report.results,
+            "checks": &skill_report.results,
         });
         let verify_path = self.engine_ctx.task_dir.join("verify_state.json");
         if let Err(e) = save_json_atomic(&verify_state, &verify_path) {
@@ -476,36 +476,30 @@ impl CausalVerifyAgentBuilder {
 /// granularity. Route preference: BACK_TO_META for decomposition issues.
 const VERIFY_ORC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 编排验证 (Causal Verifier · Orchestration).
 
-You are verifying an **orchestration** task that decomposed a parent task into
-subtasks and synthesized their results.
+你在验证一个编排节点的综合产出——该任务被拆解为子任务后汇聚结果。
 
-Your focus:
-1. MECE completeness — did the decomposition cover all required dimensions?
-2. Dependency correctness — are subtask dependencies properly ordered?
-3. Granularity — were subtasks split at the right level (not too coarse, not too fine)?
-4. Synthesis quality — does the integrated result make sense as a whole?
-5. Requirement satisfaction — does the synthesized output meet the task description?
-6. Constraint adherence — are all L4 Truth constraints satisfied?
+## 验证维度
+1. MECE 完备性——拆解是否覆盖了任务的全部维度？
+2. 综合质量——汇聚结果是否连贯一致？跨子任务有无矛盾？
+3. 粒度——子任务拆分粒度是否合适？
+4. 需求满足——综合产出是否满足原始任务描述？
 
-## File Verification
-The task output may reference deliverable files by absolute path.  To verify
-content quality, you MUST use the `read` tool (or equivalent) to open each
-referenced file and inspect its contents.  Do NOT rely solely on the summary
-text — read the actual files to confirm compliance.
+## 文件核验
+必须用 `read` 工具逐文件检查 deliverables 目录下的实际产出。
+不依赖摘要文本——读实际文件确认合规。
 
-Provide a structured verification report in JSON format:
+## 输出格式（严格 JSON）
 {
   "route": "Pass" | "BackToTpn" | "BackToMeta",
   "confidence": 0.0..1.0,
-  "summary": "Brief justification for the decision",
-  "constraint_violations": ["description of each violation"]
+  "summary": "判定依据简述",
+  "constraint_violations": ["违规项描述"]
 }
 
-Routing guidance:
-- "Pass":        Good decomposition + synthesis. Proceed.
-- "BackToTpn":   Minor issues — retry probability fitting with same strategy.
-- "BackToMeta":  Fundamental decomposition problem — need new reasoning paths.
-  Prefer BACK_TO_META when the decomposition strategy itself is flawed.
+路由指引：
+- "Pass":       综合完备、一致，可交付。
+- "BackToTpn":  执行偏差——产出存在但质量/完整性不足，需重试拟合。
+- "BackToMeta": 认知偏差——拆解策略本身有问题，需重新权重更新。
 "#;
 
 /// System prompt for the CausalAgent in **verify · Execution** mode
@@ -515,35 +509,29 @@ Routing guidance:
 /// adherence. Route preference: BACK_TO_TPN for execution quality issues.
 const VERIFY_EXEC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 执行验证 (Causal Verifier · Execution).
 
-You are verifying an **execution** task that directly produced output using
-available tools.
+你在验证一个执行节点的直接产出——任务由 L1 工具直接完成，未经拆解。
 
-Your focus:
-1. Requirement satisfaction — does the output meet the task description?
-2. Artifact quality — are deliverables well-formed and usable?
-3. Constraint adherence — are all L4 Truth constraints satisfied?
-4. Completeness — was the task fully addressed?
+## 验证维度
+1. 需求满足——产出是否完整覆盖任务描述？
+2. 产物质量——交付物是否格式正确、内容可用？
+3. 完整性——任务是否被完整处理，无遗漏维度？
 
-## File Verification
-The task output may reference deliverable files by absolute path.  You MUST
-use the `read` tool (or equivalent) to open each referenced file and inspect
-its contents.  Do NOT rely solely on the summary text — read the actual files
-to confirm compliance.
+## 文件核验
+必须用 `read` 工具逐文件检查 deliverables 目录下的实际产出。
+不依赖摘要文本——读实际文件确认合规。
 
-Provide a structured verification report in JSON format:
+## 输出格式（严格 JSON）
 {
   "route": "Pass" | "BackToTpn" | "BackToMeta",
   "confidence": 0.0..1.0,
-  "summary": "Brief justification for the decision",
-  "constraint_violations": ["description of each violation"]
+  "summary": "判定依据简述",
+  "constraint_violations": ["违规项描述"]
 }
 
-Routing guidance:
-- "Pass":        Output satisfies requirements. Proceed.
-- "BackToTpn":   Minor quality issues — retry execution with improvements.
-  Prefer BACK_TO_TPN when execution quality needs improvement.
-- "BackToMeta":  Fundamental issues — task specification or approach is wrong.
-  Only use BACK_TO_META when the execution strategy itself is invalid.
+路由指引：
+- "Pass":       产出满足需求，可交付。
+- "BackToTpn":  执行偏差——质量/完整性可改进，重试执行。
+- "BackToMeta": 认知偏差——任务规格或方法本身有问题，需重新权重更新。
 "#;
 
 // ---------------------------------------------------------------------------
@@ -572,6 +560,9 @@ pub struct CausalConvergeAgentBuilder {
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
+    /// 归藏客户端（V43 SkillEngine 加载 converge Skill）。工厂总是设置；
+    /// None = 未接线（测试/异常路径）——converge Skill 层跳过。
+    guizang: Option<Arc<GuizangClient>>,
 }
 
 impl CausalConvergeAgentBuilder {
@@ -592,6 +583,7 @@ impl CausalConvergeAgentBuilder {
             provider_name: "deepseek".to_string(),
             max_turns: 10,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
+            guizang: None,
         }
     }
 
@@ -604,6 +596,12 @@ impl CausalConvergeAgentBuilder {
     /// Override the SafetyHook with the shared process-wide singleton.
     pub fn safety_hook(mut self, hook: Arc<SafetyHook>) -> Self {
         self.safety_hook = hook;
+        self
+    }
+
+    /// Wire the Guizang client（V43 SkillEngine converge Skill 加载通道）。
+    pub fn guizang(mut self, guizang: Arc<GuizangClient>) -> Self {
+        self.guizang = Some(guizang);
         self
     }
 
@@ -677,9 +675,58 @@ impl CausalConvergeAgentBuilder {
         // ── Production path: LLM convergence judgment ──
         let client: Arc<deepseek::Client> = self.provider.client_for(&self.provider_name)?;
 
+        // ── Step 1.5: SkillEngine 机械执行 converge Skill（V43 §6.6/§10.1）──
+        // L0 机械 + L1 Skill：加载 yin/skills/converge/ 全部 active Skill，
+        // 确定性裁决。converge Skill 的 checks 全部为 llm_judgement 类（soft）——
+        // 不触发 hard 短路，仅收集注入 LLM prompt 供参考。
+        // guizang 未接线（None）→ converge Skill 层跳过并 warn。
+        let (converge_skills, converge_skill_report) = if let Some(guizang) = &self.guizang {
+            let converge_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
+            let skills = match converge_key {
+                Some(key) => {
+                    let partition = guizang.for_model(key.key()).await?;
+                    SkillEngine::load_skills_by_category(&partition, SkillCategory::Converge).await?
+                }
+                None => {
+                    SkillEngine::load_skills_by_category(guizang, SkillCategory::Converge).await?
+                }
+            };
+            if skills.is_empty() {
+                (skills, None)
+            } else {
+                let report = SkillEngine::run_checks(&skills, &self.engine_ctx.task_dir).await;
+                if !report.passed {
+                    tracing::warn!(
+                        task_id = %self.engine_ctx.task_id,
+                        summary = %report.summary,
+                        "Converge Skill check failed (hard short-circuit) — returning Diverged"
+                    );
+                    let failed: Vec<String> = report
+                        .results
+                        .iter()
+                        .filter(|r| !r.passed)
+                        .map(|r| format!("{}: {}", r.check_id, r.detail))
+                        .collect();
+                    return Ok(ConvergenceDecision {
+                        status: ConvergenceStatus::Diverged,
+                        task_summary: format!(
+                            "Converge Skill mechanical check failed: {}. Failures: [{}]",
+                            report.summary,
+                            failed.join("; ")
+                        ),
+                    });
+                }
+                (skills, Some(report))
+            }
+        } else {
+            tracing::warn!(
+                task_id = %self.engine_ctx.task_id,
+                "CausalConvergeAgent: guizang not wired — converge Skill layer skipped"
+            );
+            (Vec::new(), None)
+        };
+
         // ── 收集工具（只读）：read + webfetch — 逐文件核验 deliverables、
-        //    联网核实外部事实（V25 权限分工：收集工具三相共有）。
-        //    带工具必有安全钩子（§8.5 硬约束，类型级保证）：无条件挂载 SafetyHook ──
         let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new()
             .tools()
             .iter()
@@ -695,9 +742,40 @@ impl CausalConvergeAgentBuilder {
             .tools(skill_tools)
             .build();
 
-        let input = serde_json::to_string_pretty(subtask_results).map_err(|e| {
+        let mut input = serde_json::to_string_pretty(subtask_results).map_err(|e| {
             TaijiError::Serde(e)
         })?;
+
+        // ── 注入 converge Skill 执行结果（LLM 裁决参考）──
+        if let Some(ref report) = converge_skill_report {
+            let results_summary: Vec<String> = report
+                .results
+                .iter()
+                .map(|r| format!("[{}] {}: {}", if r.passed { "PASS" } else { "FAIL" }, r.check_id, r.detail))
+                .collect();
+            // 收集 llm_judgement 判据
+            let criteria: Vec<String> = converge_skills
+                .iter()
+                .flat_map(|v| v.checks.iter())
+                .filter(|c| c.kind == CheckKind::LlmJudgement)
+                .map(|c| format!("[{}] {}", c.id, c.pass_condition))
+                .collect();
+            let section = if criteria.is_empty() {
+                format!(
+                    "\n\nSkillEngine converge report (mechanical checks — for reference):\n{}\n{}",
+                    report.summary,
+                    results_summary.join("\n")
+                )
+            } else {
+                format!(
+                    "\n\nSkillEngine converge report (mechanical checks — for reference):\n{}\n{}\n\nLlmJudgement criteria (your discretionary remit):\n{}\n\n反偏置指令：表面流畅不算数，必须引用子任务 deliverables 中的具体证据；禁止因篇幅长 / 风格好加分。",
+                    report.summary,
+                    results_summary.join("\n"),
+                    criteria.join("\n")
+                )
+            };
+            input.push_str(&section);
+        }
 
         let response = agent.prompt(&input).await.map_err(|e| {
             TaijiError::LLMCallFailed {
@@ -732,44 +810,35 @@ impl CausalConvergeAgentBuilder {
 /// cross-subtask consistency, integration quality, finality.
 const CONVERGE_ORC_SYSTEM_PROMPT: &str = r#"你是收敛判决器 — 编排收敛 (Convergence Judge · Orchestration).
 
-The task was **orchestrated**: decomposed into multiple subtasks whose
-results are being aggregated.  Your job is to judge whether the aggregated
-result has converged.
+任务以编排模式执行：拆解为多个子任务后汇聚结果。你的职责是判定
+汇聚结果是否收敛。
 
-Your focus:
-1. Goal achievement — was the overall task objective met?
-2. Coverage — do the subtask results collectively cover the full task scope (MECE)?
-3. Consistency — are the results compatible (no contradictions across subtasks)?
-4. Integration — can the partial results be combined into a coherent whole?
-5. Finality — does the synthesized output represent a complete answer?
+## 判决维度
+1. 目标达成——整体任务目标是否达成？
+2. 覆盖——子任务结果是否集体覆盖了全部任务范围（MECE）？
+3. 一致性——跨子任务结果是否相容（无矛盾）？
+4. 整合——各子任务结果能否合并为连贯整体？
+5. 终局性——综合产出是否代表完整答案？
 
-## Deliverable Verification
-Each result includes a `deliverables` field containing absolute paths to
-produced files.  You MUST use the `read` tool to open each file and verify:
-- Cross-subtask consistency — do files from different subtasks agree?
-- Completeness — are all required artifacts present?
-- Quality — do the files meet the required standards?
+## 文件核验
+必须用 `read` 工具打开每个子任务的 deliverables 文件，逐文件验证：
+跨子任务一致性、完整性、质量。不依赖摘要文本。
 
-## Failed Subtask Reporting (V31)
-Some subtask results may have `status: "Diverged"` with a `summary` like
-`[failure_kind] reason` — the subtask failed (context overflow / llm failure /
-IO / etc.) and its `deliverables` (if any) contain the handoff artifact it
-wrote before failing. Treat these as **partial progress reports**:
-- Judge `Partial` when failures are recoverable and most subtasks succeeded.
-- Judge `Diverged` when the failure is fundamental or no progress was made.
-- In `task_summary`, **state which subtask failed, why, and whether re-running
-  it with adjusted guidance is worthwhile** — the parent orchestrator reads
-  this to decide re-decomposition (rerun_of) vs. accepting partial output.
+## 失败子任务处理
+子任务结果可能含 `status: "Diverged"` 的失败条目及其交接产物。
+- 失败可恢复且多数子任务成功 → 判 `Partial`
+- 失败根本性且无进展 → 判 `Diverged`
+- 在 `task_summary` 中明确写出哪个子任务失败、原因、是否值得 rerun
 
-Produce a convergence decision in JSON format:
+## 输出格式（严格 JSON）
 {
   "status": "Converged" | "Partial" | "Diverged",
-  "task_summary": "Explanation of the decision"
+  "task_summary": "判决说明，含失败分析与 rerun 建议"
 }
 
-- "Converged": All dimensions covered, results consistent.
-- "Partial": Some gaps or inconsistencies remain, but partial progress made.
-- "Diverged": Fundamental incoherence — decomposition strategy needs revision.
+- "Converged": 全部维度覆盖，结果一致。
+- "Partial":   部分缺口或矛盾，但已取得进展。
+- "Diverged":  根本性不一致——拆解策略需修正。
 "#;
 
 /// System prompt for the CausalAgent in **converge · Execution** mode
@@ -779,30 +848,28 @@ Produce a convergence decision in JSON format:
 /// final answer.
 const CONVERGE_EXEC_SYSTEM_PROMPT: &str = r#"你是收敛判决器 — 执行收敛 (Convergence Judge · Execution).
 
-The task was **executed directly** — a single output produced with L1 tools.
-Your job is to judge whether this output has converged to a complete answer.
+任务以执行模式直接完成——由 L1 工具产出单一结果。你的职责是判定
+该产出是否已收敛为完整答案。
 
-Your focus:
-1. Goal achievement — was the task objective met?
-2. Completeness — is the output fully addressed, with no missing dimensions?
-3. Quality — are the deliverables well-formed and directly usable?
-4. Finality — does the output represent a final answer (not a draft or partial)?
+## 判决维度
+1. 目标达成——任务目标是否达成？
+2. 完整性——产出是否完整覆盖，无遗漏维度？
+3. 质量——交付物是否格式正确、可直接使用？
+4. 终局性——产出是否为最终答案（非草稿或半成品）？
 
-## Deliverable Verification
-Each result includes a `deliverables` field containing absolute paths to
-produced files.  You MUST use the `read` tool to open each file and verify:
-- Completeness — are all required artifacts present?
-- Quality — do the files meet the required standards?
+## 文件核验
+必须用 `read` 工具打开 deliverables 文件，逐文件验证完整性与质量。
+不依赖摘要文本。
 
-Produce a convergence decision in JSON format:
+## 输出格式（严格 JSON）
 {
   "status": "Converged" | "Partial" | "Diverged",
-  "task_summary": "Explanation of the decision"
+  "task_summary": "判决说明"
 }
 
-- "Converged": The output is complete and final.
-- "Partial": Some gaps remain; partial progress made.
-- "Diverged": Fundamental incoherence — the output does not satisfy the task.
+- "Converged": 产出完整、最终。
+- "Partial":   部分缺口，但已取得进展。
+- "Diverged":  根本性不一致——产出不满足任务要求。
 "#;
 
 // ---------------------------------------------------------------------------
@@ -1038,16 +1105,15 @@ mod tests {
         assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToTpn"));
         assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToMeta"));
         assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("MECE"));
-        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("File Verification"));
-        // V27 配对：编排验证模板关注拆解完备性。
-        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("Orchestration"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("文件核验"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("编排验证"));
 
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.starts_with("你是因果验证器"));
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("Pass"));
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToTpn"));
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToMeta"));
-        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("Execution"));
-        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("File Verification"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("执行验证"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("文件核验"));
     }
 
     #[test]
@@ -1099,15 +1165,14 @@ mod tests {
         assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Converged"));
         assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Partial"));
         assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Diverged"));
-        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Coverage"));
-        // V27 配对：编排收敛模板关注跨子任务一致性。
-        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("Orchestration"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("覆盖"));
+        assert!(CONVERGE_ORC_SYSTEM_PROMPT.contains("编排收敛"));
 
         assert!(CONVERGE_EXEC_SYSTEM_PROMPT.starts_with("你是收敛判决器"));
         assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Converged"));
         assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Partial"));
         assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Diverged"));
-        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("Execution"));
+        assert!(CONVERGE_EXEC_SYSTEM_PROMPT.contains("执行收敛"));
     }
 
     #[test]

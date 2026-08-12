@@ -1,6 +1,6 @@
 //! AgentFactory — central hub for creating transient Rig Agents.
 //!
-//! Holds all shared infrastructure references (理络 LiluoClient, provider registry,
+//! Holds all shared infrastructure references (归藏 GuizangClient, provider registry,
 //! config, safety hook, worker pool, constraint engine, trigger engine) and
 //! provides factory methods that create fresh agent builders per cycle.
 //!
@@ -34,7 +34,7 @@ use crate::agents::plan::PlanBuilder;
 use crate::hooks::safety::SafetyHook;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
-use crate::infra::knowledge::LiluoClient;
+use crate::infra::knowledge::GuizangClient;
 use crate::infra::provider::ProviderRegistry;
 use crate::orchestration::constraint_engine::ConstraintEngine;
 use crate::orchestration::trigger_engine::SkillTriggerEngine;
@@ -49,8 +49,8 @@ use crate::types::execution::EngineContext;
 /// exposing Rig internals.  The caller invokes `.run()` on the builder to
 /// instantiate and execute the Rig agent.
 pub struct AgentFactory {
-    /// 理络 LiluoClient for traversing the cognitive knowledge warehouse.
-    pub liluo: Arc<LiluoClient>,
+    /// 归藏 GuizangClient for traversing the cognitive knowledge warehouse.
+    pub guizang: Arc<GuizangClient>,
     pub providers: Arc<ProviderRegistry>,
     pub config: TaijiConfig,
     pub safety_hook: Arc<SafetyHook>,
@@ -67,7 +67,7 @@ impl AgentFactory {
     /// `data_root` is initialised from `config.data_root` (defaulting to
     /// `"./data"` when the config value is empty).
     pub fn new(
-        liluo: Arc<LiluoClient>,
+        guizang: Arc<GuizangClient>,
         providers: Arc<ProviderRegistry>,
         config: TaijiConfig,
         safety_hook: Arc<SafetyHook>,
@@ -87,7 +87,7 @@ impl AgentFactory {
         );
 
         Self {
-            liluo,
+            guizang,
             providers,
             config,
             safety_hook,
@@ -128,7 +128,7 @@ impl AgentFactory {
         );
         Ok(MetaAgentBuilder::new(
             task_id,
-            self.liluo.clone(),
+            self.guizang.clone(),
             self.providers.clone(),
             &model,
         )
@@ -158,7 +158,7 @@ impl AgentFactory {
         );
         Ok(PlanBuilder::new(
             task_id,
-            self.liluo.clone(),
+            self.guizang.clone(),
             self.providers.clone(),
             &model,
         ))
@@ -239,7 +239,7 @@ impl AgentFactory {
         )
         .provider_name(&provider)
         .safety_hook(self.safety_hook.clone())
-        .guizang(self.liluo.clone()))
+        .guizang(self.guizang.clone()))
     }
 
     /// Create a [`CausalConvergeAgentBuilder`] (收敛判定, converge mode).
@@ -270,7 +270,8 @@ impl AgentFactory {
             &model,
         )
         .provider_name(&provider)
-        .safety_hook(self.safety_hook.clone()))
+        .safety_hook(self.safety_hook.clone())
+        .guizang(self.guizang.clone()))
     }
 
     // ── Configuration helpers ────────────────────────────────────────
@@ -457,16 +458,16 @@ mod tests {
     /// Build every transient dependency needed by [`AgentFactory::new`].
     async fn build_factory(config: TaijiConfig) -> (AgentFactory, PathBuf) {
         let tmp_dir = test_knowledge_dir().await;
-        let liluo = Arc::new(
-            LiluoClient::new(&tmp_dir)
+        let guizang = Arc::new(
+            GuizangClient::new(&tmp_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let providers =
             ProviderRegistry::new(&config).expect("ProviderRegistry should build");
 
         let factory = AgentFactory::new(
-            liluo,
+            guizang,
             Arc::new(providers),
             config,
             Arc::new(SafetyHook::new(&SafetyConfig::default())),
@@ -499,10 +500,10 @@ mod tests {
     async fn test_agent_llm_config_returns_defaults() {
         let config = make_config();
         let tmp_dir = test_knowledge_dir().await;
-        let liluo = Arc::new(
-            LiluoClient::new(&tmp_dir)
+        let guizang = Arc::new(
+            GuizangClient::new(&tmp_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let providers =
             ProviderRegistry::new(&config).expect("ProviderRegistry");
@@ -513,7 +514,7 @@ mod tests {
         };
 
         let factory = AgentFactory {
-            liluo,
+            guizang,
             providers: Arc::new(providers),
             config,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
@@ -593,10 +594,10 @@ mod tests {
     async fn test_task_dir_construction() {
         let config = make_config();
         let tmp_dir = test_knowledge_dir().await;
-        let liluo = Arc::new(
-            LiluoClient::new(&tmp_dir)
+        let guizang = Arc::new(
+            GuizangClient::new(&tmp_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let providers =
             ProviderRegistry::new(&config).expect("ProviderRegistry");
@@ -607,7 +608,7 @@ mod tests {
         };
 
         let factory = AgentFactory {
-            liluo,
+            guizang,
             providers: Arc::new(providers),
             config,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
@@ -628,16 +629,16 @@ mod tests {
     async fn test_agent_llm_config_unknown_agent_returns_defaults() {
         let config = make_config();
         let tmp_dir = test_knowledge_dir().await;
-        let liluo = Arc::new(
-            LiluoClient::new(&tmp_dir)
+        let guizang = Arc::new(
+            GuizangClient::new(&tmp_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let providers =
             ProviderRegistry::new(&config).expect("ProviderRegistry");
 
         let factory = AgentFactory {
-            liluo,
+            guizang,
             providers: Arc::new(providers),
             config,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),

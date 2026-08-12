@@ -1,0 +1,35 @@
+# V43 converge Skill: MECE 完备性检查（BCP §10.1）
+# dual: recursive-decompose（阳 Skill，P2 资产化后关联）
+type: verification
+layer: 1
+id: converge-mece-check
+name: MECE 完备性检查
+description: |
+  验证编排拆解是否满足 MECE 原则（Mutually Exclusive, Collectively Exhaustive）：
+  - 子任务间无重叠（互斥）
+  - 子任务汇总覆盖全部需求维度（完备）
+tags:
+  - converge
+  - mece
+  - decomposition
+  - quality
+confidence: 0.7
+version: 1
+content: |
+  编排拆解的 MECE 完备性验证：
+  1. 互斥性——检查子任务描述是否存在语义重叠，重叠子任务会产生重复工作
+  2. 完备性——检查子任务汇总是否覆盖父任务描述的全部维度与需求
+  3. 粒度——子任务粒度是否均匀（无过度拆解或欠拆解）
+agent_target: CausalAgent
+checks:
+  - id: mece-coverage
+    kind: llm_judgement
+    target: "../*/deliverables/"
+    params: {}
+    severity: soft
+    pass_condition: |
+      逐文件检查子任务 deliverables 后判定：
+      1. 各子任务产出互不重叠（无功能重复、无相同文件/结论重复产出）
+      2. 全部子任务产出汇总覆盖父任务要求的全部维度
+      3. 无明显遗漏维度（父任务描述中的关键词/需求点至少被一个子任务覆盖）
+status: active

@@ -1,0 +1,36 @@
+# V43 converge Skill: 粒度适中性检查（BCP §10.1）
+# dual: recursive-decompose（阳 Skill，P2 资产化后关联）
+type: verification
+layer: 1
+id: converge-granularity-check
+name: 粒度适中性检查
+description: |
+  验证编排拆解的子任务粒度是否适中：
+  - 无过度拆解（子任务过小，管理开销大于执行收益）
+  - 无欠拆解（子任务过大，仍应进一步分解）
+  - 粒度均匀性（同级子任务规模相近）
+tags:
+  - converge
+  - granularity
+  - decomposition
+  - quality
+confidence: 0.65
+version: 1
+content: |
+  子任务粒度适中性的验证：
+  1. 过度拆解——子任务数量过多（> max_subtasks 默认 4）或单个子任务产出极简单
+  2. 欠拆解——单个子任务承担过多维度，应进一步分解
+  3. 均匀性——同级子任务产出规模和复杂度是否相近
+agent_target: CausalAgent
+checks:
+  - id: granularity-balanced
+    kind: llm_judgement
+    target: "../*/deliverables/"
+    params: {}
+    severity: soft
+    pass_condition: |
+      逐文件检查各子任务 deliverables 后判定：
+      1. 无过度拆解——子任务数量适中（≤4），无明显的"一句话就能完成的子任务"
+      2. 无欠拆解——每个子任务聚焦单一维度，无过于庞大复杂的单个产出
+      3. 粒度均匀——同级子任务的 deliverables 规模和深度大致相近（无显著悬殊）
+status: active

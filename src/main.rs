@@ -135,7 +135,7 @@ async fn cmd_run(
         );
         let evolver = Arc::new(
             taiji::orchestration::cognition_evolver::CognitionEvolver::new(
-                factory.liluo.clone(),
+                factory.guizang.clone(),
             ),
         );
         let cancel = tokio_util::sync::CancellationToken::new();
@@ -148,13 +148,13 @@ async fn cmd_run(
         );
         // V33/MVP-3 主动学习执行器（默认关闭；开启时消费 experiments/ 队列）
         // V36：探索目标从默认模型分区加载（变体资产已随迁移落位分区）。
-        let al_liluo = Arc::new(factory.liluo.for_model(default_key.key()).await?);
+        let al_guizang = Arc::new(factory.guizang.for_model(default_key.key()).await?);
         let al_handle = taiji::orchestration::active_learning::spawn_runner(
             factory.clone(),
             config.clone(),
             &data_root,
             cancel.clone(),
-            al_liluo,
+            al_guizang,
         );
         dmn_handle = Some((consumer.spawn(), al_handle.unwrap_or_else(|| tokio::task::spawn(async {})), cancel));
         tracing::info!(
@@ -223,7 +223,7 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
 
     // Initialize 理络 knowledge store.
     let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
-    match taiji::infra::knowledge::LiluoClient::new(&knowledge_dir).await {
+    match taiji::infra::knowledge::GuizangClient::new(&knowledge_dir).await {
         Ok(_) => {
             // V36：旧根资产迁移到默认模型分区（幂等；init 是人工可重跑步骤，
             // 失败仅提示不中断——build_engine 运行时迁移失败才上抛）。
@@ -246,6 +246,10 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
             .await
             {
                 println!("⚠ legacy knowledge migration to default partition failed: {e}");
+            }
+            // V42：yang/yin 对偶目录迁移（幂等，BCP §10.1）
+            if let Err(e) = taiji::infra::knowledge::migrate_to_yang_yin(&knowledge_dir).await {
+                println!("⚠ yang/yin directory migration failed: {e}");
             }
             println!(
                 "✓ 理络 knowledge store initialised at {}",
@@ -467,11 +471,11 @@ async fn build_engine(
     let providers = Arc::new(taiji::infra::provider::ProviderRegistry::new(config)?);
 
     let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
-    let liluo = match taiji::infra::knowledge::LiluoClient::new(&knowledge_dir).await {
+    let guizang = match taiji::infra::knowledge::GuizangClient::new(&knowledge_dir).await {
         Ok(c) => Arc::new(c),
         Err(e) => {
             tracing::warn!("归藏 knowledge store unavailable, creating sparse client: {e}");
-            Arc::new(taiji::infra::knowledge::LiluoClient::new_sparse(&knowledge_dir).await?)
+            Arc::new(taiji::infra::knowledge::GuizangClient::new_sparse(&knowledge_dir).await?)
         }
     };
 
@@ -510,7 +514,7 @@ async fn build_engine(
         Arc::new(taiji::orchestration::trigger_engine::SkillTriggerEngine::new());
 
     Ok(Arc::new(taiji::agents::factory::AgentFactory::new(
-        liluo,
+        guizang,
         providers,
         config.clone(),
         safety_hook,

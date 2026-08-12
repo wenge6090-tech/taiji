@@ -23,7 +23,7 @@ use rig::completion::Prompt;
 
 use crate::infra::error::TaijiError;
 use crate::infra::json_util::parse_llm_json;
-use crate::infra::knowledge::LiluoClient;
+use crate::infra::knowledge::GuizangClient;
 use crate::infra::provider::ProviderRegistry;
 use crate::types::agent::MetaContext;
 use crate::types::plan::PlanSummary;
@@ -34,7 +34,7 @@ use crate::types::plan::PlanSummary;
 /// plan composition.  Created by [`AgentFactory::create_plan_agent`].
 pub struct PlanBuilder {
     task_id: String,
-    liluo: Arc<LiluoClient>,
+    guizang: Arc<GuizangClient>,
     provider: Arc<ProviderRegistry>,
     model: String,
 }
@@ -46,13 +46,13 @@ impl PlanBuilder {
     /// callers should use the factory rather than constructing this directly.
     pub fn new(
         task_id: &str,
-        liluo: Arc<LiluoClient>,
+        guizang: Arc<GuizangClient>,
         provider: Arc<ProviderRegistry>,
         model: &str,
     ) -> Self {
         Self {
             task_id: task_id.to_string(),
-            liluo,
+            guizang,
             provider,
             model: model.to_string(),
         }
@@ -94,7 +94,7 @@ impl PlanBuilder {
     ) -> Result<MetaContext, TaijiError> {
         let meta_agent = crate::agents::meta::MetaAgentBuilder::new(
             &self.task_id,
-            self.liluo.clone(),
+            self.guizang.clone(),
             self.provider.clone(),
             &self.model,
         );

@@ -262,7 +262,7 @@ mod tests {
     use super::*;
     use crate::agents::factory::AgentFactory;
     use crate::hooks::safety::SafetyHook;
-    use crate::infra::knowledge::LiluoClient as GuizangClient;
+    use crate::infra::knowledge::GuizangClient;
     use crate::infra::provider::ProviderRegistry;
     use crate::infra::config::{KnowledgeConfig, SafetyConfig};
     use crate::orchestration::constraint_engine::ConstraintEngine;

@@ -1,19 +1,25 @@
-//! LiluoClient — 归藏 (cognitive warehouse) file-system client.
+//! GuizangClient — 归藏 (cognitive warehouse) file-system client.
 //!
 //! Cognitive assets (Prompts, Models, Skills, Verifications) are stored as
 //! YAML files under `{data_dir}/{type}s/{id}.yaml`. V38: no `index.yaml` —
 //! tag search scans directories on demand (`scan_assets`).
 //!
-//! # Directory layout (V38：无 index.yaml / 无 truths/)
+//! # Directory layout (V43：yang/yin Skills 对偶子树，BCP §10.1)
 //!
 //! ```text
 //! {data_dir}/
-//! ├── prompts/            # L5 Prompt assets (行为模板)
-//! │   ├── prompt-001.yaml
-//! │   └── ...
-//! ├── verifications/      # L1 阴轨验证契约（V33 结构化 checks）
-//! ├── models/             # L2 Model assets（贝叶斯后验，MVP-3.5 激活）
-//! └── skills/             # L1 技能统计元数据
+//! ├── yang/
+//! │   ├── prompts/            # 阳系统提示词
+//! │   └── skills/
+//! │       ├── orch/            # 编排 Skill
+//! │       └── exec/            # 执行 Skill
+//! ├── yin/
+//! │   ├── prompts/            # 阴系统提示词
+//! │   └── skills/
+//! │       ├── verify/          # 验证 Skill（原 verifications/）
+//! │       └── converge/        # 收敛 Skill
+//! ├── models/                 # L2 Model assets（贝叶斯后验）
+//! └── skills/                 # L1 技能统计元数据（旧兼容）
 //! ```
 //!
 //! # Consistency (AGENTS.md §7)
@@ -150,13 +156,13 @@ impl IndexData {
 }
 
 // ---------------------------------------------------------------------------
-// LiluoClient
+// GuizangClient
 // ---------------------------------------------------------------------------
 
-/// File-system-based 理络 (cognitive network) warehouse client.
+/// File-system-based 归藏 (cognitive warehouse) client.
 ///
 /// # Thread safety
-/// `LiluoClient` is `Send + Sync`.  Internal state (`data_dir`) is immutable
+/// `GuizangClient` is `Send + Sync`.  Internal state (`data_dir`) is immutable
 /// after construction.
 ///
 /// # 分区（V36，BCP §6.1）
@@ -168,7 +174,7 @@ impl IndexData {
 ///   是唯一载体；MetaAgent 按路由结果 `for_model` 检索，DMN 按 pending 的
 ///   `model_key` 分区回传。
 #[derive(Debug)]
-pub struct LiluoClient {
+pub struct GuizangClient {
     /// knowledge 根目录（构造时传入）——model_stats.yaml 所在层。
     root_dir: PathBuf,
     /// 活动目录：根 client = root_dir；分区 client = root_dir/{model_key}。
@@ -177,7 +183,10 @@ pub struct LiluoClient {
     partition: Option<String>,
 }
 
-impl LiluoClient {
+/// Compatibility alias — 旧代码中的 `LiluoClient` 等效于 `GuizangClient`。
+pub type LiluoClient = GuizangClient;
+
+impl GuizangClient {
     /// Directory name for each asset type within `data_dir`.
     fn type_dir_name(type_: &str) -> &'static str {
         match type_ {
@@ -185,8 +194,14 @@ impl LiluoClient {
             "skill" => "skills",
             "prompt" => "prompts",
             "verification" => "verifications",
+            // BCP §10.1 yang/yin 对偶目录（V42 迁移）:
+            "yang_prompt" => "yang/prompts",
+            "yin_prompt" => "yin/prompts",
+            "yin_verification" => "yin/skills/verify",
+            // V43: yin/skills/ 嵌套类别
+            "yin_skill_verify" => "yin/skills/verify",
+            "yin_skill_converge" => "yin/skills/converge",
             _ => {
-                // Fallback: treat unknown types as prompts (V22 主层)
                 tracing::warn!("unknown cognitive asset type: {type_}, defaulting to 'prompts'");
                 "prompts"
             }
@@ -195,7 +210,7 @@ impl LiluoClient {
 
     // ── Constructors ──────────────────────────────────────────────────
 
-    /// Create a new `LiluoClient`, ensuring the root directory exists.
+    /// Create a new `GuizangClient`, ensuring the root directory exists.
     ///
     /// V41：根 client **不再创建资产层目录**（models/prompts/skills/
     /// verifications）——资产检索/写入全部走 `for_model` 分区 client（分区
@@ -243,7 +258,7 @@ impl LiluoClient {
         &self.root_dir
     }
 
-    /// Create a sparse `LiluoClient` that skips index building.
+    /// Create a sparse `GuizangClient` that skips index building.
     ///
     /// V41：与 [`new`](Self::new) 同语义——不创建资产层目录（根 client 只
     /// 服务 model_stats / for_model 派生；分区 client 才建资产层）。
@@ -255,15 +270,18 @@ impl LiluoClient {
         })
     }
 
-    /// Create directories for the asset types under `data_dir`
-    /// (V22 三层+预留: models/ skills/ prompts；V33 加 verifications/ 阴轨验证契约层；
-    /// V38 移除 truths/ 资产层——L0 检查内置化)。
+    /// Create directories for all asset types (yang/yin 对偶，BCP §10.1)。
     async fn ensure_dirs(&self) -> Result<(), TaijiError> {
         let dirs = [
             self.data_dir.join("models"),
             self.data_dir.join("skills"),
-            self.data_dir.join("prompts"),
-            self.data_dir.join("verifications"),
+            self.data_dir.join("prompts"),               // 旧兼容
+            self.data_dir.join("yang/prompts"),           // 阳轨 FittingAgent 提示词
+            self.data_dir.join("yang/skills/orch"),       // 阳轨编排 Skill
+            self.data_dir.join("yang/skills/exec"),       // 阳轨执行 Skill
+            self.data_dir.join("yin/prompts"),            // 阴轨 CausalAgent 提示词
+            self.data_dir.join("yin/skills/verify"),      // 阴轨验证 Skill（BCP §10.1）
+            self.data_dir.join("yin/skills/converge"),    // 阴轨收敛 Skill（BCP §10.1）
         ];
         for dir in &dirs {
             fs::create_dir_all(dir).await.map_err(|e| {
@@ -510,7 +528,7 @@ impl LiluoClient {
     pub async fn scan_assets(&self) -> Result<IndexData, TaijiError> {
         let mut index = IndexData::empty();
 
-        for type_ in &["model", "skill", "prompt", "verification"] {
+        for type_ in &["model", "skill", "prompt", "verification", "yang_prompt", "yin_prompt", "yin_skill_verify", "yin_skill_converge"] {
             let dir = self.data_dir.join(Self::type_dir_name(type_));
             if !dir.exists() {
                 continue;
@@ -595,15 +613,19 @@ impl LiluoClient {
 
     // ── Prompt asset convenience methods ──────────────────────────────
 
-    /// Save a [`PromptAsset`] to the 理络 `prompts/` directory.
-    ///
-    /// Thin wrapper around [`save_asset`](Self::save_asset).
+    /// Save a [`PromptAsset`] to the appropriate directory:
+    /// - `agent_target="FittingAgent"` → `yang/prompts/`（BCP §10.1 阳轨）
+    /// - `agent_target="CausalAgent"` → `yin/prompts/`（BCP §10.1 阴轨）
+    /// - 空或其他 → `prompts/`（旧兼容）
     pub async fn save_prompt(&self, prompt: &mut PromptAsset) -> Result<(), TaijiError> {
+        let type_str = match prompt.agent_target.as_str() {
+            "FittingAgent" => "yang_prompt",
+            "CausalAgent" => "yin_prompt",
+            _ => "prompt",
+        };
+        prompt.asset_type = type_str.into();
         let mut asset = CognitiveAsset::Prompt(prompt.clone());
-        // Reset type override — the enum tag handles serialisation.
-        prompt.asset_type = "prompt".into();
         self.save_asset(&mut asset).await?;
-        // Sync version back to the caller.
         prompt.version = asset.version();
         Ok(())
     }
@@ -613,21 +635,24 @@ impl LiluoClient {
     /// Returns `None` when no asset with that name exists (as opposed to
     /// returning an error), so callers can gracefully fall back.
     pub async fn load_prompt(&self, name: &str) -> Result<Option<PromptAsset>, TaijiError> {
-        match self.load_asset("prompt", name).await {
-            Ok(CognitiveAsset::Prompt(p)) => Ok(Some(p)),
-            Ok(_) => {
-                // Corrupted: found asset but wrong type tag.
-                tracing::warn!("asset '{name}' found in prompts/ but has wrong type tag");
-                Ok(None)
-            }
-            Err(e) => {
-                if e.to_string().contains("failed to read asset") {
-                    Ok(None)
-                } else {
-                    Err(e)
+        // V43：按 yang/prompts/ → yin/prompts/ → prompts/ 顺序尝试
+        for type_ in ["yang_prompt", "yin_prompt", "prompt"] {
+            match self.load_asset(type_, name).await {
+                Ok(CognitiveAsset::Prompt(p)) => return Ok(Some(p)),
+                Ok(_) => {
+                    tracing::warn!("asset '{name}' found but has wrong type tag");
+                    return Ok(None);
+                }
+                Err(e) => {
+                    if e.to_string().contains("failed to read asset") {
+                        continue; // 尝试下一个路径
+                    } else {
+                        return Err(e);
+                    }
                 }
             }
         }
+        Ok(None)
     }
 
     /// Search for prompt assets by task-type tags.
@@ -638,12 +663,15 @@ impl LiluoClient {
         let refs = self.search_by_tags(tags).await?;
         let mut prompts = Vec::new();
         for r in &refs {
-            if r.asset_type != "prompt" {
+            if r.asset_type != "prompt" && r.asset_type != "yang_prompt" && r.asset_type != "yin_prompt" {
                 continue;
             }
-            // 逐个加载；失败必须可见（V32 实测：资产 YAML 缺字段时 load_asset
-            // 失败被静默吞掉 → MetaAgent 零资产降级 → 编排失效的系统性 bug）。
-            match self.load_asset(&r.asset_type, &r.id).await {
+            let load_type = if r.asset_type == "yang_prompt" || r.asset_type == "yin_prompt" {
+                r.asset_type.as_str()
+            } else {
+                "prompt"
+            };
+            match self.load_asset(load_type, &r.id).await {
                 Ok(CognitiveAsset::Prompt(p)) => prompts.push(p),
                 Ok(_) => {
                     tracing::warn!(
@@ -663,15 +691,15 @@ impl LiluoClient {
     }
     // ── Verification asset convenience methods (V33 阴轨验证契约) ────
 
-    /// Save a [`VerificationAsset`] to the `verifications/` directory.
+    /// Save a [`VerificationAsset`] to the `yin/skills/verify/` directory（BCP §10.1 阴轨）。
     ///
     /// Thin wrapper around [`save_asset`](Self::save_asset).
     pub async fn save_verification(
         &self,
         verification: &mut VerificationAsset,
     ) -> Result<(), TaijiError> {
+        verification.asset_type = "yin_skill_verify".into();
         let mut asset = CognitiveAsset::Verification(verification.clone());
-        verification.asset_type = "verification".into();
         self.save_asset(&mut asset).await?;
         verification.version = asset.version();
         Ok(())
@@ -683,8 +711,8 @@ impl LiluoClient {
         &self,
         model: &mut ModelAsset,
     ) -> Result<(), TaijiError> {
-        let mut asset = CognitiveAsset::Model(model.clone());
         model.header.asset_type = "model".into();
+        let mut asset = CognitiveAsset::Model(model.clone());
         self.save_asset(&mut asset).await?;
         model.header.version = asset.version();
         Ok(())
@@ -754,7 +782,7 @@ impl LiluoClient {
         Ok(models)
     }
 
-    /// Load a [`VerificationAsset`] from the `verifications/` directory by id.
+    /// Load a [`VerificationAsset`] from the `yin/skills/verify/` directory by id.
     ///
     /// Returns `None` when no asset with that id exists, so callers can
     /// gracefully fall back.
@@ -762,10 +790,10 @@ impl LiluoClient {
         &self,
         id: &str,
     ) -> Result<Option<VerificationAsset>, TaijiError> {
-        match self.load_asset("verification", id).await {
+        match self.load_asset("yin_skill_verify", id).await {
             Ok(CognitiveAsset::Verification(v)) => Ok(Some(v)),
             Ok(_) => {
-                tracing::warn!("asset '{id}' found in verifications/ but has wrong type tag");
+                tracing::warn!("asset '{id}' found in skills/verify/ but has wrong type tag");
                 Ok(None)
             }
             Err(e) => {
@@ -778,8 +806,8 @@ impl LiluoClient {
         }
     }
 
-    /// Load **all** verification contract assets from the `verifications/`
-    /// directory.
+    /// Load **all** verification contract assets from the `yin/skills/verify/`
+    /// directory（BCP §10.1）。
     ///
     /// Direct directory scan (does **not** rely on `index.yaml` —
     /// `search_by_tags(&[])` returns empty, and the contract layer is small
@@ -791,79 +819,17 @@ impl LiluoClient {
 
 /// Load all prompt assets (active ones — pruned prompts are kept on disk for
 /// audit but excluded from evolution/backprop, same semantics as verifications).
+/// V43：扫描 yang/prompts/ + yin/prompts/ + prompts/（旧兼容）。
 pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
-    let dir = self.data_dir.join("prompts");
     let mut prompts = Vec::new();
-    if !dir.exists() {
-        return Ok(prompts);
-    }
-    let mut read_dir = fs::read_dir(&dir).await.map_err(|e| {
-        TaijiError::KnowledgeStoreUnavailable {
-            context: format!("failed to read prompts directory: {e}"),
-        }
-    })?;
-    while let Some(entry) = read_dir.next_entry().await.transpose() {
-        match entry {
-            Ok(e) => {
-                let path = e.path();
-                if path.extension().is_none_or(|ext| ext != "yaml") {
-                    continue;
-                }
-                if path.file_name().is_none_or(|n| n.to_string_lossy().ends_with(".tmp")) {
-                    continue;
-                }
-                let content = match fs::read_to_string(&path).await {
-                    Ok(c) => c,
-                    Err(e) => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            error = %e,
-                            "failed to read prompt file — skipping"
-                        );
-                        continue;
-                    }
-                };
-                match serde_yaml::from_str::<CognitiveAsset>(&content) {
-                    Ok(CognitiveAsset::Prompt(p)) if p.status == "active" => prompts.push(p),
-                    Ok(CognitiveAsset::Prompt(p)) => {
-                        // V35/MVP-6：pruned 资产不参与演化/回传（保留文件供审计，
-                        // 与 load_all_verifications 过滤语义一致）
-                        tracing::debug!(
-                            id = %p.id,
-                            status = %p.status,
-                            "skipping non-active prompt asset"
-                        );
-                    }
-                    _ => {
-                        tracing::warn!(
-                            path = %path.display(),
-                            "prompt asset has wrong type tag or is corrupt — skipping"
-                        );
-                    }
-                }
-            }
-            Err(e) => {
-                tracing::warn!(
-                    error = %e,
-                    "failed to read prompt directory entry — skipping"
-                );
-            }
-        }
-    }
-    Ok(prompts)
-}
-
-    pub async fn load_all_verifications(
-        &self,
-    ) -> Result<Vec<VerificationAsset>, TaijiError> {
-        let dir = self.data_dir.join("verifications");
-        let mut verifications = Vec::new();
+    for dir_name in ["yang/prompts", "yin/prompts", "prompts"] {
+        let dir = self.data_dir.join(dir_name);
         if !dir.exists() {
-            return Ok(verifications);
+            continue;
         }
         let mut read_dir = fs::read_dir(&dir).await.map_err(|e| {
             TaijiError::KnowledgeStoreUnavailable {
-                context: format!("failed to read verifications directory: {e}"),
+                context: format!("failed to read prompts directory: {e}"),
             }
         })?;
         while let Some(entry) = read_dir.next_entry().await.transpose() {
@@ -876,24 +842,101 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
                     if path.file_name().is_none_or(|n| n.to_string_lossy().ends_with(".tmp")) {
                         continue;
                     }
-                    match self.load_verification_from_path(&path).await {
-                        Ok(Some(v)) if v.status == "active" => verifications.push(v),
-                        Ok(Some(v)) => {
-                            // MVP-3 演化：pruned 资产不参与加载/回传（保留文件供审计）
+                    let content = match fs::read_to_string(&path).await {
+                        Ok(c) => c,
+                        Err(e) => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                error = %e,
+                                "failed to read prompt file — skipping"
+                            );
+                            continue;
+                        }
+                    };
+                    match serde_yaml::from_str::<CognitiveAsset>(&content) {
+                        Ok(CognitiveAsset::Prompt(p)) if p.status == "active" => {
+                            // 去重：同一 id 只保留首次（yang/prompts 优先）
+                            if !prompts.iter().any(|existing: &PromptAsset| existing.id == p.id) {
+                                prompts.push(p);
+                            }
+                        }
+                        Ok(CognitiveAsset::Prompt(p)) => {
+                            // V35/MVP-6：pruned 资产不参与演化/回传（保留文件供审计，
+                            // 与 load_all_verifications 过滤语义一致）
                             tracing::debug!(
-                                id = %v.id,
-                                status = %v.status,
-                                "skipping non-active verification asset"
+                                id = %p.id,
+                                status = %p.status,
+                                "skipping non-active prompt asset"
                             );
                         }
-                        Ok(None) => {}
-                        Err(e) => {
-                            tracing::warn!("failed to load verification {:?}: {e}", path);
+                        _ => {
+                            tracing::warn!(
+                                path = %path.display(),
+                                "prompt asset has wrong type tag or is corrupt — skipping"
+                            );
                         }
                     }
                 }
                 Err(e) => {
-                    tracing::warn!("error reading verifications directory entry: {e}");
+                    tracing::warn!(
+                        error = %e,
+                        "failed to read prompt directory entry — skipping"
+                    );
+                }
+            }
+        }
+    }
+    Ok(prompts)
+}
+
+    pub async fn load_all_verifications(
+        &self,
+    ) -> Result<Vec<VerificationAsset>, TaijiError> {
+        let mut verifications = Vec::new();
+        // 扫描 yin/skills/verify/（BCP §10.1）——verifications/ 已废弃
+        for dir_name in &["yin/skills/verify"] {
+            let dir = self.data_dir.join(dir_name);
+            if !dir.exists() {
+                continue;
+            }
+            let mut read_dir = fs::read_dir(&dir).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to read {:?} directory: {e}", dir),
+                }
+            })?;
+            while let Some(entry) = read_dir.next_entry().await.transpose() {
+                match entry {
+                    Ok(e) => {
+                        let path = e.path();
+                        if path.extension().is_none_or(|ext| ext != "yaml") {
+                            continue;
+                        }
+                        if path.file_name().is_none_or(|n| n.to_string_lossy().ends_with(".tmp")) {
+                            continue;
+                        }
+                        match self.load_verification_from_path(&path).await {
+                            Ok(Some(v)) if v.status == "active" => {
+                                // 去重：同一 id 只保留首次加载的（优先新路径）
+                                if !verifications.iter().any(|existing: &VerificationAsset| existing.id == v.id) {
+                                    verifications.push(v);
+                                }
+                            }
+                            Ok(Some(v)) => {
+                                tracing::debug!(
+                                    id = %v.id,
+                                    status = %v.status,
+                                    "skipping non-active verification asset"
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!("failed to load verification {:?}: {e}", path);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("error reading verifications directory entry: {e}");
+                    }
                 }
             }
         }
@@ -914,6 +957,72 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             Ok(CognitiveAsset::Verification(v)) => Ok(Some(v)),
             _ => Ok(None),
         }
+    }
+
+    /// V43: 按 SkillCategory 加载全部 active Skill 资产（BCP §10.1）。
+    ///
+    /// - `Verify` → 扫描 `yin/skills/verify/`
+    /// - `Converge` → 扫描 `yin/skills/converge/`
+    ///
+    /// 去重规则：同一 id 优先保留首次加载的（新路径优先）。
+    pub async fn load_skills_by_category(
+        &self,
+        category: crate::types::verification::SkillCategory,
+    ) -> Result<Vec<VerificationAsset>, TaijiError> {
+        use crate::types::verification::SkillCategory;
+        let dirs: &[&str] = match category {
+            SkillCategory::Verify => &["yin/skills/verify"],
+            SkillCategory::Converge => &["yin/skills/converge"],
+            // orch/exec 尚未资产化，留空（P2 阶段填充）
+            _ => &[],
+        };
+        let mut skills = Vec::new();
+        for dir_name in dirs {
+            let dir = self.data_dir.join(dir_name);
+            if !dir.exists() {
+                continue;
+            }
+            let mut read_dir = fs::read_dir(&dir).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to read {:?} directory: {e}", dir),
+                }
+            })?;
+            while let Some(entry) = read_dir.next_entry().await.transpose() {
+                match entry {
+                    Ok(e) => {
+                        let path = e.path();
+                        if path.extension().is_none_or(|ext| ext != "yaml") {
+                            continue;
+                        }
+                        if path.file_name().is_none_or(|n| n.to_string_lossy().ends_with(".tmp")) {
+                            continue;
+                        }
+                        match self.load_verification_from_path(&path).await {
+                            Ok(Some(v)) if v.status == "active" => {
+                                if !skills.iter().any(|existing: &VerificationAsset| existing.id == v.id) {
+                                    skills.push(v);
+                                }
+                            }
+                            Ok(Some(v)) => {
+                                tracing::debug!(
+                                    id = %v.id,
+                                    status = %v.status,
+                                    "load_skills_by_category: skipping non-active asset"
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(e) => {
+                                tracing::warn!("failed to load skill asset {:?}: {e}", path);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("error reading skills directory entry: {e}");
+                    }
+                }
+            }
+        }
+        Ok(skills)
     }
 }
 
@@ -937,12 +1046,27 @@ pub enum CognitiveAsset {
 
 impl CognitiveAsset {
     /// Return the asset type string (`"model"`, `"skill"`, `"prompt"`, `"verification"`).
+    ///
+    /// V43：Verification 变体优先用内部 `asset_type` 字段（可指向
+    /// `yin_skill_verify` / `yin_skill_converge` 等细分目录），空时回退 `"verification"`。
     pub fn asset_type(&self) -> String {
         match self {
             CognitiveAsset::Model(_) => "model".into(),
             CognitiveAsset::Skill(_) => "skill".into(),
-            CognitiveAsset::Prompt(_) => "prompt".into(),
-            CognitiveAsset::Verification(_) => "verification".into(),
+            CognitiveAsset::Prompt(p) => {
+                if p.asset_type.is_empty() || p.asset_type == "prompt" {
+                    "prompt".into()
+                } else {
+                    p.asset_type.clone()
+                }
+            }
+            CognitiveAsset::Verification(v) => {
+                if v.asset_type.is_empty() || v.asset_type == "verification" {
+                    "verification".into()
+                } else {
+                    v.asset_type.clone()
+                }
+            }
         }
     }
 
@@ -985,7 +1109,7 @@ impl CognitiveAsset {
 /// → 跳过；仅源存在 → 移动。移动失败 → Err 上抛（带路径，诊断性——无降级原则
 /// §23：迁移是数据完整性操作，不允许静默吞错）。
 ///
-/// 调用时机：`build_engine`（所有命令入口）在 `LiluoClient::new` 之后调用一次。
+/// 调用时机：`build_engine`（所有命令入口）在 `GuizangClient::new` 之后调用一次。
 pub async fn migrate_to_partitioned(
     root: &Path,
     default_key: &str,
@@ -1051,6 +1175,108 @@ pub struct SeedReport {
     pub pruned_skipped: usize,
 }
 
+/// V42 归藏目录 yang/yin 迁移（BCP §10.1）——幂等，可重跑：
+/// - `prompts/*.yaml` → 按 agent_target 分派：
+///   `"FittingAgent"` → `yang/prompts/`，`"CausalAgent"` → `yin/prompts/`
+/// - `verifications/*.yaml` → `yin/skills/verify/`（V43：verifications 概念已废弃）
+/// - `yin/verifications/*.yaml` → `yin/skills/verify/`（V43：迁移过渡目录）
+/// - models/ 不迁移（分区级，无需 yang/yin 拆分）
+/// - 目标已存在同名文件 → 跳过，不覆盖
+pub async fn migrate_to_yang_yin(root: &Path) -> Result<(), TaijiError> {
+    // 遍历所有模型分区
+    let mut read_dir = match fs::read_dir(root).await {
+        Ok(d) => d,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(TaijiError::IO(e)),
+    };
+
+    while let Some(entry) = read_dir.next_entry().await.transpose() {
+        let Ok(e) = entry else { continue };
+        let path = e.path();
+        if !path.is_dir() { continue; }
+        let model_key = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) if !n.starts_with('.') => n.to_string(),
+            _ => continue,
+        };
+
+        // 迁移 prompts/
+        let old_prompts = path.join("prompts");
+        if old_prompts.exists() {
+            let yang_dir = path.join("yang/prompts");
+            let yin_dir = path.join("yin/prompts");
+            fs::create_dir_all(&yang_dir).await.map_err(TaijiError::IO)?;
+            fs::create_dir_all(&yin_dir).await.map_err(TaijiError::IO)?;
+
+            let mut r = fs::read_dir(&old_prompts).await.map_err(TaijiError::IO)?;
+            while let Some(f) = r.next_entry().await.transpose() {
+                let Ok(f) = f else { continue };
+                let fp = f.path();
+                if fp.extension().is_none_or(|e| e != "yaml") { continue; }
+                let Some(name) = fp.file_name() else { continue };
+
+                // 解析 agent_target 决定目标目录
+                let target_dir = match fs::read_to_string(&fp).await {
+                    Ok(content) => {
+                        if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                            match val.get("agent_target").and_then(|v| v.as_str()) {
+                                Some("CausalAgent") => &yin_dir,
+                                _ => &yang_dir, // FittingAgent / 空 / 其他 → 阳轨
+                            }
+                        } else {
+                            &yang_dir
+                        }
+                    }
+                    Err(_) => &yang_dir,
+                };
+
+                let dst = target_dir.join(name);
+                if !dst.exists() {
+                    if let Err(e) = fs::rename(&fp, &dst).await {
+                        tracing::warn!(
+                            partition = %model_key,
+                            file = %fp.display(),
+                            error = %e,
+                            "migrate_to_yang_yin: rename prompts failed, copying instead"
+                        );
+                        fs::copy(&fp, &dst).await.map_err(TaijiError::IO)?;
+                    }
+                }
+            }
+        }
+
+        // V43: 迁移 verifications/ + yin/verifications/ → yin/skills/verify/（BCP §10.1）
+        // verifications 概念已废弃——统一收敛到 yin/skills/verify/。
+        let yin_verify_dir = path.join("yin/skills/verify");
+        fs::create_dir_all(&yin_verify_dir).await.map_err(TaijiError::IO)?;
+        for old_dir in ["verifications", "yin/verifications"] {
+            let old = path.join(old_dir);
+            if !old.exists() { continue; }
+            let mut r = fs::read_dir(&old).await.map_err(TaijiError::IO)?;
+            while let Some(f) = r.next_entry().await.transpose() {
+                let Ok(f) = f else { continue };
+                let fp = f.path();
+                if fp.extension().is_none_or(|e| e != "yaml") { continue; }
+                let Some(name) = fp.file_name() else { continue };
+                let dst = yin_verify_dir.join(name);
+                if !dst.exists() {
+                    if let Err(e) = fs::rename(&fp, &dst).await {
+                        tracing::warn!(
+                            partition = %model_key,
+                            file = %fp.display(),
+                            error = %e,
+                            "migrate_to_yang_yin: rename {old_dir} failed, copying"
+                        );
+                        fs::copy(&fp, &dst).await.map_err(TaijiError::IO)?;
+                    }
+                }
+            }
+        }
+    }
+
+    tracing::info!("migrate_to_yang_yin: completed");
+    Ok(())
+}
+
 /// 分区键合法性校验（V39）——`{provider}-{model}` slug 将拼接为目录路径，
 /// 必须杜绝路径穿越与特殊字符（与 task_id 路径安全化同精神，AGENTS.md §19）。
 /// 非法 → Err 上抛（无降级原则：CLI 输入即攻击面）。
@@ -1103,12 +1329,20 @@ pub async fn seed_partition(
         });
     }
 
-    let partition = LiluoClient::for_model(&LiluoClient::new(root).await?, target_key).await?;
+    let partition = GuizangClient::for_model(&GuizangClient::new(root).await?, target_key).await?;
     let mut report = SeedReport::default();
 
-    // 复制范围：prompts/ + verifications/（活跃种子资产）。
-    for type_ in &["prompt", "verification"] {
-        let layer = LiluoClient::type_dir_name(type_);
+    // 复制范围：prompts（yang/yin 对偶 + 旧兼容）+ verify Skill（活跃种子资产，V43）。
+    // 源目录：yang/prompts + yin/prompts + prompts（提示词）；yin/skills/verify + yin/verifications（验证 Skill）。
+    let seed_layers: [(&str, &str); 6] = [
+        ("yang_prompt", "yang/prompts"),
+        ("yin_prompt", "yin/prompts"),
+        ("prompt", "prompts"),
+        ("yin_skill_verify", "yin/skills/verify"),
+        ("yin_verification", "yin/verifications"),
+        ("verification", "verifications"),
+    ];
+    for (_type_, layer) in seed_layers {
         let src_layer = source_dir.join(layer);
         if !fs::metadata(&src_layer).await.map(|m| m.is_dir()).unwrap_or(false) {
             continue;
@@ -1233,7 +1467,7 @@ mod tests {
     #[tokio::test]
     async fn test_new_creates_dirs() {
         let dir = test_dir("new_creates_dirs").await;
-        let root = LiluoClient::new(&dir).await.unwrap();
+        let root = GuizangClient::new(&dir).await.unwrap();
         // V41：根 client 不创建资产层目录（根只保留 model_stats 与分区子目录）
         assert!(dir.exists());
         assert!(!dir.join("models").exists());
@@ -1245,8 +1479,10 @@ mod tests {
         // 分区 client 创建资产层
         let partition = root.for_model("deepseek-deepseek-chat").await.unwrap();
         assert!(dir.join("deepseek-deepseek-chat/prompts").exists());
-        assert!(dir.join("deepseek-deepseek-chat/verifications").exists());
+        assert!(dir.join("deepseek-deepseek-chat/yin/skills/verify").exists());
+        assert!(dir.join("deepseek-deepseek-chat/yin/skills/converge").exists());
         assert!(dir.join("deepseek-deepseek-chat/models").exists());
+        assert!(!dir.join("deepseek-deepseek-chat/verifications").exists());
         cleanup(&dir).await;
     }
 
@@ -1255,7 +1491,7 @@ mod tests {
     #[tokio::test]
     async fn test_for_model_partitions_paths_and_isolates() {
         let dir = test_dir("for_model_partition").await;
-        let root = LiluoClient::new(&dir).await.unwrap();
+        let root = GuizangClient::new(&dir).await.unwrap();
 
         // 根 client 写根资产
         let mut prompt = crate::types::agent::PromptAsset::new(
@@ -1275,7 +1511,8 @@ mod tests {
         assert_eq!(partition.partition_key(), Some("deepseek-deepseek-chat"));
         assert!(dir.join("deepseek-deepseek-chat").exists());
         assert!(dir.join("deepseek-deepseek-chat/prompts").exists());
-        assert!(dir.join("deepseek-deepseek-chat/verifications").exists());
+        assert!(dir.join("deepseek-deepseek-chat/yin/skills/verify").exists());
+        assert!(dir.join("deepseek-deepseek-chat/yin/skills/converge").exists());
         // V38：分区不再创建 index.yaml
         assert!(!dir.join("deepseek-deepseek-chat/index.yaml").exists());
         // root_dir 恒为 knowledge 根（model_stats 层）
@@ -1314,7 +1551,7 @@ mod tests {
     #[tokio::test]
     async fn test_migrate_to_partitioned_idempotent() {
         let dir = test_dir("migrate_partition").await;
-        let root = LiluoClient::new(&dir).await.unwrap();
+        let root = GuizangClient::new(&dir).await.unwrap();
 
         // 根资产层放一个资产
         let mut prompt = crate::types::agent::PromptAsset::new(
@@ -1357,7 +1594,7 @@ mod tests {
     #[tokio::test]
     async fn test_seed_partition_copies_active_seeds_and_skips_pruned() {
         let dir = test_dir("seed_copy").await;
-        let root = LiluoClient::new(&dir).await.unwrap();
+        let root = GuizangClient::new(&dir).await.unwrap();
 
         // 源分区：一个 active prompt + 一个 pruned prompt + 一个 active verification
         let src = root.for_model("deepseek-deepseek-src").await.unwrap();
@@ -1432,7 +1669,7 @@ mod tests {
     #[tokio::test]
     async fn test_seed_partition_missing_source_errors() {
         let dir = test_dir("seed_missing_source").await;
-        LiluoClient::new(&dir).await.unwrap();
+        GuizangClient::new(&dir).await.unwrap();
 
         let err = seed_partition(&dir, "deepseek-no-such-model", "deepseek-deepseek-dst")
             .await
@@ -1445,7 +1682,7 @@ mod tests {
     #[tokio::test]
     async fn test_seed_partition_invalid_key_errors() {
         let dir = test_dir("seed_invalid_key").await;
-        LiluoClient::new(&dir).await.unwrap();
+        GuizangClient::new(&dir).await.unwrap();
 
         // 路径穿越 / 非法字符一律拒绝（CLI 输入即攻击面）。
         for bad in ["../evil", "a/b", "a\\b", "a b", "a.b", ""] {
@@ -1464,7 +1701,7 @@ mod tests {
     #[tokio::test]
     async fn test_model_stats_roundtrip() {
         let dir = test_dir("model_stats").await;
-        let root = LiluoClient::new(&dir).await.unwrap();
+        let root = GuizangClient::new(&dir).await.unwrap();
 
         // 缺失 → 空表（合法状态）
         let stats = root.load_model_stats().await.unwrap();
@@ -1502,7 +1739,7 @@ mod tests {
     #[tokio::test]
     async fn test_health_check_ok() {
         let dir = test_dir("health_check_ok").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
         assert!(client.health_check().is_ok());
         cleanup(&dir).await;
     }
@@ -1510,7 +1747,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_and_load_skill() {
         let dir = test_dir("save_load_skill").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
 
         let mut asset = CognitiveAsset::Skill(SkillAsset {
             header: AssetHeader {
@@ -1550,7 +1787,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_increments_version() {
         let dir = test_dir("save_increments_version").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
 
         let mut asset = CognitiveAsset::Skill(SkillAsset {
             header: AssetHeader {
@@ -1586,7 +1823,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_by_tags() {
         let dir = test_dir("search_tags").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
 
         // Save a prompt with tag "math".
         let mut asset = CognitiveAsset::Prompt(crate::types::agent::PromptAsset::new(
@@ -1640,7 +1877,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_nonexistent_asset_returns_error() {
         let dir = test_dir("load_nonexistent").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
 
         let result = client.load_asset("prompt", "nonexistent").await;
         assert!(result.is_err());
@@ -1653,7 +1890,7 @@ mod tests {
     #[tokio::test]
     async fn test_save_and_load_prompt() {
         let dir = test_dir("save_load_prompt").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
 
         let mut prompt = crate::types::agent::PromptAsset::new(
             "orch-fitting",
@@ -1685,7 +1922,7 @@ mod tests {
     #[tokio::test]
     async fn test_search_prompts() {
         let dir = test_dir("search_prompts").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
 
         // Save two prompts with overlapping tags.
         let mut p1 = crate::types::agent::PromptAsset::new(
@@ -1734,7 +1971,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_prompt_with_missing_optional_fields() {
         let dir = test_dir("prompt_missing_fields").await;
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
 
         // 手写 YAML：只含核心字段，省略 agent_target/usage_count/success_rate。
         let yaml = r#"

@@ -1,17 +1,17 @@
-//! ContractEngine — 验证契约机械执行器（V33 归藏本体论重构）。
+//! SkillEngine — 验证 Skill 机械执行器（V43 归藏 Skills 子树对齐 BCP §10.1-10.2）。
 //!
-//! 验证三权分立（BCP §6.6/§8.22）的 L0 机械验证 + L1 契约验证层：
+//! 验证三权分立（BCP §6.6/§8.22）的 L0 机械验证 + L1 Skill 验证层：
 //!
 //! - **L0 机械验证**：file_exists / schema_valid / reference_resolves /
 //!   command_succeeds 类检查项——确定性执行，零 LLM。
-//! - **L1 契约验证**：加载 `verifications/` 结构化验证契约，逐条机械执行
-//!   checks，产出 [`ContractReport`]。
+//! - **L1 Skill 验证**：加载 `yin/skills/verify/` + `yin/skills/converge/` 结构化 Skill，
+//!   逐条机械执行 checks，产出 [`SkillReport`]。
 //!
-//! **确定性保证**：同一契约 + 同一产出 → 同一结果（与 LLM 无关）。
+//! **确定性保证**：同一 Skill + 同一产出 → 同一结果（与 LLM 无关）。
 //! **裁决优先级**：任一 hard 机械项失败 → `passed = false`，CausalAgent
 //! 直接短路，LLM 不可翻案（LLM 的 PASS 不能覆盖机械 FAIL）。
 //!
-//! ContractEngine 是 Rust 内部函数（非 LLM 工具）——LLM 不可调用、不可绕过。
+//! SkillEngine 是 Rust 内部函数（非 LLM 工具）——LLM 不可调用、不可绕过。
 //!
 //! # 契约命令安全面（BCP §8.22 预埋）
 //!
@@ -21,10 +21,10 @@
 //! 不经过 shell（无元字符解释面）。
 
 use crate::infra::error::TaijiError;
-use crate::infra::knowledge::LiluoClient as GuizangClient;
+use crate::infra::knowledge::GuizangClient;
 use crate::types::agent::VerificationAsset;
 use crate::types::verification::{
-    CheckKind, CheckResult, CheckSeverity, CheckSpec, ContractReport,
+    CheckKind, CheckResult, CheckSeverity, CheckSpec, SkillReport,
 };
 use std::path::Path;
 use tokio::fs;
@@ -45,43 +45,51 @@ const COMMAND_TIMEOUT_SECS: u64 = 30;
 /// 单检查项输出截断上限（2KB）。
 const OUTPUT_TRUNCATE: usize = 2048;
 
-/// V33 ContractEngine — 验证契约机械执行器（unit struct，风格对齐
+/// V43 SkillEngine — 验证 Skill 机械执行器（unit struct，风格对齐
 /// [`crate::orchestration::constraint_engine::ConstraintEngine`]）。
-pub struct ContractEngine;
+pub struct SkillEngine;
 
-impl ContractEngine {
-    /// 加载 `verifications/` 全部契约资产。
+impl SkillEngine {
+    /// 加载 `yin/skills/verify/` 全部 Skill 资产（V43 BCP §10.1）。
     ///
-    /// MVP-1 直接全量加载（种子契约 <10 条，无性能问题）——不经过 MetaAgent
-    /// UCB 检索（UCB 未实现，随 V32 归藏重构/MVP-2 接入，届时修订 BCP §8.22）。
+    /// MVP-1 直接全量加载（种子 Skill <10 条，无性能问题）。
     ///
     /// # Errors
     /// 目录级 I/O 失败上抛（无降级原则 — §8.20：归藏不可用是系统错误，
     /// 不静默吞掉）；单个契约文件损坏仅 warn 跳过（不影响其他契约执行）。
-    pub async fn load_contracts(
+    pub async fn load_skills(
         guizang: &GuizangClient,
     ) -> Result<Vec<VerificationAsset>, TaijiError> {
         guizang.load_all_verifications().await
     }
 
-    /// 机械执行全部契约的检查项，产出 [`ContractReport`]。
+    /// V43: 按 SkillCategory 加载全部 active Skill（BCP §10.1）。
+    /// 委托给 [`GuizangClient::load_skills_by_category`]。
+    pub async fn load_skills_by_category(
+        guizang: &GuizangClient,
+        category: crate::types::verification::SkillCategory,
+    ) -> Result<Vec<VerificationAsset>, TaijiError> {
+        guizang.load_skills_by_category(category).await
+    }
+
+    /// 机械执行全部 Skill 的检查项，产出 [`SkillReport`]。
     ///
     /// - 仅执行机械类检查项（FileExists / SchemaValid / ReferenceResolves /
     ///   CommandSucceeds）；`LlmJudgement` 项跳过（由调用方 CausalAgent
     ///   收集注入 LLM 裁决 — §6.6 L2）。
     /// - 任一 hard 机械项失败 → `passed = false`。
-    /// - 串行执行（MVP-1 契约数量少）；单检查项内部失败（如文件读失败）
+    /// - 串行执行（MVP-1 Skill 数量少）；单检查项内部失败（如文件读失败）
     ///   记为 failed 的 CheckResult，不整体报错——机械判定失败是结果而非
     ///   系统错误。
     pub async fn run_checks(
-        verifications: &[VerificationAsset],
+        skills: &[VerificationAsset],
         task_dir: &Path,
-    ) -> ContractReport {
+    ) -> SkillReport {
         let mut results = Vec::new();
         let mut hard_failed = false;
 
-        for verification in verifications {
-            for check in &verification.checks {
+        for skill in skills {
+            for check in &skill.checks {
                 if check.kind == CheckKind::LlmJudgement {
                     // L2 项不参与机械裁决 — 由 CausalAgent 收集（§6.6）
                     continue;
@@ -107,7 +115,7 @@ impl ContractEngine {
             )
         };
 
-        ContractReport {
+        SkillReport {
             passed,
             results,
             summary,
@@ -645,7 +653,7 @@ mod tests {
 
     async fn unique_tmp_dir(tag: &str) -> std::path::PathBuf {
         let n = TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("taiji_contract_engine_{tag}_{}_{n}", std::process::id()))
+        std::env::temp_dir().join(format!("taiji_skill_engine_{tag}_{}_{n}", std::process::id()))
     }
 
     fn check(id: &str, kind: CheckKind, target: &str, params: serde_json::Value, severity: CheckSeverity) -> CheckSpec {
@@ -667,16 +675,16 @@ mod tests {
         fs::write(dir.join("deliverables").join("report.md"), "# report").await.unwrap();
 
         let spec = check("c1", CheckKind::FileExists, "deliverables/report.md", json!({}), CheckSeverity::Hard);
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(r.passed, "{}", r.detail);
 
         let spec = check("c2", CheckKind::FileExists, "deliverables/missing.md", json!({}), CheckSeverity::Hard);
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(!r.passed);
 
         // 路径穿越拒绝
         let spec = check("c3", CheckKind::FileExists, "../etc/passwd", json!({}), CheckSeverity::Hard);
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(!r.passed);
         assert!(r.detail.contains("traversal"));
 
@@ -690,11 +698,11 @@ mod tests {
         fs::write(dir.join("deliverables").join("handoff.md"), "# h").await.unwrap();
 
         let spec = check("c1", CheckKind::FileExists, "deliverables/*.md", json!({}), CheckSeverity::Hard);
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(r.passed, "{}", r.detail);
 
         let spec = check("c2", CheckKind::FileExists, "deliverables/*.json", json!({}), CheckSeverity::Hard);
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(!r.passed);
 
         fs::remove_dir_all(&dir).await.ok();
@@ -715,7 +723,7 @@ mod tests {
             json!({"format": "json", "required_fields": ["id", "description"]}),
             CheckSeverity::Hard,
         );
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(r.passed, "{}", r.detail);
 
         // 缺失字段
@@ -726,7 +734,7 @@ mod tests {
             json!({"format": "json", "required_fields": ["status"]}),
             CheckSeverity::Hard,
         );
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(!r.passed);
         assert!(r.detail.contains("status"));
 
@@ -738,13 +746,13 @@ mod tests {
             json!({"format": "yaml", "required_fields": ["a.b"]}),
             CheckSeverity::Hard,
         );
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(r.passed, "{}", r.detail);
 
         // 非法 JSON
         fs::write(dir.join("bad.json"), "not json {").await.unwrap();
         let spec = check("c4", CheckKind::SchemaValid, "bad.json", json!({"format": "json"}), CheckSeverity::Hard);
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(!r.passed);
 
         fs::remove_dir_all(&dir).await.ok();
@@ -769,7 +777,7 @@ mod tests {
             json!({"field": "output_refs"}),
             CheckSeverity::Hard,
         );
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(r.passed, "{}", r.detail);
 
         // 引用不存在的文件
@@ -786,7 +794,7 @@ mod tests {
             json!({"field": "output_refs"}),
             CheckSeverity::Hard,
         );
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(!r.passed);
         assert!(r.detail.contains("ghost.md"));
 
@@ -796,14 +804,14 @@ mod tests {
     #[tokio::test]
     async fn command_allowlist_and_execution() {
         // 白名单判定（纯函数）
-        assert!(ContractEngine::is_command_allowed("cargo check"));
-        assert!(ContractEngine::is_command_allowed("cargo test --no-run"));
-        assert!(ContractEngine::is_command_allowed("  rustc --emit=metadata  "));
-        assert!(!ContractEngine::is_command_allowed("rm -rf /"));
-        assert!(!ContractEngine::is_command_allowed("cargo check && rm -rf /"));
-        assert!(!ContractEngine::is_command_allowed("cargo check; echo x"));
-        assert!(!ContractEngine::is_command_allowed(""));
-        assert!(!ContractEngine::is_command_allowed("python3 -c 'import os'"));
+        assert!(SkillEngine::is_command_allowed("cargo check"));
+        assert!(SkillEngine::is_command_allowed("cargo test --no-run"));
+        assert!(SkillEngine::is_command_allowed("  rustc --emit=metadata  "));
+        assert!(!SkillEngine::is_command_allowed("rm -rf /"));
+        assert!(!SkillEngine::is_command_allowed("cargo check && rm -rf /"));
+        assert!(!SkillEngine::is_command_allowed("cargo check; echo x"));
+        assert!(!SkillEngine::is_command_allowed(""));
+        assert!(!SkillEngine::is_command_allowed("python3 -c 'import os'"));
 
         // 白名单外的命令执行被拒（不实际执行）
         let dir = unique_tmp_dir("cmd").await;
@@ -815,7 +823,7 @@ mod tests {
             json!({"command": "rm -rf /tmp/evil"}),
             CheckSeverity::Hard,
         );
-        let r = ContractEngine::run_check(&spec, &dir).await;
+        let r = SkillEngine::run_check(&spec, &dir).await;
         assert!(!r.passed);
         assert!(r.detail.contains("allowlist"));
 
@@ -841,7 +849,7 @@ mod tests {
             vec!["general".into()],
         );
 
-        let report = ContractEngine::run_checks(&[v], &dir).await;
+        let report = SkillEngine::run_checks(&[v], &dir).await;
         assert!(!report.passed, "hard fail must short-circuit");
         // llm_judgement 项不进入机械结果
         assert_eq!(report.results.len(), 2);
@@ -857,11 +865,11 @@ mod tests {
             vec![check("s1", CheckKind::FileExists, "deliverables/ghost.md", json!({}), CheckSeverity::Soft)],
             vec!["general".into()],
         );
-        let report2 = ContractEngine::run_checks(&[v2], &dir).await;
+        let report2 = SkillEngine::run_checks(&[v2], &dir).await;
         assert!(report2.passed, "soft failures must not short-circuit: {}", report2.summary);
 
         // 空契约：passed=true，summary 注明无机械检查
-        let report3 = ContractEngine::run_checks(&[], &dir).await;
+        let report3 = SkillEngine::run_checks(&[], &dir).await;
         assert!(report3.passed);
         assert!(report3.summary.contains("no mechanical checks"));
 
@@ -922,7 +930,7 @@ mod trace_consistency_tests {
         )
         .await
         .unwrap();
-        let (passed, detail) = ContractEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir).await;
+        let (passed, detail) = SkillEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir).await;
         assert!(!passed, "fabricated webfetch evidence must fail");
         assert!(detail.contains("webfetch"), "detail must name the missing tool: {detail}");
         assert!(detail.contains("UNVERIFIED"), "detail must mark unverified");
@@ -940,7 +948,7 @@ mod trace_consistency_tests {
         )
         .await
         .unwrap();
-        let (passed, detail) = ContractEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir).await;
+        let (passed, detail) = SkillEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir).await;
         assert!(passed, "real evidence must pass: {detail}");
         assert!(detail.contains("evidence refs: 1"), "detail must count refs: {detail}");
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -957,7 +965,7 @@ mod trace_consistency_tests {
         )
         .await
         .unwrap();
-        let (passed, detail) = ContractEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir).await;
+        let (passed, detail) = SkillEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir).await;
         assert!(passed, "speculation markers are legal: {detail}");
         assert!(detail.contains("speculation markers: 2"), "count in detail: {detail}");
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -974,13 +982,13 @@ mod trace_consistency_tests {
         )
         .await
         .unwrap();
-        let (passed, detail) = ContractEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir).await;
+        let (passed, detail) = SkillEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir).await;
         assert!(passed, "no markers must pass: {detail}");
         assert!(detail.contains("evidence refs: 0"));
         // 无产出文件也通过（目录为空 = 无断言可查）
         let dir2 = make_task_dir().await;
         write_trace(&dir2, &[]).await;
-        let (passed2, _) = ContractEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir2).await;
+        let (passed2, _) = SkillEngine::check_trace_consistency(&spec("deliverables/*.md"), &dir2).await;
         assert!(passed2, "empty deliverables must pass");
         let _ = tokio::fs::remove_dir_all(&dir).await;
         let _ = tokio::fs::remove_dir_all(&dir2).await;
@@ -1019,7 +1027,7 @@ mod trace_consistency_tests {
         )
         .await
         .unwrap();
-        let report = ContractEngine::run_checks(&[v.clone()], &dir).await;
+        let report = SkillEngine::run_checks(&[v.clone()], &dir).await;
         // soft 失败不短路（§6.6：soft 注入 LLM prompt 供参考）——passed 仍 true，
         // 但检查项结果记录失败（供 verify prompt 与 DMN 回传消费）
         assert!(report.passed, "soft failure does not short-circuit");
@@ -1032,7 +1040,7 @@ mod trace_consistency_tests {
 
         // 真实证据场景：通过
         write_trace(&dir, &["webfetch"]).await;
-        let report = ContractEngine::run_checks(&[v.clone()], &dir).await;
+        let report = SkillEngine::run_checks(&[v.clone()], &dir).await;
         assert!(report.passed);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

@@ -895,7 +895,7 @@ impl CognitionEvolver {
                 if check.kind == CheckKind::LlmJudgement {
                     check.params["strictness"] = serde_json::json!("strict");
                     // 变体 check id 重命名：`{base}@{variant}` —— 回传精确落位变体，
-                    // 原资产统计零污染（Verify 加载变体时 ContractReport 天然携带全 id）
+                    // 原资产统计零污染（Verify 加载变体时 SkillReport 天然携带全 id）
                     check.id = format!("{}@{}", check.id, variant.id);
                 }
             }

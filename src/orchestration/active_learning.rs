@@ -5,7 +5,7 @@
 //! 2. 生成**模板化探索任务**（静态模板，零 LLM 调用 —— 纯符号层承诺 §6.4）；
 //! 3. 写 `experiments/{ts}.json` 队列；
 //! 4. 执行器（`spawn_runner`，main.rs 独立 spawn）消费队列：RecursiveRunner
-//!    以 Execution 最小预算执行 → 对任务产出跑变体契约（ContractEngine 机械检查，
+//!    以 Execution 最小预算执行 → 对任务产出跑变体契约（SkillEngine 机械检查，
 //!    零 LLM 裁决 —— 探索裁决符号化，与三权分立 §6.6 一致）→ CheckResult 入队
 //!    pending（enqueue_dmn_pending 幂等）→ 删除 experiments 文件。
 //!
@@ -16,7 +16,7 @@ use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
 use crate::infra::knowledge::LiluoClient;
 use crate::infra::trace::save_json_atomic;
-use crate::orchestration::contract_engine::ContractEngine;
+use crate::orchestration::skill_engine::SkillEngine;
 use crate::orchestration::runner::RecursiveRunner;
 use crate::types::agent::VerificationAsset;
 use crate::types::verification::RewardWeights;
@@ -278,7 +278,7 @@ async fn run_experiment_queue(
                 // 对产物跑变体契约（机械检查，零 LLM 裁决 —— §6.6 L0/L1）
                 let task_dir = data_root.join("tasks").join(&result.task_id);
                 if let Some(asset) = liluo.load_verification(asset_id).await? {
-                    let report = ContractEngine::run_checks(&[asset], &task_dir).await;
+                    let report = SkillEngine::run_checks(&[asset], &task_dir).await;
                     let checks = report.results;
                     // CheckResult 入队 pending（幂等覆盖写；同任务重复探索覆盖不重复学习）。
                     // V36：携带分区键（liluo.partition_key）——回传落到变体所在分区。

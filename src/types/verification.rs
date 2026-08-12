@@ -117,12 +117,30 @@ pub struct ConstraintViolation {
 }
 
 // ---------------------------------------------------------------------------
+// V43 Skill 类别（BCP §10.1-10.2 归藏 Skills 子树）
+// ---------------------------------------------------------------------------
+
+/// Skill 四类别——与归藏目录 yang/skills/{orch,exec}/ + yin/skills/{verify,converge}/ 对应。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillCategory {
+    /// 编排 Skill（yang/skills/orch/）——递归拆解、子任务派发。
+    Orch,
+    /// 执行 Skill（yang/skills/exec/）——write/bash/search/webfetch/read。
+    Exec,
+    /// 验证 Skill（yin/skills/verify/）——exec 的阴面对偶。
+    Verify,
+    /// 收敛 Skill（yin/skills/converge/）——orch 的阴面对偶。
+    Converge,
+}
+
+// ---------------------------------------------------------------------------
 // V33 验证契约类型（归藏本体论重构 — §6.0/§6.6/§8.22）
 // ---------------------------------------------------------------------------
 
 /// 验证契约检查项类型（CheckSpec.kind）。
 ///
-/// 前四种为**机械可判定断言**（L0/L1，ContractEngine 执行，LLM 不可翻案）；
+/// 前四种为**机械可判定断言**（L0/L1，SkillEngine 执行，LLM 不可翻案）；
 /// `LlmJudgement` 是唯一留给 LLM 的检查项类型（L2 兜底，§6.6）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -295,15 +313,18 @@ pub struct CheckResult {
     pub quality: f64,
 }
 
-/// ContractEngine 输出（L0 机械 + L1 契约，§8.22）。
+/// SkillEngine 输出（L0 机械 + L1 契约，§8.22）。
 /// 仅含机械检查项结果；llm_judgement 项由调用方（CausalAgent）收集。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ContractReport {
+pub struct SkillReport {
     /// 任一 hard 机械项失败 → false。
     pub passed: bool,
     pub results: Vec<CheckResult>,
     pub summary: String,
 }
+
+/// 兼容别名——过渡期保留，待全仓引用迁移后删除。
+pub type ContractReport = SkillReport;
 
 #[cfg(test)]
 mod tests {

@@ -208,7 +208,7 @@ impl FittingAgentBuilder {
             max_depth,
         )?);
         // V34/MVP-4 断言分级教学（BCP §8.22）：证据断言必须附 [证据: 工具名]（引用
-        // 真实工具调用）、推测必须标 (推测)、禁止编造证据引用——与 ContractEngine
+        // 真实工具调用）、推测必须标 (推测)、禁止编造证据引用——与 SkillEngine
         // TraceConsistency 检查构成双保险：教学层降低违规频率，检查层独立判定。
         system_prompt.push_str(&build_assertion_discipline_prompt());
 
@@ -547,7 +547,7 @@ fn build_budget_discipline(limits: crate::infra::config::ContextLimits) -> Strin
 
 /// V34/MVP-4 断言分级教学段（BCP §8.22）：让 LLM 感知产出断言必须与执行
 /// 轨迹绑定——证据断言附 `[证据: 工具名]`（引用真实工具调用）、推测断言
-/// 标 `(推测)`、禁止编造证据引用。教学层与 ContractEngine TraceConsistency
+/// 标 `(推测)`、禁止编造证据引用。教学层与 SkillEngine TraceConsistency
 /// 检查构成双保险：教学层降低违规频率，检查层独立判定（LLM 不遵循时
 /// 检查退化为空转——推测计数作为质量信号进 DMN 演化）。
 fn build_assertion_discipline_prompt() -> String {
@@ -816,73 +816,26 @@ fn build_orchestration_prompt(
 
     build_prompt_common(prompt, meta_ctx, task_dir, context_dir);
 
-    // Orchestration-specific instructions with plant-growth guidance
     prompt.push_str(
-        "## Instructions\n\
-         你处于**编排模式 (Orchestration)**。你的职责是把复杂任务拆解为子任务\n\
-         （`recursive_decompose`），汇聚子任务结果后综合产出。\n\n\
-         ### 子任务模式分配指南 (Subtask Mode Assignment)\n\
-         调用 `recursive_decompose` 时，为每个子任务按**任务难易程度**与\n\
-         **递归层数规则**设置 `mode`：\n\n\
-         - `mode: \"Execution\"` — 子任务原子、边界清晰、可用 L1 工具直接完成：\n\
-           ✓ 不再需要进一步拆解\n\
-           ✓ 一个聚焦的执行者即可产出完整结果\n\n\
-         - `mode: \"Orchestration\"` — 子任务仍复杂、跨多个独立维度：\n\
-           ✓ 需要分阶段推进（步骤 A → 验证 → 基于 A 的步骤 B）\n\
-           ✓ 单次执行无法覆盖，需要继续拆解\n\n\
-         ⚠️ 深度规则：当 depth+1 >= max_depth 时，子任务模式会被工具**强制**\n\
-         覆盖为 Execution（叶节点无法再拆解），计划时需考虑。\n\n\
-         ### 先拆解，后收集（最高优先级，V32）\n\
-         你的上下文是**一次性预算**，不是无限仓库——信息收集是**子任务的职责**，\n\
-         不是你的职责。拆解前禁止大规模读取：\n\
-         1. 🚫 **不读全文**：不要 read 源码文件/文档全文（每个 read 都可能消耗数万\n\
-            token）。用 search 一次性定位关键词，只看命中片段。\n\
-         2. 🚫 **不收集全局**：不需要理解整个项目的每个文件才能拆解——拆解\n\
-            依据任务描述 + 文件清单 + search 命中即可。\n\
-         3. ✅ **立即拆解**：读完任务描述后**第一步就调用 `recursive_decompose`**，\n\
-            把每个子任务的 description 写清楚（含目标文件路径与要求）。子任务\n\
-            会在自己的执行中读取自己需要的文件。\n\
-         4. 🔁 子任务失败汇报回来时，基于交接产物再指导（rerun_of）——不要亲自\n\
-            去读失败子任务的文件来“补救”。\n\
-         **预算红线**：若已消耗超过 60k token 仍未拆解，立即停止收集，要么拆解\n\
-         要么写交接文件返回——继续收集必然硬截止失败。\n\n\
-         ### 子任务协作原则（V30 分封制：能看不能写）\n\
-         1. 🏰 兄弟封地自治 — 子任务之间**不能互相写入**（write 被限制在本任务\n\
-            目录内），但**可以读取**兄弟贡品（会盟：身份段会列出兄弟的\n\
-            deliverables 陈列室目录，需要时用 read 工具查看）。\n\
-         2. 🔀 拆解应弱耦合 — 优先拆解为可并行的独立子任务；若子任务确需\n\
-            兄弟产出才能完成（强依赖），拆解时标注依赖关系，由父层在\n\
-            下一轮拆解时协调注入（兄弟间不直连通信）。\n\
-         3. 📮 通信经父层 — 子任务间的信息往来统一由父层汇总（聚合 → 收敛 →\n\
-            下一轮注入），子任务不应尝试向兄弟写入反馈。\n\n\
-         ### 失败汇报与再指导 (V31 收敛树)\n\
-         `recursive_decompose` 返回的 `child_results` 可能含 **Diverged 失败条目**\n\
-         （`failure_reason`/`failure_kind` + handoff 交接产物路径）——子任务失败\n\
-         **不会中断分解**，失败原因与交接产物已向上汇报。收到失败汇报时：\n\
-         1. 🔁 可恢复失败（llm_failed / io / context_overflow 已写交接产物）→\n\
-            再次调用 `recursive_decompose` 并给失败子任务设置 `rerun_of`（索引），\n\
-            description 中注入上次失败原因与修正指导；\n\
-         2. 📉 不可恢复 / 预算已尽 → 接受残缺产出综合（在最终报告中说明覆盖范围）；\n\
-         3. 🛑 全部子任务失败且无法进展 → 综合阶段明确上报失败原因。\n\n\
-         ### 关键原则 (Plant Growth Principle)\n\
-         1. 🌱 自然分叉 — 只在真正需要处拆解。任务树应像植物：主干 → 分支 → 叶。\n\
-         2. ⚖️ 拿不准就 Execution — 过度拆解浪费轮次。能直接完成的子任务\n\
-            直接设为 Execution；宁可先直接执行再修补，不要过度拆解。\n\
-         3. 📊 每个节点都要产出价值 — 编排节点产出综合报告；执行节点产出\n\
-            具体产物。不允许空壳节点。\n\
-         4. 📏 规模感知 (Scale-Aware): 任务规模过大（涉及大量文件/大量行数）时，\n\
-            优先按模块分批拆解执行；若单轮预算（轮次/超时）内无法逐一完成\n\
-            全部内容，在最终报告/交付物中明确说明已覆盖范围与未覆盖部分，\n\
-            不要无限重试。\n\
-         5. ✅ 用 `causal_verify` 检查中间结果与约束。全部子任务完成后，\n\
-            提供综合摘要（阴·收敛将据此判决）。\n\n\
-         ### 产物路径 (Deliverable Paths)\n\
-         Write all output files to the deliverables directory using their\n\
-         **absolute paths**.  After execution, your deliverables will be\n\
-         automatically collected from the directory.  If you used\n\
-         `recursive_decompose`, your subtasks' deliverables will be available\n\
-         in `parent_deliverables` for the synthesis phase.\n\n\
-         Follow all constraints strictly — hard violations cause immediate failure.\n"
+        "## 编排职责\n\
+         你处于编排模式——把复杂任务拆解为子任务（`recursive_decompose`），\n\
+         汇聚子任务结果后综合产出。\n\n\
+         ### 拆解 (Decomposition)\n\
+         分析任务，将其分解为 2-4 个可并行的子任务，通过 `recursive_decompose`\n\
+         派发。子任务 description 必须清晰、自包含、含具体目标与产出要求。\n\
+         为每个子任务设置 mode：原子/单步 → \"Execution\"，仍需拆解 → \"Orchestration\"。\n\
+         叶节点（depth+1 >= max_depth）会被强制覆盖为 Execution。\n\n\
+         ### 综合 (Synthesis)\n\
+         收集子任务结果（含可能的失败条目），产出综合报告或聚合产物。\n\
+         失败子任务的交接产物（handoff.md）可读取后针对性再指导（rerun_of）。\n\
+         综合完成后用 `causal_verify` 自检。\n\n\
+         ### 协作\n\
+         兄弟子任务封地自治——不能互相写入，但可读取兄弟 deliverables 目录。\n\
+         拆解优先弱耦合；强依赖通过父层下一轮协调注入。\n\
+         通信经父层汇总，子任务间不直连。\n\n\
+         ### 产物\n\
+         所有产物写入 deliverables 目录（绝对路径）。编排节点核心产出为\n\
+         综合报告——覆盖范围、子任务结果摘要、未完成项与原因。\n"
     );
 }
 
@@ -899,30 +852,16 @@ fn build_execution_prompt(
 
     build_prompt_common(prompt, meta_ctx, task_dir, context_dir);
 
-    // Execution-specific instructions
     prompt.push_str(
-        "## Instructions\n\
-         你处于**执行模式 (Execution)**。你的职责是直接使用 L1 工具完成\n\
-         当前任务，产出完整、可验证的产物。你**没有** `recursive_decompose`\n\
-         工具——当前任务已由元 Agent 判定为原子/单步任务，专注直接执行。\n\n\
-         ### 执行原则 (Execution-First)\n\
-         1. 🎯 直接用可用工具完成任务：读文件、写代码、跑命令，把工作做完。\n\n\
-         2. 🎯 在单次执行中完整覆盖任务；不要尝试拆解（工具不存在）。\n\n\
-         3. ✅ 用 `causal_verify` 自检输出后再收尾，检查交付物满足要求。\n\n\
-         4. 📦 在 deliverables 目录产出具体产物，输出应完整、可直接使用。\n\n\
-         5. 📏 规模感知 (Scale-Aware): 若任务规模超出单轮预算（轮次/超时），\n\
-            在最终报告/交付物中明确说明已覆盖范围与未覆盖部分，不要无限重试。\n\n\
-         遵循所有约束——硬约束违反将导致立即失败。\n"
+        "## 执行职责\n\
+         你处于执行模式——任务为原子/单步任务，直接用 L1 工具完成。\n\
+         你**没有** `recursive_decompose` 工具，专注直接执行。\n\n\
+         ### 核心要求\n\
+         1. 使用 read / write / bash / search / webfetch 直接完成任务。\n\
+         2. 在单次执行中完整覆盖任务全部要求，不遗漏维度。\n\
+         3. 产出后用 `causal_verify` 自检。\n\
+         4. 在 deliverables 目录产出具体产物（绝对路径），输出完整、可直接使用。\n"
     );
-
-    // Deliverable path instruction (uses runtime path)
-    let deliv_dir_display = task_dir.join("deliverables").display().to_string();
-    prompt.push_str(&format!(
-        "\n### 产物路径 (Deliverable Paths)\n\
-         All files written to the deliverables directory will be automatically\n\
-         collected by absolute path.  Ensure you use the full absolute path when\n\
-         calling the `write` tool, e.g. `{deliv_dir_display}/report.md`.\n"
-    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -940,7 +879,7 @@ mod tests {
     use crate::hooks::safety::SafetyHook;
     use crate::infra::config::{LlmConfig, SafetyConfig, TaijiConfig};
     use crate::infra::provider::ProviderRegistry;
-    use crate::infra::knowledge::LiluoClient;
+    use crate::infra::knowledge::GuizangClient;
     use crate::orchestration::constraint_engine::ConstraintEngine;
     use crate::orchestration::trigger_engine::SkillTriggerEngine;
     use crate::orchestration::worker_pool::WorkerPool;
@@ -976,17 +915,17 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let liluo = Arc::new(
-            LiluoClient::new(&tmp_dir)
+        let guizang = Arc::new(
+            GuizangClient::new(&tmp_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let providers = Arc::new(
             ProviderRegistry::new(&config).expect("ProviderRegistry"),
         );
 
         let factory = Arc::new(AgentFactory::new(
-            liluo,
+            guizang,
             providers,
             config,
             Arc::new(SafetyHook::new(&SafetyConfig::default())),
@@ -1043,12 +982,12 @@ mod tests {
         assert!(prompt.contains("Refactor the logging module"));
         assert!(prompt.contains("recursive_decompose"));
         assert!(prompt.contains("产出目录"));
-        // V27 配对：编排模板教子任务模式分配（深度规则 + 难度）。
-        assert!(prompt.contains("子任务模式分配指南"));
+        // 编排模板含拆解 + mode 设置指令。
+        assert!(prompt.contains("设置 mode"));
         assert!(prompt.contains("max_depth"));
-        // V26.3 E4：规模感知引导保留。
-        assert!(prompt.contains("规模感知"));
-        assert!(prompt.contains("未覆盖"));
+        // 综合 + 协作指令。
+        assert!(prompt.contains("综合"));
+        assert!(prompt.contains("封地自治"));
     }
 
     #[test]
@@ -1064,12 +1003,12 @@ mod tests {
         assert!(prompt.contains("执行模式"));
         assert!(prompt.contains("Refactor the logging module"));
         assert!(prompt.contains("产出目录"));
-        // V27 配对：执行模板明确无 recursive_decompose（不注册，LLM 不可见）。
+        // 执行模板明确无 recursive_decompose。
         assert!(prompt.contains("recursive_decompose"));
         assert!(prompt.contains("没有"));
-        assert!(prompt.contains("直接使用 L1 工具"));
-        // V26.3 E4：规模感知引导保留。
-        assert!(prompt.contains("规模感知"));
+        assert!(prompt.contains("直接用 L1 工具"));
+        // 执行模式含核心工具 + 自检指令。
+        assert!(prompt.contains("causal_verify"));
     }
 
     #[test]
@@ -1081,9 +1020,9 @@ mod tests {
             None,
             AgentMode::Orchestration,
         );
-        // Should still have the role header and instructions.
+        // 空上下文降级为编排模式 Base 模板。
         assert!(prompt.contains("你是概率拟合专家"));
-        assert!(prompt.contains("Instructions"));
+        assert!(prompt.contains("编排职责"));
         assert!(prompt.contains("产出目录"));
     }
 
