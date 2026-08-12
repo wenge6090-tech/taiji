@@ -1,0 +1,34 @@
+type: skill
+id: reference-resolves
+name: 交接引用完整
+description: deliverables/handoff.md 的 output_refs 必须全部解析为真实文件。
+tags:
+- general
+- seed
+examples: []
+input_modes:
+- text
+output_modes:
+- text
+category: verify
+dual: search
+implementations:
+- kind: reference_resolves
+  target: deliverables/handoff.md
+  params:
+    field: output_refs
+  severity: soft
+  pass_condition: output_refs 内每个路径均存在（相对路径按任务目录解析）
+agent_target: CausalAgent
+confidence: 0.7
+version: 1
+status: active
+stats:
+  n: 0
+  pass_count: 0
+  cost_sum: 0
+  rounds_sum: 0
+  quality_sum: 0.0
+env_tags: []
+parent_id: null
+variant_of: null

@@ -1,0 +1,39 @@
+type: skill
+id: schema-valid
+name: 任务册合法
+description: meta.json 必须存在且字段完整（runner 写入，保底防线）。
+tags:
+- general
+- seed
+examples: []
+input_modes:
+- text
+output_modes:
+- text
+category: verify
+dual: read
+implementations:
+- kind: schema_valid
+  target: meta.json
+  params:
+    format: json
+    required_fields:
+    - id
+    - description
+    - depth
+    - status
+  severity: hard
+  pass_condition: meta.json 必须可解析且包含 id/description/depth/status 字段
+agent_target: CausalAgent
+confidence: 0.8
+version: 1
+status: active
+stats:
+  n: 0
+  pass_count: 0
+  cost_sum: 0
+  rounds_sum: 0
+  quality_sum: 0.0
+env_tags: []
+parent_id: null
+variant_of: null

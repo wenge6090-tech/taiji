@@ -1,0 +1,33 @@
+type: skill
+id: semantic-coherence
+name: 语义一致性裁决
+description: 综合产出与 deliverables 文件内容必须一致，不得虚构产物（LLM 裁决项）。
+tags:
+- general
+- seed
+examples: []
+input_modes:
+- text
+output_modes:
+- text
+category: verify
+dual: causal-verify
+implementations:
+- kind: llm_judgement
+  target: deliverables
+  params: {}
+  severity: hard
+  pass_condition: 综合报告/任务输出必须与 deliverables/ 文件内容一致；引用的每个产物必须真实存在
+agent_target: CausalAgent
+confidence: 0.7
+version: 1
+status: active
+stats:
+  n: 0
+  pass_count: 0
+  cost_sum: 0
+  rounds_sum: 0
+  quality_sum: 0.0
+env_tags: []
+parent_id: null
+variant_of: null

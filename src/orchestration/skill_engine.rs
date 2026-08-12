@@ -152,6 +152,19 @@ impl SkillEngine {
                     // L2 项 + 阳面执行体不参与机械裁决。
                     continue;
                 }
+                // 元层 command-succeeds 默认 command 为空——跳过（避免 soft-fail 噪声）。
+                // 资产层覆盖 params.command 后才会机械执行。
+                if impl_.kind == SkillKind::CommandSucceeds {
+                    let cmd = impl_
+                        .params
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if cmd.is_empty() {
+                        continue;
+                    }
+                }
                 let spec = impl_to_check_spec(&skill.id, idx, impl_);
                 let result = Self::run_check(&spec, task_dir).await;
                 if !result.passed && spec.severity == CheckSeverity::Hard {

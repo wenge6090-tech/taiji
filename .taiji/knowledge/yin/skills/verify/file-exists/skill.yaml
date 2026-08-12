@@ -1,0 +1,33 @@
+type: skill
+id: file-exists
+name: 交付物存在性
+description: deliverables/ 必须至少有一个产物文件（执行事实是唯一记忆）。
+tags:
+- general
+- seed
+examples: []
+input_modes:
+- text
+output_modes:
+- text
+category: verify
+dual: write
+implementations:
+- kind: file_exists
+  target: deliverables/*
+  params: {}
+  severity: hard
+  pass_condition: deliverables/ 下至少存在一个文件（任意扩展名）
+agent_target: CausalAgent
+confidence: 0.8
+version: 1
+status: active
+stats:
+  n: 0
+  pass_count: 0
+  cost_sum: 0
+  rounds_sum: 0
+  quality_sum: 0.0
+env_tags: []
+parent_id: null
+variant_of: null

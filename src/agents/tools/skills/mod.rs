@@ -229,11 +229,12 @@ impl Tool for SkillTool {
     }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        // V45 双通道协议（§8.14）：按 skill 的 inputModes 生成 schema。
-        // - write/recursive-decompose ← 包含多参数扁平 schema（顶层 properties，原子双 JSON 转义）
-        // - bash/read/search/webfetch ← text 单参 input（纯字符串直传）
+        // V45 双通道协议（§8.14）：按 skill **name** 生成 schema（builtin 硬编码分支）。
+        // - write → 多参数扁平 schema（顶层 path/content，废除双 JSON 转义）
+        // - bash/read/search/webfetch → text 单参 input（纯字符串直传）
+        // 注：SkillRegistry 尚未接 catalog，故不读 SkillAsset.input_modes；
+        // 资产层覆盖 description/examples 进 ToolDefinition 属后续 P2。
         let (params, desc_suffix) = tool_schema(&self.skill.name);
-        let _desc = input_desc(&self.skill.name);
         ToolDefinition {
             name: self.skill.tool_name.clone(),
             description: format!(
@@ -350,7 +351,7 @@ fn input_desc(skill_name: &str) -> &'static str {
     match skill_name {
         "bash" => "Shell command. 可传纯字符串命令（如 \"ls -la\"），或 JSON 字符串对象（如 '{\"command\": \"ls -la\"}'，可附 timeout/workdir）。",
         "read" => "File path. 可传纯字符串路径（如 \"src/lib.rs\"），或 JSON 字符串对象（如 '{\"path\": \"src/lib.rs\"}'，可附 offset/limit）。",
-        "write" => "必须传 JSON 字符串对象（如 '{\"path\": \"out.md\", \"content\": \"hello\"}'），包含 path 与 content 两个键。",
+        "write" => "扁平 JSON：直接传 {\"path\": \"out.md\", \"content\": \"hello\"} 两个顶层键（勿再包 input 字符串）。",
         "search" => "Search query. 可传纯字符串（如 \"fn main\"），或 JSON 字符串对象（如 '{\"query\": \"fn main\"}'，可附 path/limit）。",
         "webfetch" => "URL. 可传纯字符串 URL（如 \"https://example.com\"），或 JSON 字符串对象（如 '{\"url\": \"https://example.com\"}'）。",
         _ => "Raw input arguments for the skill.",

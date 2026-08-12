@@ -306,6 +306,8 @@ impl FittingAgentBuilder {
         );
 
         // ── Register L1 Skills (V45 profile 路由 §8.14) ──
+        // SkillRegistry 硬编码 5 builtin（read/write/bash/search/webfetch）；
+        // recursive_decompose / causal_verify 是独立 rig Tool，不在 registry 内。
         let profile = crate::agents::factory::profile_for_model(
             self.meta_ctx.model.as_ref().unwrap_or(&crate::types::agent::ModelKey("default".into())),
         );
@@ -314,9 +316,9 @@ impl FittingAgentBuilder {
             .tools()
             .iter()
             .filter(|t| {
-                // Minimal profile 隐藏 recursive-decompose / webfetch（高代价）。
+                // Minimal：隐藏 webfetch（高代价联网）；read/write/bash/search 保留。
                 if matches!(profile, crate::infra::skill_catalog::ToolProfile::Minimal) {
-                    !matches!(t.name(), "recursive-decompose" | "webfetch")
+                    t.name() != "webfetch"
                 } else {
                     true
                 }
@@ -324,6 +326,7 @@ impl FittingAgentBuilder {
             .map(|t| Box::new(t.clone()) as Box<dyn ToolDyn>)
             .collect();
 
+        // recursive_decompose：仅 Orchestration + Full profile 注册（独立 Tool，非 registry）。
         let agent = if self.mode == AgentMode::Orchestration
             && !matches!(profile, crate::infra::skill_catalog::ToolProfile::Minimal)
         {

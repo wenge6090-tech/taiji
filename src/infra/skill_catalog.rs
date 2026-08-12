@@ -129,4 +129,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }
+
+    /// RAII 清临时目录（AGENTS §5）。
+    struct TmpGuard(std::path::PathBuf);
+    impl Drop for TmpGuard {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_load_skill_catalog_meta_only_when_empty_cleaned() {
+        // 复用已有断言逻辑 + 确保清理（原测试 tempfile_dir 未 Drop 清理）。
+        let dir = tempfile_dir();
+        let _g = TmpGuard(dir.clone());
+        let guizang = crate::infra::knowledge::GuizangClient::new(&dir).await.expect("guizang init");
+        let cat = load_skill_catalog(&guizang, SkillCategory::Verify, ToolProfile::Full)
+            .await
+            .expect("catalog load");
+        assert_eq!(cat.len(), 6);
+    }
 }

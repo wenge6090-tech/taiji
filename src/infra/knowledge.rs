@@ -125,9 +125,13 @@ impl ModelAsset {
     }
 }
 
-/// L1 Skill — registered tool skill with usage statistics.
+/// 旧 L1 工具注册资产（CognitiveAsset::Skill 历史形态）。
+///
+/// V45：与 [`crate::types::verification::SkillAsset`]（统一 Skill 双轨）**同名冲突已消除**——
+/// 本类型仅保留 serde/测试兼容；新代码一律用 `types::verification::SkillAsset` +
+/// [`GuizangClient::save_skill`]/[`GuizangClient::load_skill_assets`]。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SkillAsset {
+pub struct LegacyToolSkillAsset {
     #[serde(flatten)]
     pub header: AssetHeader,
     pub tool_name: String,
@@ -136,6 +140,10 @@ pub struct SkillAsset {
     pub success_count: u64,
     pub fail_count: u64,
 }
+
+/// 兼容别名——过渡期保留；新代码禁止使用。
+#[deprecated(note = "use types::verification::SkillAsset + GuizangClient::save_skill")]
+pub type SkillAsset = LegacyToolSkillAsset;
 
 // ---------------------------------------------------------------------------
 // Index data structure
@@ -848,61 +856,161 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
     Ok(prompts)
 }
 
+    /// 加载全部 active 验证契约（V45 双轨兼容）。
+    ///
+    /// 扫描顺序（同 id 首次优先）：
+    /// 1. 新文件夹 `yin/skills/verify/{id}/skill.yaml`（SkillAsset → VerificationAsset）
+    /// 2. 旧扁平 `yin/skills/verify/*.yaml`（**原样** VerificationAsset——保留 checks.stats / variant_of，
+    ///    DMN evolver 依赖这些字段，禁止经 SkillAsset 往返丢字段）
+    /// 3. 元层 verify 判据——**仅磁盘为空时**注入（冷启动保底；有磁盘资产时不混入，
+    ///    避免污染 evolver 计数。运行时 verify 仍走 catalog 元层∪资产层）
     pub async fn load_all_verifications(
         &self,
     ) -> Result<Vec<VerificationAsset>, TaijiError> {
         let mut verifications = Vec::new();
-        // 扫描 yin/skills/verify/（BCP §10.1）——verifications/ 已废弃
-        for dir_name in &["yin/skills/verify"] {
-            let dir = self.data_dir.join(dir_name);
-            if !dir.exists() {
-                continue;
-            }
+        let mut seen: HashSet<String> = HashSet::new();
+        let dir = self.data_dir.join("yin/skills/verify");
+
+        if dir.exists() {
             let mut read_dir = fs::read_dir(&dir).await.map_err(|e| {
                 TaijiError::KnowledgeStoreUnavailable {
                     context: format!("failed to read {:?} directory: {e}", dir),
                 }
             })?;
+            let mut subdirs: Vec<PathBuf> = Vec::new();
+            let mut legacy_files: Vec<PathBuf> = Vec::new();
             while let Some(entry) = read_dir.next_entry().await.transpose() {
-                match entry {
-                    Ok(e) => {
-                        let path = e.path();
-                        if path.extension().is_none_or(|ext| ext != "yaml") {
-                            continue;
-                        }
-                        if path.file_name().is_none_or(|n| n.to_string_lossy().ends_with(".tmp")) {
-                            continue;
-                        }
-                        match self.load_verification_from_path(&path).await {
-                            Ok(Some(v)) if v.status == "active" => {
-                                // 去重：同一 id 只保留首次加载的（优先新路径）
-                                if !verifications.iter().any(|existing: &VerificationAsset| existing.id == v.id) {
-                                    verifications.push(v);
-                                }
-                            }
-                            Ok(Some(v)) => {
-                                tracing::debug!(
-                                    id = %v.id,
-                                    status = %v.status,
-                                    "skipping non-active verification asset"
-                                );
-                            }
-                            Ok(None) => {}
-                            Err(e) => {
-                                tracing::warn!("failed to load verification {:?}: {e}", path);
-                            }
-                        }
-                    }
+                let e = match entry {
+                    Ok(e) => e,
                     Err(e) => {
-                        tracing::warn!("error reading verifications directory entry: {e}");
+                        tracing::warn!("error reading {:?} entry: {e}", dir);
+                        continue;
                     }
+                };
+                let path = e.path();
+                if path.is_dir() {
+                    subdirs.push(path);
+                } else if path.extension().is_some_and(|x| x == "yaml")
+                    && path
+                        .file_name()
+                        .is_none_or(|n| !n.to_string_lossy().ends_with(".tmp"))
+                {
+                    legacy_files.push(path);
+                }
+            }
+
+            // 1. 文件夹 skill.yaml 优先
+            for subdir in &subdirs {
+                let sf = subdir.join("skill.yaml");
+                if !sf.exists() {
+                    continue;
+                }
+                match self.load_verification_from_path(&sf).await {
+                    Ok(Some(v)) if v.status == "active" && !seen.contains(&v.id) => {
+                        seen.insert(v.id.clone());
+                        verifications.push(v);
+                    }
+                    Ok(Some(v)) => {
+                        tracing::debug!(id = %v.id, status = %v.status, "skip non-active/dup skill.yaml");
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("failed to load skill.yaml {:?}: {e}", sf),
+                }
+            }
+
+            // 2. 旧扁平 VerificationAsset（原样保留 stats/variant_of）
+            for path in &legacy_files {
+                match self.load_verification_from_path(path).await {
+                    Ok(Some(v)) if v.status == "active" && !seen.contains(&v.id) => {
+                        seen.insert(v.id.clone());
+                        verifications.push(v);
+                    }
+                    Ok(Some(v)) => {
+                        tracing::debug!(id = %v.id, status = %v.status, "skip non-active/dup legacy");
+                    }
+                    Ok(None) => {}
+                    Err(e) => tracing::warn!("failed to load verification {:?}: {e}", path),
                 }
             }
         }
+
+        // 3. 元层保底（仅空库）
+        if verifications.is_empty() {
+            for s in crate::infra::meta_skills::meta_skills(
+                crate::types::verification::SkillCategory::Verify,
+            ) {
+                verifications.push(Self::skill_asset_to_verification(&s));
+            }
+        }
+
         Ok(verifications)
     }
 
+    /// SkillAsset → VerificationAsset（DMN/evolver 过渡桥——保留 checks 形态）。
+    fn skill_asset_to_verification(
+        s: &crate::types::verification::SkillAsset,
+    ) -> VerificationAsset {
+        use crate::types::verification::{CheckKind, CheckSpec, CheckStats, SkillKind};
+        let checks: Vec<CheckSpec> = s
+            .implementations
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, impl_)| {
+                let kind = match impl_.kind {
+                    SkillKind::FileExists => CheckKind::FileExists,
+                    SkillKind::SchemaValid => CheckKind::SchemaValid,
+                    SkillKind::ReferenceResolves => CheckKind::ReferenceResolves,
+                    SkillKind::CommandSucceeds => CheckKind::CommandSucceeds,
+                    SkillKind::LlmJudgement => CheckKind::LlmJudgement,
+                    SkillKind::TraceConsistency => CheckKind::TraceConsistency,
+                    // 阳面 kind 不进 VerificationAsset.checks
+                    _ => return None,
+                };
+                // 空 command 的 CommandSucceeds 不落盘给 DMN（避免 soft-fail 噪声）
+                if kind == CheckKind::CommandSucceeds {
+                    let cmd = impl_
+                        .params
+                        .get("command")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .trim();
+                    if cmd.is_empty() {
+                        return None;
+                    }
+                }
+                Some(CheckSpec {
+                    id: format!("{}#{idx}", s.id),
+                    kind,
+                    target: impl_.target.clone(),
+                    params: impl_.params.clone(),
+                    severity: impl_.severity.clone().unwrap_or_default(),
+                    pass_condition: impl_.pass_condition.clone(),
+                    stats: CheckStats::default(),
+                })
+            })
+            .collect();
+        VerificationAsset {
+            asset_type: "yin_skill_verify".into(),
+            layer: 0,
+            id: s.id.clone(),
+            name: s.name.clone(),
+            description: s.description.clone(),
+            tags: s.tags.clone(),
+            confidence: s.confidence,
+            version: s.version.max(1),
+            content: s.description.clone(),
+            checks,
+            agent_target: s.agent_target.clone(),
+            usage_count: 0,
+            success_rate: 0.0,
+            status: s.status.clone(),
+            variant_of: s.variant_of.clone(),
+        }
+    }
+
     /// Load a single Verification asset from a specific file path.
+    ///
+    /// V45：同时识别旧 `type: verification` 与新 `type: skill`（文件夹 skill.yaml）。
     async fn load_verification_from_path(
         &self,
         path: &Path,
@@ -912,10 +1020,18 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
                 context: format!("failed to read verification file {:?}: {e}", path),
             }
         })?;
-        match serde_yaml::from_str::<CognitiveAsset>(&content) {
-            Ok(CognitiveAsset::Verification(v)) => Ok(Some(v)),
-            _ => Ok(None),
+        // 旧 VerificationAsset 路径
+        if let Ok(CognitiveAsset::Verification(v)) = serde_yaml::from_str::<CognitiveAsset>(&content)
+        {
+            return Ok(Some(v));
         }
+        // V45 SkillAsset 路径（skill.yaml）
+        if let Ok(s) =
+            serde_yaml::from_str::<crate::types::verification::SkillAsset>(&content)
+        {
+            return Ok(Some(Self::skill_asset_to_verification(&s)));
+        }
+        Ok(None)
     }
 
     /// V43: 按 SkillCategory 加载全部 active Skill 资产（BCP §10.1）。
@@ -1093,7 +1209,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             let path = e.path();
             if path.is_dir() {
                 subdirs.push(path);
-            } else if path.extension().is_none_or(|x| x == "yaml")
+            } else if path.extension().is_some_and(|x| x == "yaml")
                 && path
                     .file_name()
                     .is_none_or(|n| !n.to_string_lossy().ends_with(".tmp"))
@@ -1189,31 +1305,56 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             skill.version = 1;
         }
 
-        // dual 校验（合并视图域）：元层 ∪ 资产层必须存在目标，且类别互补。
-        let dual_category = match category {
-            SkillCategory::Orch => SkillCategory::Converge,
-            SkillCategory::Exec => SkillCategory::Verify,
-            SkillCategory::Verify => SkillCategory::Exec,
-            SkillCategory::Converge => SkillCategory::Orch,
+        // dual 校验（合并视图域）：目标必须存在，且 effective_category 与本 skill 类别互补。
+        // 互补表：Orch↔Converge、Exec↔Verify（含 causal-verify 桥）。
+        let dual_s = match crate::infra::meta_skills::meta_skill(&skill.dual) {
+            Some(s) => Some(s),
+            None => {
+                // 资产层：扫两类互补目录（converge 的 dual 在 orch；verify 的 dual 在 exec）
+                let c1 = match category {
+                    SkillCategory::Orch | SkillCategory::Converge => SkillCategory::Orch,
+                    SkillCategory::Exec | SkillCategory::Verify => SkillCategory::Exec,
+                };
+                let c2 = match category {
+                    SkillCategory::Orch | SkillCategory::Converge => SkillCategory::Converge,
+                    SkillCategory::Exec | SkillCategory::Verify => SkillCategory::Verify,
+                };
+                let mut found = None;
+                for c in [c1, c2] {
+                    if let Some(s) = self
+                        .load_skill_assets(c)
+                        .await?
+                        .into_iter()
+                        .find(|s| s.id == skill.dual)
+                    {
+                        found = Some(s);
+                        break;
+                    }
+                }
+                found
+            }
         };
-        let dual_ok = crate::infra::meta_skills::meta_skill(&skill.dual).is_some()
-            || self
-                .load_skill_assets(dual_category)
-                .await?
-                .iter()
-                .any(|s| s.id == skill.dual);
-        if !dual_ok {
+        let Some(dual_s) = dual_s else {
             return Err(TaijiError::KnowledgeStoreUnavailable {
                 context: format!(
-                    "skill {} 的 dual '{}' 不存在（合并视图域：元层 ∪ {} 类资产层均无）",
-                    skill.id,
-                    skill.dual,
-                    match dual_category {
-                        SkillCategory::Orch => "orch",
-                        SkillCategory::Exec => "exec",
-                        SkillCategory::Verify => "verify",
-                        SkillCategory::Converge => "converge",
-                    }
+                    "skill {} 的 dual '{}' 不存在（合并视图域：元层 ∪ 资产层均无）",
+                    skill.id, skill.dual
+                ),
+            });
+        };
+        let dual_cat = dual_s.effective_category();
+        let complementary = matches!(
+            (category, dual_cat),
+            (SkillCategory::Orch, Some(SkillCategory::Converge))
+                | (SkillCategory::Converge, Some(SkillCategory::Orch))
+                | (SkillCategory::Exec, Some(SkillCategory::Verify))
+                | (SkillCategory::Verify, Some(SkillCategory::Exec))
+        );
+        if !complementary {
+            return Err(TaijiError::KnowledgeStoreUnavailable {
+                context: format!(
+                    "skill {} (category={:?}) 的 dual '{}' (category={:?}) 类别不互补",
+                    skill.id, category, skill.dual, dual_cat
                 ),
             });
         }
@@ -1257,7 +1398,7 @@ pub enum CognitiveAsset {
     #[serde(rename = "model")]
     Model(ModelAsset),
     #[serde(rename = "skill")]
-    Skill(SkillAsset),
+    Skill(LegacyToolSkillAsset),
     #[serde(rename = "prompt")]
     Prompt(PromptAsset),
     #[serde(rename = "verification")]
@@ -2407,6 +2548,13 @@ mod ucb_rank_tests {
         // 重读。
         let loaded = guizang.load_skill_assets(crate::types::verification::SkillCategory::Verify).await.unwrap();
         assert!(loaded.iter().any(|s| s.id == "file-exists"), "读回成功");
+        // load_all_verifications 应能读到文件夹 skill.yaml（DMN 桥）
+        let verifs = guizang.load_all_verifications().await.unwrap();
+        assert!(
+            verifs.iter().any(|v| v.id == "file-exists"),
+            "load_all_verifications 应桥接 SkillAsset → VerificationAsset"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -2447,5 +2595,31 @@ mod ucb_rank_tests {
         assert!(err.is_err(), "dual 不存在应拒绝保存");
         let msg = err.unwrap_err().to_string();
         assert!(msg.contains("nonexistent-dual"), "err 应含 dual id: {}", msg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// V45：空知识库 load_all_verifications 元层保底（DMN 冷启动）。
+    #[tokio::test]
+    async fn test_load_all_verifications_meta_fallback() {
+        let dir = std::env::temp_dir().join(format!("taiji_verif_meta_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let guizang = GuizangClient::new(&dir).await.unwrap();
+        let verifs = guizang.load_all_verifications().await.unwrap();
+        assert!(
+            !verifs.is_empty(),
+            "空库 load_all_verifications 应由元层保底"
+        );
+        assert!(
+            verifs.iter().any(|v| v.id == "file-exists"),
+            "元层 file-exists 应可见"
+        );
+        // command-succeeds 空 command 不应出现在 checks 里（已过滤）
+        if let Some(cs) = verifs.iter().find(|v| v.id == "command-succeeds") {
+            assert!(
+                cs.checks.is_empty(),
+                "空 command 的 CommandSucceeds 不应落入 VerificationAsset.checks"
+            );
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

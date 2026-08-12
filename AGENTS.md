@@ -79,3 +79,7 @@
 - **ToolProfile 路由**（[`agents::factory::profile_for_model`]）：模型 key 含 flash/lite/mini/small → `Minimal`（隐藏 recursive-decompose/webfetch，FittingAgent 跳过 recursive_decompose 注册；阴判据保留，验证闭环不断）；其余 `Full`。
 - **文件夹格式**：资产层每 skill 一文件夹 `skills/{cat}/{id}/skill.yaml`（[`GuizangClient::save_skill`] atomic write + version++）；`load_skill_assets` 兼容**旧单文件** `yin/skills/{cat}/*.yaml`（`verification_to_skill_asset` 转换，dual 按 check.kind 推导），文件夹优先、同 id 去重。
 - **冷启动保底**：删除资产层后 `taiji run` 简单任务仍走完整 verify 闭环（元层判据生效）。
+- **双类型禁令**：`infra::knowledge::LegacyToolSkillAsset`（旧 L1，CognitiveAsset::Skill）≠ `types::verification::SkillAsset`（V45 统一）。新代码只用后者 + `save_skill`/`load_skill_assets`；禁止再引入 `SkillAsset` 同名。
+- **DMN 加载桥**：`load_all_verifications` 扫 `verify/{id}/skill.yaml` + 旧扁平 `*.yaml`（**原样**保留 checks.stats/variant_of，禁止经 SkillAsset 往返丢字段）+ **仅空库**注入元层。运行时 verify 走 catalog（元层∪资产层始终合并）；DMN 有磁盘种子时不以元层混计数。
+- **空 command 跳过**：元层 `command-succeeds` 默认 `params.command=""`——`run_checks_assets` 与 `skill_asset_to_verification` 均跳过，避免 soft-fail 噪声；资产层覆盖 command 后才机械执行。
+- **dual 真互补**：`save_skill` 校验 dual 存在 **且** `effective_category` 落在 Orch↔Converge / Exec↔Verify。
