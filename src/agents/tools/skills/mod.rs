@@ -20,7 +20,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use rig::completion::ToolDefinition;
 use rig::tool::{Tool, ToolError};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::Value as JsonValue;
 
 use crate::infra::error::TaijiError;
@@ -212,20 +212,6 @@ impl SkillTool {
 
 // ── Rig Tool implementation ────────────────────────────────────────────
 
-/// Arguments for a `SkillTool` call.
-#[derive(Debug, Deserialize)]
-pub struct SkillToolArgs {
-    /// Raw input arguments for the skill.
-    ///
-    /// Two forms are accepted (see the tool definition description for
-    /// per-skill usage examples):
-    /// - A **plain string** (e.g. `"ls -la"` for bash) — passed through to the
-    ///   skill as-is (mapped to the skill's primary parameter, e.g. `command`).
-    /// - A **JSON object string** (e.g. `'{"command": "ls -la"}'`) — parsed
-    ///   into the skill's parameter keys before the skill is invoked.
-    input: Option<String>,
-}
-
 /// Serialized output wrapper for tool results.
 #[derive(Debug, Serialize)]
 pub struct SkillToolOutput(String);
@@ -234,7 +220,7 @@ impl Tool for SkillTool {
     const NAME: &'static str = "skill_tool";
 
     type Error = ToolError;
-    type Args = SkillToolArgs;
+    type Args = serde_json::Value;
     type Output = SkillToolOutput;
 
     /// Dynamic name — returns the skill's tool_name.
@@ -243,39 +229,118 @@ impl Tool for SkillTool {
     }
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
-        let desc = input_desc(&self.skill.name);
+        // V45 双通道协议（§8.14）：按 skill 的 inputModes 生成 schema。
+        // - write/recursive-decompose ← 包含多参数扁平 schema（顶层 properties，原子双 JSON 转义）
+        // - bash/read/search/webfetch ← text 单参 input（纯字符串直传）
+        let (params, desc_suffix) = tool_schema(&self.skill.name);
+        let _desc = input_desc(&self.skill.name);
         ToolDefinition {
             name: self.skill.tool_name.clone(),
-            description: format!("L1 Skill: {} — {}. Args: {}", self.skill.id, self.skill.name, desc),
-            parameters: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "input": {
-                        "type": "string",
-                        "description": desc
-                    }
-                }
-            }),
+            description: format!(
+                "L1 Skill: {} — {}.{}",
+                self.skill.id, self.skill.name, desc_suffix
+            ),
+            parameters: params,
         }
     }
 
     async fn call(&self, args: Self::Args) -> Result<Self::Output, Self::Error> {
-        // Two-form input contract (V26.3 E2):
-        // - JSON object string  → parsed into the skill's parameter keys.
-        // - Plain string        → passed through as `{"input": "<string>"}` so
-        //   single-parameter skills (bash/read/search/webfetch) can consume it
-        //   directly via the `input` key.
-        let input: JsonValue = match args.input {
-            Some(s) if !s.trim().is_empty() => {
-                serde_json::from_str(&s).unwrap_or_else(|_| serde_json::json!({ "input": s }))
-            }
-            _ => JsonValue::Null,
-        };
-
-        self.execute(&input)
+        // V45 兼容三级展开（弱模型旧形态 {"input": ...} 仍可用）：
+        // 1. 顶层已是多键对象（扁平 schema） → 直接用
+        // 2. 顶层有 input 键且为 JSON 字符串 → 解析后展开到顶层
+        // 3. input 为纯字符串 → 保留 {"input": <str>}（单参 text 通道）
+        let normalized = normalize_args(args);
+        self.execute(&normalized)
             .await
             .map(|v| SkillToolOutput(v.to_string()))
             .map_err(|e| ToolError::ToolCallError(Box::new(e)))
+    }
+}
+
+/// 三级 value 展开弱模型旧 input 包装形态。
+fn normalize_args(args: serde_json::Value) -> JsonValue {
+    if let Some(obj) = args.as_object() {
+        if let Some(input) = obj.get("input") {
+            // 仅有 input 键（或含其他键但 input 是 JSON 字符串） — 解析展开。
+            if let Some(s) = input.as_str() {
+                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(s) {
+                    if parsed.is_object() {
+                        // JSON 字符串展开为顶层对象（双 JSON 转义兼容）。
+                        return parsed;
+                    }
+                }
+                // 纯字符串 input → 保留单参形态（bash/read/search/webfetch text 通道）。
+                return serde_json::json!({ "input": s });
+            }
+        }
+    }
+    args
+}
+
+/// 生成扁平 schema（V45 §8.14 通道 A）。
+fn tool_schema(skill_name: &str) -> (JsonValue, &'static str) {
+    match skill_name {
+        "write" => (
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "path": { "type": "string", "description": "写入的相对路径" },
+                    "content": { "type": "string", "description": "文件内容（覆盖）" }
+                },
+                "required": ["path", "content"]
+            }),
+            " 调用示例：{\"path\": \"deliverables/x.md\", \"content\": \"...\"}",
+        ),
+        "bash" => (
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string", "description": "shell 命令（纯字符串，如 ls -la）" }
+                },
+                "required": ["input"]
+            }),
+            "",
+        ),
+        "read" => (
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string", "description": "文件路径（纯字符串）" }
+                },
+                "required": ["input"]
+            }),
+            "",
+        ),
+        "search" => (
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string", "description": "搜索查询（纯字符串）" }
+                },
+                "required": ["input"]
+            }),
+            "",
+        ),
+        "webfetch" => (
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string", "description": "URL（纯字符串）" }
+                },
+                "required": ["input"]
+            }),
+            "",
+        ),
+        // recursive-decompose 等用元层 SkillAsset 的 examples 构造（保留单参 input 占位）。
+        _ => (
+            serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "input": { "type": "string", "description": input_desc(skill_name) }
+                }
+            }),
+            "",
+        ),
     }
 }
 
@@ -485,11 +550,9 @@ mod tests {
     async fn test_skill_tool_accepts_plain_string_input() {
         use rig::tool::Tool;
         let tool = bash_tool();
-        // `{"input": "echo hi"}` — plain-string passthrough.
+        // {"input": "echo hi"} — text 单参通道。
         let out = tool
-            .call(SkillToolArgs {
-                input: Some("echo hi".into()),
-            })
+            .call(serde_json::json!({"input": "echo hi"}))
             .await
             .expect("plain string input should work");
         assert!(out.0.contains("hello") || out.0.contains("hi"), "output: {}", out.0);
@@ -499,20 +562,45 @@ mod tests {
     async fn test_skill_tool_accepts_json_string_input() {
         use rig::tool::Tool;
         let tool = bash_tool();
-        // `{"input": "{\"command\": \"echo hi\"}"}` — JSON-string-in-input form.
+        // {"input": "{\"command\": \"echo hi\"}"} — 旧双 JSON 转义兼容。
         let out = tool
-            .call(SkillToolArgs {
-                input: Some(r#"{"command": "echo hi"}"#.into()),
-            })
+            .call(serde_json::json!({"input": r#"{"command": "echo hi"}"#}))
             .await
             .expect("JSON string input should work");
         assert!(out.0.contains("hello") || out.0.contains("hi"), "output: {}", out.0);
     }
 
+    /// V45 双 JSON 转义兼容：write 通过 normalize_args 展开后读到顶层 path/content。
+    #[tokio::test]
+    async fn test_skill_tool_write_normalizes_double_json() {
+        use rig::tool::Tool;
+        let tool = SkillTool::new(SkillRef {
+            id: "builtin::write".into(),
+            name: "write".into(),
+            tool_name: "write".into(),
+            match_weight: 1.0,
+        });
+        let tmp = std::env::current_dir().unwrap().join("deliverables").join(format!("taiji_v45_write_{}.md", std::process::id()));
+        if let Some(p) = tmp.parent() { std::fs::create_dir_all(p).ok(); }
+        // 旧双转义形态：{"input": "{\"path\": ..., \"content\": ...}"}
+        let inner = serde_json::to_string(&serde_json::json!({
+            "path": tmp.to_string_lossy(),
+            "content": "hello"
+        }))
+        .unwrap();
+        let out = tool
+            .call(serde_json::json!({"input": inner}))
+            .await
+            .expect("normalize should expand write args");
+        assert!(out.0.contains("path"), "output: {}", out.0);
+        assert_eq!(std::fs::read_to_string(&tmp).unwrap(), "hello");
+        let _ = std::fs::remove_file(&tmp);
+    }
+
     #[tokio::test]
     async fn test_skill_tool_definition_describes_usage() {
         use rig::tool::Tool;
-        for name in ["read", "write", "bash", "search", "webfetch"] {
+        for name in ["read", "bash", "search", "webfetch"] {
             let tool = SkillTool::new(SkillRef {
                 id: format!("builtin::{name}"),
                 name: name.into(),
@@ -529,5 +617,24 @@ mod tests {
             );
             assert!(!desc.contains("Raw input arguments for the skill"), "tool '{name}' should have a per-skill usage description, got: {desc}");
         }
+    }
+
+    /// V45 扁平 schema：write 不应再裸露单参 input，而是 path/content 两个顶层键。
+    #[tokio::test]
+    async fn test_skill_tool_write_flat_schema() {
+        use rig::tool::Tool;
+        let tool = SkillTool::new(SkillRef {
+            id: "builtin::write".into(),
+            name: "write".into(),
+            tool_name: "write".into(),
+            match_weight: 1.0,
+        });
+        let def = tool.definition("".into()).await;
+        let props = &def.parameters["properties"];
+        assert!(props.get("path").is_some(), "write 必须暴露 path 属性");
+        assert!(props.get("content").is_some(), "write 必须暴露 content 属性");
+        let reqs = def.parameters["required"].as_array().unwrap();
+        let req: Vec<&str> = reqs.iter().map(|v| v.as_str().unwrap()).collect();
+        assert!(req.contains(&"path") && req.contains(&"content"));
     }
 }

@@ -72,6 +72,16 @@ impl SkillEngine {
         guizang.load_skills_by_category(category).await
     }
 
+    /// V45: 从合并视图加载统一 Skill 资产（元层 ∪ 资产层，同 id 优先）。
+    /// 阴面类别使用；阳面类别返回空（阳面不做机械执行）。
+    pub async fn load_skill_catalog(
+        guizang: &GuizangClient,
+        category: crate::types::verification::SkillCategory,
+        profile: crate::infra::skill_catalog::ToolProfile,
+    ) -> Result<Vec<crate::types::verification::SkillAsset>, TaijiError> {
+        crate::infra::skill_catalog::load_skill_catalog(guizang, category, profile).await
+    }
+
     /// 机械执行全部 Skill 的检查项，产出 [`SkillReport`]。
     ///
     /// - 仅执行机械类检查项（FileExists / SchemaValid / ReferenceResolves /
@@ -122,6 +132,54 @@ impl SkillEngine {
         }
     }
 
+    /// V45: 机械执行 SkillAsset 的阴面 implementations（FileExists/SchemaValid/
+    /// ReferenceResolves/CommandSucceeds/TraceConsistency）；LlmJudgement 跳过
+    /// （由 CausalAgent 收集注入 LLM 裁决—§6.6 L2）；阳面 kind 跳过（非机械）。
+    ///
+    /// 等价旧 [`Self::run_checks`]（吃 VerificationAsset）的新接口——统一 SkillAsset
+    /// 后的调用点入口；旧接口保留供过渡期单测。
+    pub async fn run_checks_assets(
+        skills: &[crate::types::verification::SkillAsset],
+        task_dir: &Path,
+    ) -> SkillReport {
+        use crate::types::verification::SkillKind;
+        let mut results = Vec::new();
+        let mut hard_failed = false;
+
+        for skill in skills {
+            for (idx, impl_) in skill.implementations.iter().enumerate() {
+                if !impl_.kind.is_yin() || impl_.kind == SkillKind::LlmJudgement {
+                    // L2 项 + 阳面执行体不参与机械裁决。
+                    continue;
+                }
+                let spec = impl_to_check_spec(&skill.id, idx, impl_);
+                let result = Self::run_check(&spec, task_dir).await;
+                if !result.passed && spec.severity == CheckSeverity::Hard {
+                    hard_failed = true;
+                }
+                results.push(result);
+            }
+        }
+
+        let passed = !hard_failed;
+        let failed_count = results.iter().filter(|r| !r.passed).count();
+        let summary = if results.is_empty() {
+            "no mechanical checks".to_string()
+        } else if passed {
+            format!("all {} mechanical checks passed", results.len())
+        } else {
+            format!(
+                "{failed_count}/{} mechanical checks failed (hard short-circuit)",
+                results.len()
+            )
+        };
+
+        SkillReport {
+            passed,
+            results,
+            summary,
+        }
+    }
     /// 执行单个检查项（可单测）。
     pub async fn run_check(spec: &CheckSpec, task_dir: &Path) -> CheckResult {
         let start = std::time::Instant::now();
@@ -633,6 +691,39 @@ fn truncate(s: &str, max: usize) -> String {
         let mut out: String = s.chars().take(max).collect();
         out.push_str("…[truncated]");
         out
+    }
+}
+
+// ---------------------------------------------------------------------------
+// V45 SkillImpl → CheckSpec 转换（机械执行辅助）
+// ---------------------------------------------------------------------------
+
+/// SkillImpl 转 CheckSpec 以复用现有 run_check 机械执行体。
+fn impl_to_check_spec(
+    skill_id: &str,
+    idx: usize,
+    impl_: &crate::types::verification::SkillImpl,
+) -> CheckSpec {
+    use crate::types::verification::SkillKind;
+    let kind = match impl_.kind {
+        SkillKind::FileExists => CheckKind::FileExists,
+        SkillKind::SchemaValid => CheckKind::SchemaValid,
+        SkillKind::ReferenceResolves => CheckKind::ReferenceResolves,
+        SkillKind::CommandSucceeds => CheckKind::CommandSucceeds,
+        SkillKind::TraceConsistency => CheckKind::TraceConsistency,
+        SkillKind::LlmJudgement => CheckKind::LlmJudgement,
+        // 阳面 kind 不会走到这里（run_checks_assets 已过滤）。
+        _ => CheckKind::FileExists,
+    };
+    let stats = crate::types::verification::CheckStats::default();
+    CheckSpec {
+        id: format!("{skill_id}#{idx}"),
+        kind,
+        target: impl_.target.clone(),
+        params: impl_.params.clone(),
+        severity: impl_.severity.clone().unwrap_or_default(),
+        pass_condition: impl_.pass_condition.clone(),
+        stats,
     }
 }
 

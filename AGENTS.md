@@ -69,3 +69,13 @@
 - 新代码读身份册失败 / 会盟扫描失败 / 归藏 I/O 失败 → `TaijiError` 上抛（错误信息必须携带路径）。
 - 「无父（根任务）」与「无兄弟」是**状态分支**，非降级——不应用 `unwrap_or_default()` 吞错。
 - 既有降级点（MetaContext::empty、Base 模板、LLM 重试等）维持现状，改造另立章节。
+
+## 9. Skill 双轨架构（V45 BCP §10.1-10.2 / §8.14）
+
+- **双轨加载**：[`infra::skill_catalog::load_skill_catalog`] = 元层（[`infra::meta_skills`] Rust 硬编码）∪ 资产层（`skills/{cat}/{id}/skill.yaml`），**同 id 资产优先**（资产层覆盖元层教学字段，执行体恒为 Rust builtin）。空知识库 → 元层保底，基础 TPN 闭环照常。
+- **`SkillAsset` 统一类型**（`types/verification`，serde tag=type rename=skill）：`implementations: Vec<SkillImpl>`（复数 ≥1，兼容多 check 迁移）；`dual: String` 硬约束——保存时在合并视图域校验（元层 ∪ 资产层）目标存在且类别互补，缺失 = 硬错误。
+- **`SkillKind`** 含阴 6（FileExists..TraceConsistency，SkillEngine 机械执行）+ 阳 6（Bash/Write/Read/Search/Webfetch/RecursiveDecompose，映射 builtin）。`is_yin()`/`is_yang()` 辅助；`run_checks_assets` 跳过阳面与 LlmJudgement。
+- **弱模型协议双通道（§8.14）**：通道 A 扁平 schema（`definition()` 按 inputModes 生成顶层 `{path,content}` 废除双 JSON 转义；`type Args = serde_json::Value`）；通道 B 文本调用块 fallback（[`tools::text_call::extract_tool_calls`]）；**旧 `{"input":"{\"path\":...}"}` 双转义形态经 `normalize_args` 三级展开兼容**（顶层键直读 → input JSON 字符串展开 → input 纯字符串单参直传）。
+- **ToolProfile 路由**（[`agents::factory::profile_for_model`]）：模型 key 含 flash/lite/mini/small → `Minimal`（隐藏 recursive-decompose/webfetch，FittingAgent 跳过 recursive_decompose 注册；阴判据保留，验证闭环不断）；其余 `Full`。
+- **文件夹格式**：资产层每 skill 一文件夹 `skills/{cat}/{id}/skill.yaml`（[`GuizangClient::save_skill`] atomic write + version++）；`load_skill_assets` 兼容**旧单文件** `yin/skills/{cat}/*.yaml`（`verification_to_skill_asset` 转换，dual 按 check.kind 推导），文件夹优先、同 id 去重。
+- **冷启动保底**：删除资产层后 `taiji run` 简单任务仍走完整 verify 闭环（元层判据生效）。

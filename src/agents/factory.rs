@@ -28,6 +28,24 @@ use tokio_util::sync::CancellationToken;
 
 use crate::agents::causal::{CausalConvergeAgentBuilder, CausalVerifyAgentBuilder};
 use crate::agents::chat::ChatAgentBuilder;
+
+/// V45 工具集路由画像（BCP §8.14 双通道——弱模型最小集）。
+///
+/// 按模型 key 字符串启发式判断：含 "flash" / "lite" / "mini" / "small"
+/// → [`ToolProfile::Minimal`]（隐藏 recursive-decompose/webfetch 等高代价工具）；
+/// 其余 [`ToolProfile::Full`]。弱模型基础执行与验证闭环仍可用（元层判据保底）。
+pub fn profile_for_model(model: &crate::types::agent::ModelKey) -> crate::infra::skill_catalog::ToolProfile {
+    let key = model.0.to_lowercase();
+    if key.contains("flash")
+        || key.contains("lite")
+        || key.contains("mini")
+        || key.contains("small")
+    {
+        crate::infra::skill_catalog::ToolProfile::Minimal
+    } else {
+        crate::infra::skill_catalog::ToolProfile::Full
+    }
+}
 use crate::agents::fitting::FittingAgentBuilder;
 use crate::agents::meta::MetaAgentBuilder;
 use crate::agents::plan::PlanBuilder;

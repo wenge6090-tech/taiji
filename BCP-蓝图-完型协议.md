@@ -539,7 +539,7 @@ flowchart TB
 | 14 | `ChatAgentBuilder.chat(message, chat_history: &mut Vec<Message>, on_chunk: Box<dyn Fn(String) + Send + Sync>) -> Result<String, TaijiError>` | 单轮对话执行。`on_chunk` 回调接收每个文本 delta（Rig `StreamedAssistantContent::Text` 解包后的纯文本），需 `Send + Sync` 以跨 await 传递到 WS mpsc 通道。内部使用 `agent.stream_chat()` → 遍历 `MultiTurnStreamItem` → 提取 Text/ReasoningDelta → 回调。`chat_history` 可变借用，完成后内部自动 `save_json_atomic` 持久化。返回完整响应文本。`context_task_id` 是 builder 构造时字段，非 per-message 参数 |
 | 15 | `ChatAgentBuilder.build_system_prompt() -> String`（**同步** `fn`，同步） | 构建 ChatAgent 的 system prompt。若 `context_task_id` 非空，注入任务描述（从 `{data_root}/tasks/{id}/meta.json` 读取 description/status/depth）。不再注入归藏摘要（guizang_digest 已删除：归藏 prompts/verifications 是任务执行链 Meta/Fitting/Causal 的编排模板，对对话角色语义错配；ChatAgent 的记忆 = 会话历史 `.taiji/chat/{session_id}.json`，经 stream_chat history 回填）。无 context_task_id 时使用通用助手模板 |
 | 16 | `SkillResult { skill_id, category, kind, passed, detail, duration_ms, cost_tokens, verify_rounds, quality }` — Skill 执行统一返回类型 | 所有 Skill（orch/exec/verify/converge）执行后返回此结构。`detail` 来自机械判定（文件存在、退出码=0、grep 命中），禁止 LLM 语义推测进 detail。与 `AssetStats` 四维同构，可直接序列化进 `verify_state.json` 供连山回传 |
-| 17 | `CausalAgent Skill 注册规则` — verify 模式注册 yin/skills/verify/ 全部 active Skill；converge 模式注册 yin/skills/verify/ + yin/skills/converge/ 全部 active Skill | 与阳侧同构：`recursive_decompose` 仅编排模式 FittingAgent 注册 → converge Skill 仅 converge 模式 CausalAgent 注册。SafetyHook 挂载保持。SkillEngineering 操作范围限定在 task_dir 内（与阳工具同构权限模型），不写归藏 |
+| 17 | `CausalAgent Skill 注册规则` — verify 模式注册 verify 类全部 active Skill；converge 模式注册 verify + converge 类全部 active Skill（V45：加载源 = 元层 ∪ 资产层合并视图，同 id 资产优先；`dual` 校验在合并视图域） | 与阳侧同构：`recursive_decompose` 仅编排模式 FittingAgent 注册 → converge Skill 仅 converge 模式 CausalAgent 注册。SafetyHook 挂载保持。SkillEngineering 操作范围限定在 task_dir 内（与阳工具同构权限模型），不写归藏 |
 | 18 | `SkillEngine（L1 机械）与 LLM 可调用 Skill（L2）互补关系` — 同一 Skill 可同时存在于两侧 | SkillEngine 自动执行 hard 项短路（LLM 不可绕过）；LLM 可调用 Skill 让 LLM 在裁决时按需深入验证 soft 项（主动调用取证）。`SkillResult` 统一序列化进 `verify_state.json` |
 
 ---
@@ -625,53 +625,51 @@ classDiagram
     }
 
     class SkillAsset {
-        %% 阳轨: Skill（orch 类）+稳定涌现文本+脚本模板
+        %% V45 统一 Skill（A2A 兼容层 + taiji 演化层，§10.2 定稿）
         +id: String
-        +tags: Vec[String]
-        +confidence: f64
-        +version: u32
-        +content: String  %% 步骤序列/命令/验收要点
+        +name: String
+        +description: String
+        +tags: Vec~String~
+        +examples: Vec~String~
+        +inputModes: Vec~String~  %% [text] | [json] | [both]
+        +outputModes: Vec~String~
+        +category: SkillCategory  %% 目录推导优先
+        +dual: String  %% 对偶 id（合并视图域校验）
+        +implementations: Vec~SkillImpl~
         +agent_target: String
-        +env_tags: Vec[String]
-        +parent_id: Option[String]
-        +variant_of: Option[String]
-        +stats: AssetStats
-    }
-
-    class SkillAsset {
-        %% 阴轨: 收敛Skill（verify 类）
-        %% checks 可机械执行
-        +id: String
-        +tags: Vec[String]
         +confidence: f64
         +version: u32
-        +content: String  %% 契约语义描述（人读）
-        +checks: Vec[SkillSpec]  %% 结构化检查项（机器执行）
-        +env_tags: Vec[String]
-        +parent_id: Option[String]
-        +variant_of: Option[String]
+        +status: String
         +stats: AssetStats
+        +env_tags: Vec~String~
+        +parent_id: Option~String~
+        +variant_of: Option~String~
     }
 
-    class SkillSpec {
-        %% Skill（verify 类）的最小单元
-        +id: String
-        +kind: CheckKind  %% file_exists|schema_valid|reference_resolves|command_succeeds|llm_judgement
-        +target: String  %% 相对 deliverables/ 的路径或 glob
-        +params: Value  %% kind 相关参数（schema 路径 / 命令 / 引用规则）
-        +severity: CheckSeverity  %% hard|soft（hard 失败 = 验证失败，LLM 不可翻案）
-        +pass_condition: String  %% 人读判据（llm_judgement 类注入 LLM prompt）
+    class SkillImpl {
+        %% 机械可执行体（阳 = builtin 引用；阴 = 机械判据）
+        +kind: SkillKind
+        +target: String
+        +params: Value
+        +severity: CheckSeverity
+        +pass_condition: String
     }
 
-    class CheckKind {
+    class SkillKind {
         <<enum>>
-        %% TraceConsistency（断言引用完整性）
+        %% TraceConsistency（断言引用完整性）+ V45 阳 kind
         FileExists
         SchemaValid
         ReferenceResolves
         CommandSucceeds
         LlmJudgement
         TraceConsistency  %% [证据: 工具名] 引用 → trace 工具调用存在性
+        Bash
+        Write
+        Read
+        Search
+        Webfetch
+        RecursiveDecompose
     }
 
     class SkillResult {
@@ -1155,7 +1153,14 @@ SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到带工具的 Ri
 
 **Rig 0.39 hook 挂载机制**：`AgentBuilder::hook()` 是单槽覆盖式——链式 `.hook(a).hook(b).hook(c)` 只有 `c` 生效，多 hook 必须组合为一次挂载。FittingAgent 的 safety / trace / snapshot 三个 hook 经 `FittingHookSet` 组合（safety 优先、首个非 Continue 短路，违规工具不进入 trace 记录）；Meta / Causal / Chat 单 hook 直接挂载。任何相位新增第二个 hook 必须先查现有挂载点是否单槽。
 
-**L1 Skills 工具参数契约**：SkillTool 是单参 `input` 包装（Rig ToolDefinition 暴露 `input: string`，`call` 内对 input 值做二级 JSON 解析——JSON 字符串解析为对象，失败保留原文）。各内置工具的参数键必须与 LLM 可用的传参形式兼容：BashTool 读 `command`、ReadTool 读 `path`，**必须同时支持 `input` 键直读**（`args.get("input")` 为纯字符串时直接当命令/路径）——否则 LLM 按 schema 传 `{"input":"ls"}` 永远报 missing 参数，被迫试错摸索 `{"input":"{\"command\":\"ls\"}"}`（每次 resume 重跑重新踩坑，系统性吞噬预算）。ToolDefinition 的 description 必须包含用法示例（双保险：实现容错 + schema 引导）。write/search/webfetch 参数键同理自查。
+**L1 Skills 工具参数契约（V45 双通道协议）**：弱模型 Tool Calls 不稳定（原生 function calling 训练不足 + 双 JSON 转义错误率高——实测 write 报「缺 path 字段」）——协议层双通道解决：
+
+| 通道 | 形态 | 适用 |
+|------|------|------|
+| **A · 扁平 schema** | `definition()` 按 skill 的 `inputModes` 生成顶层完整 JSON Schema（write → `{path, content}` 两个 properties，**废除 input 双 JSON 转义**）；`text` 模式退化为单参 `input: string`（bash/read 纯字符串直传） | 强模型 json 模式；弱模型 text 模式 |
+| **B · 文本调用块 fallback** | LLM 纯文本输出 ` ```json {"tool": "write", "arguments": {...}} ``` ` → `TextCallInterpreter` 解析执行 → 以 toolresult 注入 | 原生 tool_call 失败/不支持的模型 |
+
+兼容性：旧单参形态（`{"input": "{\"path\":...}"}`）继续可执行（call 内三级解析：顶层键直读 → input 二级 JSON → input 纯字符串）。ToolDefinition 的 description 必须含用法示例（双保险：实现容错 + schema 引导）。
 
 ### 8.6 递归防护
 
@@ -1392,7 +1397,7 @@ output_refs: [deliverables/xxx.md]
 
 ### 8.22 验证 Skill 引擎（SkillEngine）
 
-**职责**：CausalAgent.verify 前置的确定性验证执行器——加载根级 `yin/skills/verify/` 结构化契约，机械执行 checks，产出 SkillReport。**确定性保证：同一契约 + 同一产出 → 同一结果**，与 LLM 无关。
+**职责**：CausalAgent.verify 前置的确定性验证执行器——加载验证 Skill（**V45：元层判据 ∪ 资产层，同 id 资产优先**——知识库空/损坏时元层保底，基础验证闭环照常），机械执行 checks，产出 SkillReport。**确定性保证：同一契约 + 同一产出 → 同一结果**，与 LLM 无关。
 
 **执行顺序**：
 
@@ -1538,8 +1543,8 @@ flowchart LR
 
     subgraph "知识库根（单一资产树）"
         P1["yang/prompts/*.yaml + yin/prompts/*.yaml 节点"]
-        P2["yang/skills/orch/*.yaml 节点"]
-        P3["yin/skills/verify/*.yaml 节点"]
+        P2["yang/skills/orch/{id}/skill.yaml 节点"]
+        P3["yin/skills/verify/{id}/skill.yaml 节点"]
         S["AssetStats 统计"]
     end
 
@@ -2027,7 +2032,9 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 
 > **状态：**（V32 蓝图承诺分区，V36 实现，V44 取消分区——资产树单一共享，模型维度仅在统计层区分）。落地要点：① `GuizangClient` 单 `data_dir`（knowledge 根），删除 `for_model`/分区派生；② 迁移函数 `migrate_from_partitioned(root)`（幂等：既有 `{model_key}/` 分区资产合并回根）；③ 检索/写回均走根级 client——MetaPhase 根级检索（§8.8），连山按 pending 的 `model_key` 更新根级统计（§6.2）；④ `MetaContext.model` 仍是模型选择载体——路由按模型区分，资产不按模型复制。
 
-**归藏单一资产树（阴阳嵌套树）**：与周易任务树同构——yang=生成/执行/分叉（decompose），yin=验证/裁决/收敛（converge）。Skills 嵌套在 yang/ 与 yin/ 之下，类别由阴阳归属 + 子目录共同定义：
+**归藏单一资产树（阴阳嵌套树，V45 双轨）**：与周易任务树同构——yang=生成/执行/分叉（decompose），yin=验证/裁决/收敛（converge）。Skills 嵌套在 yang/ 与 yin/ 之下，类别由阴阳归属 + 子目录共同定义。**每 Skill 一个文件夹**（演化单元，可携带教学附件），入口文件统一 `skill.yaml`：
+
+**双轨原则（V45）**：阳阴元工具/元 skill 全部硬编码于 Rust 元层注册表（保证基础运行，零资产依赖——知识库空/损坏时基础 TPN 闭环照常）；资产层是可演化覆盖层——同 id 资产优先于元层（教学字段可覆盖，执行体恒为 Rust builtin），连山 fork 产出新文件夹变体。
 
 ```
 .taiji/knowledge/
@@ -2035,15 +2042,16 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 │   ├── prompts/                   ← 阳系统提示词
 │   │   ├── orch-fitting.yaml      ← 编排·阳：拆解+综合
 │   │   └── exec-fitting.yaml      ← 执行·阳：直接产出
-│   └── skills/                    ← 阳 Skill（生成/执行能力）
+│   └── skills/                    ← 阳 Skill（生成/执行能力；元层保底，资产层可空）
 │       ├── orch/                  ← 编排 Skill
-│       │   └── recursive-decompose.yaml
+│       │   └── recursive-decompose/
+│       │       └── skill.yaml     # dual: mece-check（阴）
 │       └── exec/                  ← 执行 Skill
-│           ├── write.yaml
-│           ├── bash.yaml
-│           ├── search.yaml
-│           ├── webfetch.yaml
-│           └── read.yaml
+│           ├── write/skill.yaml            # dual: file-exists
+│           ├── bash/skill.yaml             # dual: command-succeeds
+│           ├── search/skill.yaml           # dual: reference-resolves
+│           ├── webfetch/skill.yaml         # dual: trace-consistency
+│           └── read/skill.yaml             # dual: schema-valid
 │
 ├── yin/                          ← 阴轨：验证/收敛/裁决
 │   ├── prompts/                   ← 阴系统提示词
@@ -2051,15 +2059,15 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 │   │   └── orch-converge.yaml     ← 收敛·阴：子结果聚合判决
 │   └── skills/                    ← 阴 Skill（验证/收敛能力）
 │       ├── verify/                ← 验证 Skill（exec 的阴面对偶）
-│       │   ├── file-exists.yaml           # dual: write
-│       │   ├── command-succeeds.yaml      # dual: bash
-│       │   ├── reference-resolves.yaml    # dual: search
-│       │   ├── trace-consistency.yaml     # dual: webfetch
-│       │   └── schema-valid.yaml          # dual: write
+│       │   ├── file-exists/skill.yaml           # dual: write
+│       │   ├── command-succeeds/skill.yaml      # dual: bash
+│       │   ├── reference-resolves/skill.yaml    # dual: search
+│       │   ├── trace-consistency/skill.yaml     # dual: webfetch
+│       │   └── schema-valid/skill.yaml          # dual: write
 │       └── converge/              ← 收敛 Skill（orch 的阴面对偶）
-│           ├── mece-check.yaml            # dual: recursive-decompose
-│           ├── cross-consistency.yaml     # dual: recursive-decompose
-│           └── granularity-check.yaml     # dual: recursive-decompose
+│           ├── mece-check/skill.yaml            # dual: recursive-decompose
+│           ├── cross-consistency/skill.yaml     # dual: recursive-decompose
+│           └── granularity-check/skill.yaml     # dual: recursive-decompose
 │
 ├── models/                       ← 贝叶斯后验（跨阴阳，按 skill id 关联）
 ├── manifold/                     ← 流型拓扑（后置）
@@ -2149,8 +2157,8 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 | 字段 | 类型 | 说明 |
 |------|------|------|
 | `category` | SkillCategory | `orch` \| `exec` \| `verify` \| `converge`——由文件系统路径推导（`yang/skills/orch/` → orch，`yin/skills/verify/` → verify） |
-| `dual` | String | **对偶 Skill id**——exec/orch（阳）必须指向 verify/converge（阴），反之亦然。保存时校验目标存在且 category 互补。**缺失 = 硬错误** |
-| `implementation` | SkillImpl | 机械可执行体（exec/orch 类可为空——LLM 自主调用；verify/converge 类必填） |
+| `dual` | String | **对偶 Skill id**——exec/orch（阳）必须指向 verify/converge（阴），反之亦然。保存时校验目标存在且 category 互补。**缺失 = 硬错误**。**V45 跨层域**：校验在合并视图（元层 ∪ 资产层）上做——资产层 fork 变体（如 `write-v2`）的 dual 可指向元层 id（如 `file-exists`） |
+| `implementations` | Vec\<SkillImpl\> | 机械可执行体数组（≥1；exec/orch 类引用 Rust builtin——LLM 自主调用；verify/converge 类为机械判据）。V45：复数形式兼容多 check 资产迁移 |
 | `agent_target` | String | `"FittingAgent"` \| `"CausalAgent"`——注册面隔离 |
 | `confidence` | f64 | [0, 1] 先验置信度（人工种子初始值；进入利用排序后由 `stats` 的 avg_reward 主导） |
 | `version` | u32 | 版本号（每次连山回传写入时递增） |
@@ -2160,11 +2168,11 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 | `parent_id` | Option\<String\> | fork 来源（None = 根资产） |
 | `variant_of` | Option\<String\> | 同源变体组 id（fork 树分组） |
 
-**SkillImpl**（机械可执行体，仅 verify/converge 类必填）：
+**SkillImpl**（机械可执行体）：
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `kind` | SkillKind | `FileExists` \| `SchemaValid` \| `ReferenceResolves` \| `CommandSucceeds` \| `LlmJudgement` \| `TraceConsistency` \| `Bash` \| `Write` \| `Read` \| `Search` \| `Webfetch` |
+| `kind` | SkillKind | `FileExists` \| `SchemaValid` \| `ReferenceResolves` \| `CommandSucceeds` \| `LlmJudgement` \| `TraceConsistency` \| `Bash` \| `Write` \| `Read` \| `Search` \| `Webfetch` \| `RecursiveDecompose`（V45 增补：orch 阳面）。阳 kind（Bash/Write/Read/Search/Webfetch/RecursiveDecompose）映射 Rust 元层 builtin 执行体；阴 kind 由 SkillEngine 机械执行 |
 | `target` | String | 相对 task_dir 的路径或 glob |
 | `params` | Value | kind 相关参数（JSON 对象） |
 | `severity` | SkillSeverity | `Hard`（失败 = 直接短路，LLM 不可翻案）\| `Soft`（注入 LLM prompt 供参考） |
@@ -2192,7 +2200,7 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 | `results` | Vec\<SkillResult\> | 逐 Skill 执行结果 |
 | `summary` | String | 摘要 |
 
-> **历史注记**：原 `SkillAsset` / `SkillSpec` / `SkillResult` / `SkillReport` 已删除——统一为 SkillAsset / SkillImpl / SkillResult / SkillReport。`yin/skills/verify/` 打散为 `yin/skills/verify/*.yaml`。`yang/skills/orch/` 合并入 `yang/skills/orch/`。
+> **历史注记**：原 `SkillAsset` / `SkillSpec` / `SkillResult` / `SkillReport` 已删除——统一为 SkillAsset / SkillImpl / SkillResult / SkillReport。V45 双轨：每 Skill 一文件夹 `{cat}/{id}/skill.yaml`（入口统一）；元层 Rust 硬编码保底（`infra::meta_skills`），资产层同 id 覆盖；`yang/skills/orch/` 合并入 `yang/skills/orch/`。
 >
 > L0 输出健全性检查（summary 非空/有依据/可审计 + code-safety）内置为 ConstraintEngine 硬编码，不资产化、不参与连山演化。`TruthAsset` 类型已删除。
 

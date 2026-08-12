@@ -135,6 +135,189 @@ pub enum SkillCategory {
 }
 
 // ---------------------------------------------------------------------------
+// V45 统一 Skill 资产（BCP §10.2 定稿——A2A 兼容层 + taiji 演化层）
+// ---------------------------------------------------------------------------
+
+/// Skill 机械执行体 kind。
+///
+/// 阴 kind（FileExists..TraceConsistency）由 SkillEngine 机械执行；
+/// 阳 kind（Bash..RecursiveDecompose）映射 Rust 元层 builtin 执行体（V45 双轨）。
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SkillKind {
+    // ── 阴·机械判据（SkillEngine 执行）──
+    /// 文件/目录存在性（target 支持单段 `*` 通配）。
+    FileExists,
+    /// 结构校验：params = {format: "json"|"yaml", required_fields: ["a.b"]}。
+    SchemaValid,
+    /// 引用解析：target 的 YAML front matter 内路径必须真实存在。
+    ReferenceResolves,
+    /// 命令执行成功（白名单 + 30s 超时）。
+    CommandSucceeds,
+    /// LLM 裁决：不机械执行，判据注入 verify/converge prompt（§6.6 L2）。
+    LlmJudgement,
+    /// 断言证据链：产出中 `[证据: 工具名]` 引用 → trace 工具调用存在性。
+    TraceConsistency,
+    // ── 阳·执行体（Rust builtin 注册表）──
+    /// shell 命令执行（builtin: bash）。
+    Bash,
+    /// 原子文件写入（builtin: write）。
+    Write,
+    /// 文件读取（builtin: read）。
+    Read,
+    /// 代码搜索（builtin: search）。
+    Search,
+    /// 网页抓取（builtin: webfetch）。
+    Webfetch,
+    /// 递归分解（builtin: recursive_decompose，orch 阳面——V45 增补 §10.2）。
+    RecursiveDecompose,
+}
+
+impl From<CheckKind> for SkillKind {
+    fn from(k: CheckKind) -> Self {
+        match k {
+            CheckKind::FileExists => SkillKind::FileExists,
+            CheckKind::SchemaValid => SkillKind::SchemaValid,
+            CheckKind::ReferenceResolves => SkillKind::ReferenceResolves,
+            CheckKind::CommandSucceeds => SkillKind::CommandSucceeds,
+            CheckKind::LlmJudgement => SkillKind::LlmJudgement,
+            CheckKind::TraceConsistency => SkillKind::TraceConsistency,
+        }
+    }
+}
+
+impl SkillKind {
+    /// 是否为阴面机械/裁决判据（SkillEngine 执行域）。
+    pub fn is_yin(self) -> bool {
+        matches!(
+            self,
+            SkillKind::FileExists
+                | SkillKind::SchemaValid
+                | SkillKind::ReferenceResolves
+                | SkillKind::CommandSucceeds
+                | SkillKind::LlmJudgement
+                | SkillKind::TraceConsistency
+        )
+    }
+
+    /// 是否为阳面执行体（builtin 注册表域）。
+    pub fn is_yang(self) -> bool {
+        !self.is_yin()
+    }
+}
+
+/// Skill 机械可执行体（BCP §10.2 SkillImpl）。
+///
+/// 阳 kind：`params.builtin` 可指定执行体名（默认 = kind 小写）；
+/// 阴 kind：`target`/`params`/`severity`/`pass_condition` 为机械判据。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SkillImpl {
+    pub kind: SkillKind,
+    /// 相对 task_dir 的路径或单段 `*` 通配（阴判据用；阳执行体留空）。
+    #[serde(default)]
+    pub target: String,
+    /// kind 相关参数（JSON 对象）。
+    #[serde(default)]
+    pub params: serde_json::Value,
+    /// Hard = 失败直接短路（LLM 不可翻案）；Soft = 注入 LLM 参考。
+    #[serde(default)]
+    pub severity: Option<CheckSeverity>,
+    /// 人读判据（llm_judgement 类注入 LLM prompt）。
+    #[serde(default)]
+    pub pass_condition: String,
+}
+
+/// V45 统一 Skill 资产（BCP §10.2 定稿）。
+///
+/// 双轨：元层（Rust 硬编码保底）∪ 资产层（`skills/{cat}/{id}/skill.yaml`
+/// 可演化覆盖，同 id 资产优先）。A2A 兼容字段（examples/inputModes/outputModes）
+/// 保证外部 Agent 可发现。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename = "skill")]
+pub struct SkillAsset {
+    /// 唯一标识符（如 `write`、`file-exists`）。
+    pub id: String,
+    /// 人类可读名称。
+    pub name: String,
+    /// Skill 功能描述（自然语言，供 LLM 理解何时调用）。
+    #[serde(default)]
+    pub description: String,
+    /// 分类标签。
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// 使用示例（自然语言，帮助 LLM 匹配 Skill 到任务）。
+    #[serde(default)]
+    pub examples: Vec<String>,
+    /// 支持的输入模式：["json"]（多参数扁平 schema）| ["text"]（单参 input）|
+    /// ["json","text"]（双通道，V45 §8.14）。
+    #[serde(default = "default_modes")]
+    pub input_modes: Vec<String>,
+    /// 支持的输出模式（默认 ["text"]）。
+    #[serde(default = "default_modes")]
+    pub output_modes: Vec<String>,
+    /// 类别（目录推导优先；字段冗余，缺省时按目录/对偶推导）。
+    #[serde(default)]
+    pub category: Option<SkillCategory>,
+    /// 对偶 Skill id——硬约束（保存时校验存在 + 类别互补，合并视图域）。
+    pub dual: String,
+    /// 机械可执行体数组（≥1）。
+    pub implementations: Vec<SkillImpl>,
+    /// 消费方 Agent：FittingAgent | CausalAgent。
+    #[serde(default)]
+    pub agent_target: String,
+    /// [0, 1] 先验置信度。
+    pub confidence: f64,
+    /// 版本号（连山回传写入时递增）。
+    pub version: u32,
+    /// active | pruned（pruned 不参与加载与演化）。
+    #[serde(default = "default_active")]
+    pub status: String,
+    /// MCTS 四维统计（与 CheckStats 同构，serde default 零迁移）。
+    #[serde(default)]
+    pub stats: CheckStats,
+    /// 环境维度（空 = 环境无关）。
+    #[serde(default)]
+    pub env_tags: Vec<String>,
+    /// fork 来源（None = 根资产）。
+    #[serde(default)]
+    pub parent_id: Option<String>,
+    /// 同源变体组 id（fork 树分组）。
+    #[serde(default)]
+    pub variant_of: Option<String>,
+}
+
+fn default_modes() -> Vec<String> {
+    vec!["text".to_string()]
+}
+
+fn default_active() -> String {
+    "active".to_string()
+}
+
+impl SkillAsset {
+    /// Builder 式设置类别（元层注册表用）。
+    pub fn with_category(mut self, c: SkillCategory) -> Self {
+        self.category = Some(c);
+        self
+    }
+
+    /// 推导类别：显式 category 优先，缺省时按第一个 implementation kind 归属。
+    pub fn effective_category(&self) -> Option<SkillCategory> {
+        if let Some(c) = self.category {
+            return Some(c);
+        }
+        self.implementations.first().map(|i| match i.kind {
+            SkillKind::RecursiveDecompose => SkillCategory::Orch,
+            SkillKind::Bash | SkillKind::Write | SkillKind::Read | SkillKind::Search | SkillKind::Webfetch => {
+                SkillCategory::Exec
+            }
+            SkillKind::LlmJudgement => SkillCategory::Converge, // 缺省按 converge（裁决类）
+            _ => SkillCategory::Verify,
+        })
+    }
+}
+
+// ---------------------------------------------------------------------------
 // V33 验证契约类型（归藏本体论重构 — §6.0/§6.6/§8.22）
 // ---------------------------------------------------------------------------
 
@@ -142,7 +325,7 @@ pub enum SkillCategory {
 ///
 /// 前四种为**机械可判定断言**（L0/L1，SkillEngine 执行，LLM 不可翻案）；
 /// `LlmJudgement` 是唯一留给 LLM 的检查项类型（L2 兜底，§6.6）。
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckKind {
     /// 文件/目录存在性（target 支持单段 `*` 通配）。

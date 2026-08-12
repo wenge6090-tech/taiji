@@ -305,15 +305,28 @@ impl FittingAgentBuilder {
             self.meta_ctx.clone(),
         );
 
-        // ── Register L1 Skills ──
+        // ── Register L1 Skills (V45 profile 路由 §8.14) ──
+        let profile = crate::agents::factory::profile_for_model(
+            self.meta_ctx.model.as_ref().unwrap_or(&crate::types::agent::ModelKey("default".into())),
+        );
         let skill_registry = SkillRegistry::new();
         let skill_tools: Vec<Box<dyn ToolDyn>> = skill_registry
             .tools()
             .iter()
+            .filter(|t| {
+                // Minimal profile 隐藏 recursive-decompose / webfetch（高代价）。
+                if matches!(profile, crate::infra::skill_catalog::ToolProfile::Minimal) {
+                    !matches!(t.name(), "recursive-decompose" | "webfetch")
+                } else {
+                    true
+                }
+            })
             .map(|t| Box::new(t.clone()) as Box<dyn ToolDyn>)
             .collect();
 
-        let agent = if self.mode == AgentMode::Orchestration {
+        let agent = if self.mode == AgentMode::Orchestration
+            && !matches!(profile, crate::infra::skill_catalog::ToolProfile::Minimal)
+        {
             agent_builder
                 .tool(recursive_decompose)
                 .tool(causal_verify)

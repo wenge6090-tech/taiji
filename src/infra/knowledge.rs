@@ -983,6 +983,267 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
         }
         Ok(skills)
     }
+
+    // -----------------------------------------------------------------------
+    // V45 统一 Skill 资产（BCP §10.2 双轨——元层 ∪ 资产层加载）
+    // -----------------------------------------------------------------------
+
+    /// 类别 → 归藏子目录（V45 双轨：每 skill 一文件夹 `skills/{cat}/{id}/skill.yaml`）。
+    fn skill_category_dir(category: crate::types::verification::SkillCategory) -> &'static str {
+        use crate::types::verification::SkillCategory;
+        match category {
+            SkillCategory::Orch => "yang/skills/orch",
+            SkillCategory::Exec => "yang/skills/exec",
+            SkillCategory::Verify => "yin/skills/verify",
+            SkillCategory::Converge => "yin/skills/converge",
+        }
+    }
+
+    /// 旧 `VerificationAsset`（单文件 `*.yaml`）→ 新 `SkillAsset` 兼容转换。
+    /// dual 按 check.kind 推导（旧格式无 dual 字段——种子库迁移期成形）。
+    fn verification_to_skill_asset(
+        v: &VerificationAsset,
+    ) -> crate::types::verification::SkillAsset {
+        use crate::types::verification::{
+            CheckStats, SkillAsset, SkillImpl, SkillKind,
+        };
+        let implementations: Vec<SkillImpl> = v
+            .checks
+            .iter()
+            .map(|c| SkillImpl {
+                kind: SkillKind::from(c.kind),
+                target: c.target.clone(),
+                params: c.params.clone(),
+                severity: Some(c.severity.clone()),
+                pass_condition: c.pass_condition.clone(),
+            })
+            .collect();
+        // dual 推导：旧资产无 dual 字段——按第一个 check kind 推导（与元层配对表一致）。
+        let dual = v
+            .checks
+            .first()
+            .map(|c| Self::dual_for_check_kind(c.kind.clone()))
+            .unwrap_or_else(|| "".to_string());
+        SkillAsset {
+            id: v.id.clone(),
+            name: v.name.clone(),
+            description: v.description.clone(),
+            tags: v.tags.clone(),
+            examples: Vec::new(),
+            input_modes: vec!["text".to_string()],
+            output_modes: vec!["text".to_string()],
+            category: None,
+            dual,
+            implementations,
+            agent_target: v.agent_target.clone(),
+            confidence: v.confidence,
+            version: v.version,
+            status: v.status.clone(),
+            stats: CheckStats::default(), // 旧 check 级 stats 不迁移（种子重积累）
+            env_tags: Vec::new(),
+            parent_id: None,
+            variant_of: None,
+        }
+    }
+
+    /// check kind → 对偶元工具/skill id（旧格式迁移推导）。
+    fn dual_for_check_kind(kind: crate::types::verification::CheckKind) -> String {
+        use crate::types::verification::CheckKind;
+        match kind {
+            CheckKind::FileExists => "write".to_string(),
+            CheckKind::SchemaValid => "read".to_string(),
+            CheckKind::ReferenceResolves => "search".to_string(),
+            CheckKind::CommandSucceeds => "bash".to_string(),
+            CheckKind::TraceConsistency => "webfetch".to_string(),
+            CheckKind::LlmJudgement => "recursive-decompose".to_string(),
+        }
+    }
+
+    /// 加载统一 Skill 资产（V45 双轨——资产层；新文件夹格式 + 旧单文件兼容）。
+    ///
+    /// 返回 `active` 资产；同 id 新格式优先、旧格式去重。category 由子目录决定。
+    pub async fn load_skill_assets(
+        &self,
+        category: crate::types::verification::SkillCategory,
+    ) -> Result<Vec<crate::types::verification::SkillAsset>, TaijiError> {
+        use crate::types::verification::SkillAsset;
+        let dir = self.data_dir.join(Self::skill_category_dir(category));
+        if !dir.exists() {
+            return Ok(Vec::new());
+        }
+        let mut skills: Vec<SkillAsset> = Vec::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+
+        // ── 新格式：skills/{cat}/{id}/skill.yaml ──
+        let mut read_dir = fs::read_dir(&dir).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to read skill directory {:?}: {e}", dir),
+            }
+        })?;
+        let mut subdirs: Vec<PathBuf> = Vec::new();
+        let mut legacy_files: Vec<PathBuf> = Vec::new();
+        while let Some(entry) = read_dir.next_entry().await.transpose() {
+            let e = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    tracing::warn!("error reading {:?} entry: {e}", dir);
+                    continue;
+                }
+            };
+            let path = e.path();
+            if path.is_dir() {
+                subdirs.push(path);
+            } else if path.extension().is_none_or(|x| x == "yaml")
+                && path
+                    .file_name()
+                    .is_none_or(|n| !n.to_string_lossy().ends_with(".tmp"))
+            {
+                legacy_files.push(path);
+            }
+        }
+
+        // 新文件夹格式优先加载。
+        for subdir in &subdirs {
+            let sf = subdir.join("skill.yaml");
+            if !sf.exists() {
+                continue;
+            }
+            match fs::read_to_string(&sf).await {
+                Ok(content) => match serde_yaml::from_str::<SkillAsset>(&content) {
+                    Ok(mut s) => {
+                        if s.status != "active" {
+                            tracing::debug!(id = %s.id, status = %s.status, "skipping non-active skill");
+                            continue;
+                        }
+                        if s.category.is_none() {
+                            s.category = Some(category);
+                        }
+                        seen.insert(s.id.clone());
+                        skills.push(s);
+                    }
+                    Err(e) => {
+                        tracing::warn!("failed to parse skill.yaml {:?}: {e}", sf);
+                    }
+                },
+                Err(e) => {
+                    tracing::warn!("failed to read skill.yaml {:?}: {e}", sf);
+                }
+            }
+        }
+
+        // 旧单文件格式（兼容——与 id 去重，新格式已注册的 id 跳过）。
+        for path in &legacy_files {
+            match self.load_verification_from_path(path).await {
+                Ok(Some(v)) if v.status == "active" => {
+                    if seen.contains(&v.id) {
+                        continue;
+                    }
+                    seen.insert(v.id.clone());
+                    skills.push(Self::verification_to_skill_asset(&v));
+                }
+                Ok(Some(v)) => {
+                    tracing::debug!(id = %v.id, status = %v.status, "skipping non-active legacy skill");
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::warn!("failed to load legacy skill asset {:?}: {e}", path);
+                }
+            }
+        }
+
+        Ok(skills)
+    }
+
+    /// 持久化 Skill 资产（V45 文件夹结构 `skills/{cat}/{id}/skill.yaml`；atomic write + version++）。
+    /// dual 校验在合并视图域：资产层（同互补类别）∪ 元层（[`crate::infra::meta_skills`]）必须存在目标。
+    pub async fn save_skill(
+        &self,
+        skill: &mut crate::types::verification::SkillAsset,
+    ) -> Result<(), TaijiError> {
+        use crate::types::verification::SkillCategory;
+        let category = skill
+            .effective_category()
+            .ok_or_else(|| TaijiError::KnowledgeStoreUnavailable {
+                context: format!("skill {} 缺少可推导 category", skill.id),
+            })?;
+        let cat_dir = self.data_dir.join(Self::skill_category_dir(category));
+        let skill_dir = cat_dir.join(&skill.id);
+        let path = skill_dir.join("skill.yaml");
+
+        // version++（读现存文件）。
+        if path.exists() {
+            if let Ok(content) = fs::read_to_string(&path).await {
+                if let Ok(existing) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                    let cur = existing
+                        .get("version")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as u32;
+                    skill.version = cur + 1;
+                } else {
+                    skill.version = 1;
+                }
+            } else {
+                skill.version = 1;
+            }
+        } else {
+            skill.version = 1;
+        }
+
+        // dual 校验（合并视图域）：元层 ∪ 资产层必须存在目标，且类别互补。
+        let dual_category = match category {
+            SkillCategory::Orch => SkillCategory::Converge,
+            SkillCategory::Exec => SkillCategory::Verify,
+            SkillCategory::Verify => SkillCategory::Exec,
+            SkillCategory::Converge => SkillCategory::Orch,
+        };
+        let dual_ok = crate::infra::meta_skills::meta_skill(&skill.dual).is_some()
+            || self
+                .load_skill_assets(dual_category)
+                .await?
+                .iter()
+                .any(|s| s.id == skill.dual);
+        if !dual_ok {
+            return Err(TaijiError::KnowledgeStoreUnavailable {
+                context: format!(
+                    "skill {} 的 dual '{}' 不存在（合并视图域：元层 ∪ {} 类资产层均无）",
+                    skill.id,
+                    skill.dual,
+                    match dual_category {
+                        SkillCategory::Orch => "orch",
+                        SkillCategory::Exec => "exec",
+                        SkillCategory::Verify => "verify",
+                        SkillCategory::Converge => "converge",
+                    }
+                ),
+            });
+        }
+
+        fs::create_dir_all(&skill_dir).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to create skill dir {:?}: {e}", skill_dir),
+            }
+        })?;
+
+        let yaml = serde_yaml::to_string(&*skill).map_err(|e| TaijiError::KnowledgeStoreUnavailable {
+            context: format!("failed to serialise skill {}: {e}", skill.id),
+        })?;
+        let tmp = path.with_extension("yaml.tmp");
+        {
+            let mut f = fs::File::create(&tmp).await.map_err(|e| TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to create skill tmp {:?}: {e}", tmp),
+            })?;
+            f.write_all(yaml.as_bytes()).await.map_err(|e| TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to write skill tmp {:?}: {e}", tmp),
+            })?;
+            f.flush().await.map_err(|e| TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to flush skill tmp {:?}: {e}", tmp),
+            })?;
+        }
+        fs::rename(&tmp, &path).await.map_err(|e| TaijiError::KnowledgeStoreUnavailable {
+            context: format!("failed to rename skill tmp {:?}: {e}", path),
+        })?;
+        Ok(())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2100,5 +2361,91 @@ mod ucb_rank_tests {
         let r1 = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0);
         let r2 = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0);
         assert_eq!(r1, r2, "same input → same ranking (id lexicographic tiebreak)");
+    }
+
+    // ── V45 save_skill dual 校验 ──
+
+    #[tokio::test]
+    async fn test_save_skill_valid_dual_writes_folder() {
+        use crate::types::verification::{
+            CheckSeverity, SkillAsset, SkillImpl, SkillKind,
+        };
+        let dir = std::env::temp_dir().join(format!("taiji_save_skill_ok_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let guizang = GuizangClient::new(&dir).await.unwrap();
+        // file-exists（阴）dual=write（阳元层）→ 校验通过。
+        let mut skill = SkillAsset {
+            id: "file-exists".into(),
+            name: "交付物存在性".into(),
+            description: "test".into(),
+            tags: vec![],
+            examples: vec![],
+            input_modes: vec!["text".into()],
+            output_modes: vec!["text".into()],
+            category: None,
+            dual: "write".into(),
+            implementations: vec![SkillImpl {
+                kind: SkillKind::FileExists,
+                target: "deliverables/*".into(),
+                params: serde_json::json!({}),
+                severity: Some(CheckSeverity::Hard),
+                pass_condition: "产物存在".into(),
+            }],
+            agent_target: String::new(),
+            confidence: 0.8,
+            version: 0,
+            status: "active".into(),
+            stats: crate::types::verification::CheckStats::default(),
+            env_tags: vec![],
+            parent_id: None,
+            variant_of: None,
+        };
+        guizang.save_skill(&mut skill).await.expect("valid dual saves");
+        assert_eq!(skill.version, 1, "首次写 version=1");
+        let path = dir.join("yin/skills/verify/file-exists/skill.yaml");
+        assert!(path.exists(), "应写入文件夹格式 {:?}", path);
+        // 重读。
+        let loaded = guizang.load_skill_assets(crate::types::verification::SkillCategory::Verify).await.unwrap();
+        assert!(loaded.iter().any(|s| s.id == "file-exists"), "读回成功");
+    }
+
+    #[tokio::test]
+    async fn test_save_skill_invalid_dual_rejected() {
+        use crate::types::verification::{
+            CheckSeverity, SkillAsset, SkillImpl, SkillKind,
+        };
+        let dir = std::env::temp_dir().join(format!("taiji_save_skill_bad_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let guizang = GuizangClient::new(&dir).await.unwrap();
+        let mut skill = SkillAsset {
+            id: "bogus-skill".into(),
+            name: "测试".into(),
+            description: "test".into(),
+            tags: vec![],
+            examples: vec![],
+            input_modes: vec!["text".into()],
+            output_modes: vec!["text".into()],
+            category: None,
+            dual: "nonexistent-dual".into(),
+            implementations: vec![SkillImpl {
+                kind: SkillKind::FileExists,
+                target: "deliverables/*".into(),
+                params: serde_json::json!({}),
+                severity: Some(CheckSeverity::Hard),
+                pass_condition: "x".into(),
+            }],
+            agent_target: String::new(),
+            confidence: 0.5,
+            version: 0,
+            status: "active".into(),
+            stats: crate::types::verification::CheckStats::default(),
+            env_tags: vec![],
+            parent_id: None,
+            variant_of: None,
+        };
+        let err = guizang.save_skill(&mut skill).await;
+        assert!(err.is_err(), "dual 不存在应拒绝保存");
+        let msg = err.unwrap_err().to_string();
+        assert!(msg.contains("nonexistent-dual"), "err 应含 dual id: {}", msg);
     }
 }

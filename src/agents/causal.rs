@@ -50,7 +50,7 @@ use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 use crate::types::task::DecomposeResult;
 use crate::types::verification::{
-    CheckKind, CheckSpec, SkillCategory, SkillReport, ConvergenceDecision, ConvergenceStatus,
+    SkillCategory, SkillReport, ConvergenceDecision, ConvergenceStatus,
     VerificationReport, VerificationRoute,
 };
 
@@ -263,12 +263,15 @@ impl CausalVerifyAgentBuilder {
         // L0 机械 + L1 契约：确定性裁决，任一 hard 机械项失败直接短路，
         // LLM 不可翻案。契约加载失败上抛（无降级原则 — §8.20）；
         // guizang 未接线（None）→ 契约层跳过并 warn（测试/异常路径）。
-        // contracts 提升到外层作用域：一次加载，供 llm_judgement 收集复用。
-        // V44 去分区化：统一从根级资产树加载（verify_model 仍优先决定验证模型，
-        // 但资产不再按模型分区——§10.1 统计层隔离）。
-        let contracts: Vec<crate::types::agent::VerificationAsset> =
+        // V45 双轨：合并视图加载（元层 ∪ 资产层，同 id 资产优先——元层保底）。
+        let contracts: Vec<crate::types::verification::SkillAsset> =
             if let Some(guizang) = &self.guizang {
-                SkillEngine::load_skills(guizang).await?
+                SkillEngine::load_skill_catalog(
+                    guizang,
+                    crate::types::verification::SkillCategory::Verify,
+                    crate::infra::skill_catalog::ToolProfile::Full,
+                )
+                .await?
             } else {
                 tracing::warn!(
                     task_id = %self.engine_ctx.task_id,
@@ -277,7 +280,7 @@ impl CausalVerifyAgentBuilder {
                 Vec::new()
             };
         let skill_report: SkillReport =
-            SkillEngine::run_checks(&contracts, &self.engine_ctx.task_dir).await;
+            SkillEngine::run_checks_assets(&contracts, &self.engine_ctx.task_dir).await;
 
         if !skill_report.passed {
             tracing::warn!(
@@ -302,10 +305,15 @@ impl CausalVerifyAgentBuilder {
         // llm_judgement 项收集（L2 兜底 — 唯一留给 LLM 的检查项类型）。
         // 机械全过 + 有契约 + 无 llm_judgement 项 → 直接 PASS（LLM 零调用）：
         // 契约完备即收敛（验证符号化的直接收益，§8.23 MVP-1 验收）。
-        let llm_judgements: Vec<&CheckSpec> = contracts
+        let llm_judgements: Vec<(&str, &crate::types::verification::SkillImpl)> = contracts
             .iter()
-            .flat_map(|v| v.checks.iter())
-            .filter(|c| c.kind == CheckKind::LlmJudgement)
+            .flat_map(|v| {
+                v.implementations
+                    .iter()
+                    .map(|i| (v.id.as_str(), i))
+                    .collect::<Vec<_>>()
+            })
+            .filter(|(_, c)| c.kind == crate::types::verification::SkillKind::LlmJudgement)
             .collect();
 
         if !skill_report.results.is_empty() && llm_judgements.is_empty() {
@@ -372,7 +380,7 @@ impl CausalVerifyAgentBuilder {
                 .collect();
             let criteria: Vec<String> = llm_judgements
                 .iter()
-                .map(|c| {
+                .map(|(sid, c)| {
                     // V33/MVP-3: fork 变体 strictness 档位注入（§8.21「收紧判据」机械实现）——
                     // params.strictness == "strict" → 从严裁决指令（证据不足即 FAIL）。
                     let strict = c.params.get("strictness").and_then(|v| v.as_str())
@@ -380,10 +388,10 @@ impl CausalVerifyAgentBuilder {
                     if strict {
                         format!(
                             "[{}] {}（从严档：证据不足即判 FAIL，禁止宽松推断）",
-                            c.id, c.pass_condition
+                            sid, c.pass_condition
                         )
                     } else {
-                        format!("[{}] {}", c.id, c.pass_condition)
+                        format!("[{}] {}", sid, c.pass_condition)
                     }
                 })
                 .collect();
@@ -667,18 +675,22 @@ impl CausalConvergeAgentBuilder {
         let client: Arc<deepseek::Client> = self.provider.client_for(&self.provider_name)?;
 
         // ── Step 1.5: SkillEngine 机械执行 converge Skill（V43 §6.6/§10.1）──
-        // L0 机械 + L1 Skill：加载 yin/skills/converge/ 全部 active Skill，
+        // L0 机械 + L1 Skill：加载 yin/skills/converge/ 全部 active Skill（V45 合并视图），
         // 确定性裁决。converge Skill 的 checks 全部为 llm_judgement 类（soft）——
         // 不触发 hard 短路，仅收集注入 LLM prompt 供参考。
         // guizang 未接线（None）→ converge Skill 层跳过并 warn。
-        // V44 去分区化：统一从根级资产树加载 converge Skill。
         let (converge_skills, converge_skill_report) = if let Some(guizang) = &self.guizang {
-            let skills =
-                SkillEngine::load_skills_by_category(guizang, SkillCategory::Converge).await?;
+            let skills = SkillEngine::load_skill_catalog(
+                guizang,
+                SkillCategory::Converge,
+                crate::infra::skill_catalog::ToolProfile::Full,
+            )
+            .await?;
             if skills.is_empty() {
                 (skills, None)
             } else {
-                let report = SkillEngine::run_checks(&skills, &self.engine_ctx.task_dir).await;
+                let report =
+                    SkillEngine::run_checks_assets(&skills, &self.engine_ctx.task_dir).await;
                 if !report.passed {
                     tracing::warn!(
                         task_id = %self.engine_ctx.task_id,
@@ -740,9 +752,14 @@ impl CausalConvergeAgentBuilder {
             // 收集 llm_judgement 判据
             let criteria: Vec<String> = converge_skills
                 .iter()
-                .flat_map(|v| v.checks.iter())
-                .filter(|c| c.kind == CheckKind::LlmJudgement)
-                .map(|c| format!("[{}] {}", c.id, c.pass_condition))
+                .flat_map(|v| {
+                    v.implementations
+                        .iter()
+                        .map(|i| (v.id.as_str(), i))
+                        .collect::<Vec<_>>()
+                })
+                .filter(|(_, c)| c.kind == crate::types::verification::SkillKind::LlmJudgement)
+                .map(|(sid, c)| format!("[{}] {}", sid, c.pass_condition))
                 .collect();
             let section = if criteria.is_empty() {
                 format!(
