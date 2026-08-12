@@ -460,7 +460,7 @@ impl RecursiveDecomposeTool {
         }
 
         // ── Converge via CausalAgent (with ALL results, old + new) ──────
-        // V36：converge 在父分区执行（parent_meta_ctx.model 路由 provider）。
+        // V44：converge 在根级资产树执行（parent_meta_ctx.model 仅作路由）。
         let converge_agent =
             self.factory
                 .create_causal_converge_agent(&self.engine_ctx, &self.parent_meta_ctx)?;

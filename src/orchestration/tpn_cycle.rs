@@ -1067,8 +1067,9 @@ fn trunc(s: &str, max_len: usize) -> String {
 /// 调用方为 TPN PASS 分支；I/O 失败由调用方 warn（学习是增强层，不阻断 PASS）。
 /// V35/MVP-6：assets_used（编排所选资产，DMN 回传依据 §8.21）与 passed（任务级
 /// PASS 信号——prompts 任务级归因；serde default 旧 pending 零迁移）。
-/// V36：model_key（分区一致性 §8.3——DMN 按路由模型分区回传；serde default
-/// 旧 pending 零迁移，None = 根/未分区）。
+/// V36→V44：model_key 作为统计键随 pending 入队（§10.1 去分区化——DMN 回传
+/// 统一落根级资产树，model_key 仅用于 model_stats 索引；serde default
+/// 旧 pending 零迁移，None = 未指定模型）。
 pub(crate) async fn enqueue_dmn_pending(
     data_root: &Path,
     task_id: &str,

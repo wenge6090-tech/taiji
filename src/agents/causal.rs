@@ -264,7 +264,6 @@ impl CausalVerifyAgentBuilder {
         // LLM 不可翻案。契约加载失败上抛（无降级原则 — §8.20）；
         // guizang 未接线（None）→ 契约层跳过并 warn（测试/异常路径）。
         // contracts 提升到外层作用域：一次加载，供 llm_judgement 收集复用。
-        // V36 分区一致性（§8.3）：契约从路由模型分区加载（meta_ctx.model →
         // V44 去分区化：统一从根级资产树加载（verify_model 仍优先决定验证模型，
         // 但资产不再按模型分区——§10.1 统计层隔离）。
         let contracts: Vec<crate::types::agent::VerificationAsset> =

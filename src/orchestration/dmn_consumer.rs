@@ -207,8 +207,8 @@ impl DmnConsumer {
                         value["checks"].clone(),
                     ) {
                         Ok(checks) => {
-                            // V36 分区一致性（§8.3）：pending 携带 model_key（MetaAgent
-                            // 路由结果）——回传与演化落到路由模型分区；None = 根/legacy。
+                            // V44 去分区化（§10.1）：pending 携带 model_key 仅作统计键
+                            // ——回传与演化统一落根级资产树；None = 未指定模型。
                             let model_key = value.get("model_key").and_then(|v| v.as_str());
                             // V35/MVP-6: prompts 任务级回传（assets_used + passed；
                             // 失败仅 warn 不阻断 checks 路径——prompts 回传是增强层）
@@ -249,7 +249,8 @@ impl DmnConsumer {
                                 .await
                             {
                                 Ok(_updated) => {
-                                    // ── V36: model_stats 元权重表回传（BCP §6.4——路由数据源）。
+                                    // ── V36: model_stats 元权重表回传（BCP §6.4——路由数据源；
+                                    // V44：model_key 仅作统计键，表存根级）。
                                     // checks 首项聚合（同任务摊派值一致）；失败仅 warn（增强层，
                                     // 不阻断 backprop 主流程——频率统计已持久化）。
                                     if let Some(key) = model_key {
@@ -568,9 +569,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_backprop_updates_model_stats_in_partition() {
+    async fn test_backprop_updates_model_stats_in_root() {
         // V36 元权重表回传（BCP §6.4）：pending 带 model_key + checks →
-        // backprop 后 model_stats.yaml 出现该 model_key 行（首项四维聚合）。
+        // backprop 后根级 model_stats.yaml 出现该 model_key 行（首项四维聚合）。
         let data_root = create_test_root("model_stats_backprop").await;
         let pending = data_root.join("pending");
         let cancel = CancellationToken::new();

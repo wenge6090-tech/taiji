@@ -72,7 +72,7 @@ taiji 的全部动力学由一个模式在不同尺度上的重复构成：
 
 | Agent | 相位 | 易经 | 职责 | 权限面 |
 |-------|------|------|------|--------|
-| **MetaPhase** | 权重更新·元 | 无极生太极 | 遍历归藏图谱提取推理路径，注入认知偏置 | **纯符号层——零 LLM 调用（V43）**：读 model_stats → UCB 路由模型；读 mode_stats → UCB 路由模式；UCB 排序资产 → 选择最佳匹配 system prompt → 组装 MetaContext。全部是确定性函数复合（`compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ resolve_partition`）。无工具注册（不调 LLM），归藏只读 |
+| **MetaPhase** | 权重更新·元 | 无极生太极 | 遍历归藏图谱提取推理路径，注入认知偏置 | **纯符号层——零 LLM 调用（V43）**：读 model_stats → UCB 路由模型；读 mode_stats → UCB 路由模式；UCB 排序资产 → 选择最佳匹配 system prompt → 组装 MetaContext。全部是确定性函数复合（`compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ resolve_root`）。无工具注册（不调 LLM），归藏只读 |
 | **FittingAgent** | 概率拟合·阳 | 阳 | 沿路径发散探索，LLM 做微观概率采样，可递归拆解 | **执行权**：注册 5 个 L1 Skills + causal_verify（全节点）+ recursive_decompose（**仅编排模式节点**），受 SafetyHook + TraceHook 约束（全节点唯一持有变更世界工具的相位） |
 | **CausalAgent** | 因果验证·阴 | 阴 | 将结果收敛回符号约束，验证宏观因果性 | **裁判权 + 收集权**：注册只读工具（read / webfetch）供 LLM 逐文件核验 + 联网核实；verify 模式下 SkillEngine 自动执行 `yin/skills/verify/` 全部 active Skill（L0/L1 机械短路），converge 模式下额外加载 `yin/skills/converge/`；受 SafetyHook 约束；LLM 裁决路由（PASS / BACK_TO_TPN / BACK_TO_META）。**编排节点用收敛模板（converge），执行节点用验证模板（verify）** |
 
@@ -864,10 +864,8 @@ classDiagram
     }
 
     class AssetRef {
-        %% 
-        +partition: ModelKey
         +id: String
-        +kind: String  %% prompt|workflow|verification
+        +asset_type: String  %% prompt|verification
     }
 
     class ModelStats {
@@ -1147,7 +1145,7 @@ SafetyHook 和 TraceHook 以 `AgentHook` trait 实现，注册到带工具的 Ri
 
 | 相位 | 工具注册 | SafetyHook | 权限角色 |
 |------|:---:|:---:|------|
-| 元 (MetaPhase) | **无工具注册**（V43 纯符号化——不调 LLM，不需要工具；MetaPhase = compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ resolve_partition，七个纯函数，零 LLM） | **不挂载**（无工具，无攻击面） | 认知者：纯符号决策流水线——读归藏统计 + UCB bandit 路由模型/模式/资产 + 组装 MetaContext；不调 LLM，无执行面 |
+| 元 (MetaPhase) | **无工具注册**（V43 纯符号化——不调 LLM，不需要工具；MetaPhase = compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ resolve_root，七个纯函数，零 LLM） | **不挂载**（无工具，无攻击面） | 认知者：纯符号决策流水线——读归藏统计 + UCB bandit 路由模型/模式/资产 + 组装 MetaContext；不调 LLM，无执行面 |
 | FittingAgent | 5 L1 Skills + causal_verify（两模式）；recursive_decompose（**仅编排模式**） | **挂载**（+ TraceHook） | 执行者：唯一持有变更世界工具、受安全约束的权限面；编排节点可拆解，执行节点专注直接产出 |
 | CausalAgent | read + webfetch（只读收集 / 联网核实）——SkillEngine 自动执行 yin/skills/verify/ + yin/skills/converge/ 全部 active Skill（L0/L1 机械短路），LLM 逐文件核验 + 联网核实后裁决路由 | **挂载** | 裁判者 + 收集者：LLM 裁决路由，SkillEngine 自动执行机械验证（LLM 不可绕过），无执行面 |
 
@@ -1668,7 +1666,7 @@ flowchart LR
 MetaPhase 从「LLM 编排 + 模式决策」进化为**归藏本体论上的纯符号函数复合**——零 LLM 调用，全部是文件读取 + 数学运算（贝叶斯后验 × UCB bandit × 字符串选择）。Palantir 范式：决策不调 AI，决策读数据。
 
 ```
-MetaPhase = compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ resolve_partition
+MetaPhase = compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ resolve_root
             ────────────────────────────────────────────────────────────────────────
             七个纯函数，一个 compose，零 LLM。
             每个函数是归藏本体论上的一个态射 (morphism)，组合态射 = 元相管线。
@@ -1696,7 +1694,7 @@ MetaPhase = compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ 
            │  adjacency_matrix                   │
            ├─────────────────────────────────────┤
            │              存在层（对象）           │
-           │  resolve_partition  list_assets     │
+           │  resolve_root      list_assets     │
            │  search_by_tags                     │
            └─────────────────────────────────────┘
 ```
@@ -1704,16 +1702,16 @@ MetaPhase = compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ 
 #### 存在层：解析对象空间
 
 ```rust
-// f: Task × Guizang → Partition
+// f: Task × Guizang → Guizang（V44：根级资产树，无分区派生）
 // 集合论映射：任务标签 → 统计检索
-fn resolve_partition(task: &Task, guizang: &Guizang, model_stats: &ModelStats) -> Partition {
-    let model_key = route_model(model_stats, &task.tags);
-    guizang.for_model(model_key)
+fn resolve_root(task: &Task, guizang: &Guizang, model_stats: &ModelStats) -> Guizang {
+    let _model_key = route_model(model_stats, &task.tags); // 统计键（路由依据），资产树共享
+    guizang.clone()
 }
 
 // 幂集过滤：Set<Asset> × Predicate → Subset
-fn list_assets(partition: &Partition, tags: &[Tag]) -> Vec<Asset> {
-    partition.search_by_tags(tags)
+fn list_assets(guizang: &Guizang, tags: &[Tag]) -> Vec<Asset> {
+    guizang.search_by_tags(tags)
         .filter(|a| guard_confidence(a))  // confidence ≥ 0.3
         .collect()
 }
@@ -1728,10 +1726,10 @@ fn list_assets(partition: &Partition, tags: &[Tag]) -> Vec<Asset> {
 fn adjacency_matrix(assets: &[Asset]) -> SparseMatrix;
 
 // 阴阳对偶：二分图 YangAsset ↔ YinAsset
-fn get_counterpart(yang: &PromptAsset, partition: &Partition) -> Option<VerificationAsset>;
+fn get_counterpart(yang: &PromptAsset, guizang: &Guizang) -> Option<VerificationAsset>;
 
 // 贝叶斯后验关联：每个资产 → 同名 ModelAsset (α, β)
-fn get_posterior(asset: &Asset, partition: &Partition) -> BetaDistribution;
+fn get_posterior(asset: &Asset, guizang: &Guizang) -> BetaDistribution;
 ```
 
 #### 时间层：统计演化
@@ -1823,11 +1821,11 @@ fn compose_context(
 ) -> MetaContext {
     // 1. 存在层
     let model_key = route_model(model_stats, &task.tags);
-    let partition = resolve_partition(guizang, &model_key);
-    let assets = list_assets(&partition, &task.tags);
+    let root = resolve_root(guizang, &model_key);
+    let assets = list_assets(&root, &task.tags);
 
     // 2. 时间层 + 智能层
-    let models = partition.load_all_models();
+    let models = root.load_all_models();
     let ranked = rank_assets(&assets, &models);
 
     // 3. 智能层
@@ -1928,7 +1926,7 @@ MetaPhase 不调 LLM。LLM 用于**丰富归藏**（FittingAgent 执行 → 连�
 **数据流断点修复**：`MetaContext.assets_used`（serde default）记录本次编排选用的资产引用列表 → enqueue pending 时携带 → TraceRewardExtractor 据此回传——**这是 连山回传的唯一依据，缺失则无法学习**。token 成本（trace usage）与质量信号（VerificationReport 派生）已在既有数据中。
 
 **V35/MVP-6 定稿：assets_used 接线 + prompts 对称演化**：
-- **接线**：MetaPhase 编排时将选中资产（prompts + verifications，UCB 序消费的引用）写入 `MetaContext.assets_used`（`Vec<AssetRef>`：type/id/partition 三元组）→ enqueue_dmn_pending 携带 → backprop 按 assets_used 分发：verifications 走检查项级（既有 `backprop_checks` 按 check_id 匹配），prompts 走**任务级信号**（任务 PASS → 引用 prompts 各记 success；FAIL/BACK_TO_META → 记 fail）——同一 pending 负载、两套信号源（§6.2 实现层定稿）。
+- **接线**：MetaPhase 编排时将选中资产（prompts + verifications，UCB 序消费的引用）写入 `MetaContext.assets_used`（`Vec<AssetRef>`：asset_type/id 二元组）→ enqueue_dmn_pending 携带 → backprop 按 assets_used 分发：verifications 走检查项级（既有 `backprop_checks` 按 check_id 匹配），prompts 走**任务级信号**（任务 PASS → 引用 prompts 各记 success；FAIL/BACK_TO_META → 记 fail）——同一 pending 负载、两套信号源（§6.2 实现层定稿）。
 - **任务级信号源**：enqueue_dmn_pending 现有入参（checks）之外增加 task 结果信号（`passed: bool`）与 assets_used；无 assets_used 的历史 pending 零迁移（serde default 空 → 仅 checks 路径）。
 - **四算子对称**：fork/merge/prune 同一 reward 函数（§6.2）作用于 prompts——fork 门槛改由 prompts 的任务级 pass_rate 判定（同一 `FORK_PASS_RATE_THRESHOLD=0.6`）；merge 同组差 < 0.1；prune `μ < best − 2σ`（贝叶斯版，与 verifications 同式）；激活门槛（资产 ≥5 / 总采样 ≥50）两层分别独立判定。prompts 的 ModelAsset 同名 id 关联同样生效（先验映射同 §6.2.1）。
 - **演化顺序**：verifications 四算子 → prompts 四算子（同一次 evolve_contracts 调用内串行，单写者保持）。
@@ -2219,7 +2217,7 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 | `agents.yaml` | `rules: Vec<RuleSpec>` | AGENTS.md 避坑规则结构化版本 |
 | `topology.yaml` | `nodes`, `edges` | 流型拓扑图 |
 | `contracts.yaml` | `contracts: Vec<ContractSpec>` | 接口契约定义表 |
-| `env.yaml` | `model_version`, `config_hash`, `partition_key`, `runtime_constraints` | 环境信息 |
+| `env.yaml` | `model_version`, `config_hash`, `runtime_constraints` | 环境信息 |
 
 ---
 

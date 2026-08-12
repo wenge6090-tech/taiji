@@ -174,10 +174,10 @@ impl MetaAgentBuilder {
         task_type_tags: &[&str],
         handoff: Option<&str>,
     ) -> Result<MetaContext, TaijiError> {
-        // ── 0. 模型路由（V36，BCP §8.8 第 1 步——纯符号层，先于分区检索）──
+        // ── 0. 模型路由（V36，BCP §8.8 第 1 步——纯符号层）──
         // 读根级 model_stats 元权重表 → UCB 决策 model_key（全部无统计 → 默认）；
-        // 分区检索依赖路由结果（plan.md V32 阻塞点 #1 修正：路由是符号决策，
-        // 不需要 LLM）。model_stats 损坏 → 空表（load_model_stats 内 warn），
+        // 模型键只影响路由与统计回传（V44 去分区化，§10.1——资产树共享）。
+        // model_stats 损坏 → 空表（load_model_stats 内 warn），
         // 路由退化为默认模型。
         let model_key = {
             let stats = self.guizang.load_model_stats().await?;
@@ -186,7 +186,7 @@ impl MetaAgentBuilder {
         tracing::debug!(
             task_id = %self.task_id,
             model_key = %model_key,
-            "MetaAgent: model routed (分区检索目标)"
+            "MetaAgent: model routed"
         );
         // V37 异源裁判（BCP §8.8 相位级）：开关开启时从非主候选按 UCB 同公式
         // 选 Causal 专用验证模型（裁判 ≠ 运动员，§1.3 偏置对抗）；候选 <2 →
@@ -233,10 +233,10 @@ impl MetaAgentBuilder {
             tracing::debug!(
                 task_id = %self.task_id,
                 model_key = %model_key,
-                "No high-confidence prompt assets in partition — returning empty MetaContext (fallback)"
+                "No high-confidence prompt assets — returning empty MetaContext (fallback)"
             );
             let mut empty = MetaContext::empty();
-            // V36：分区空 ≠ 路由失败——模型选择保持（Fitting/Causal 按路由模型执行）。
+            // V44：资产缺失 ≠ 路由失败——模型选择保持（Fitting/Causal 按路由模型执行）。
             empty.model = Some(model_key.clone());
             // V37：降级路径同样保持异源裁判决策（模型选择与资产编排解耦）。
             empty.verify_model = verify_model.clone();

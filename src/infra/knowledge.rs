@@ -1185,7 +1185,7 @@ async fn merge_dir_recursive(src: PathBuf, dst: PathBuf) -> Result<(), TaijiErro
 /// V39 种子复制结果报告。
 #[derive(Debug, Clone, Default)]
 pub struct SeedReport {
-    /// 实际复制到目标分区的资产数。
+    /// 实际复制到根级资产树的资产数（V44）。
     pub copied: usize,
     /// 目标已存在而跳过的资产数（幂等）。
     pub skipped: usize,
@@ -1198,7 +1198,7 @@ pub struct SeedReport {
 ///   `"FittingAgent"` → `yang/prompts/`，`"CausalAgent"` → `yin/prompts/`
 /// - `verifications/*.yaml` → `yin/skills/verify/`（V43：verifications 概念已废弃）
 /// - `yin/verifications/*.yaml` → `yin/skills/verify/`（V43：迁移过渡目录）
-/// - models/ 不迁移（分区级，无需 yang/yin 拆分）
+/// - models/ 不迁移（根级统一存放，无需 yang/yin 拆分）
 /// - 目标已存在同名文件 → 跳过，不覆盖
 /// V42 归藏目录 yang/yin 迁移（BCP §10.1）——幂等，可重跑。
 /// V44：改为根级处理（不再遍历模型分区——分区已合并回根）。
