@@ -1499,6 +1499,133 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 
 ---
 
+### 6.2 UCB 检索（V32：UCB 选择替代纯 confidence 排序）
+
+```mermaid
+flowchart LR
+    subgraph "MetaAgent 加载归藏（当前模型分区）"
+        QUERY["task_type_tags → 标签匹配 assets"]
+        QUERY --> LOAD["加载候选资产（prompts + workflows + verifications）"]
+        LOAD --> RANK["UCB 排序（利用 + 探索）"]
+        RANK --> MC["产出 → MetaContext（含 assets_used）"]
+    end
+
+    subgraph "{model_key} 分区"
+        P1["yang/prompts/*.yaml + yin/prompts/*.yaml 节点"]
+        P2["yang/workflows/*.yaml 节点（V32）"]
+        P3["yin/verifications/*.yaml 节点（V32）"]
+        S["AssetStats 统计"]
+    end
+
+    RANK --> S
+```
+
+检索策略：标签精确匹配 → 关键词子串搜索 → **UCB 排序**（非纯 confidence）：
+
+```
+score = avg_reward + C · √(ln N_total / N_node)
+        └─利用：已验证好资产─┘ └───探索：样本少/新变体的加分──┘
+```
+
+- `avg_reward` 来自 AssetStats（§6.4 回报函数）；`N_total` 为候选集总采样数，`N_node` 为节点采样数
+- **N=0 新资产给最大探索分**——保证冷启动资产能被采样，避免好资产被饿死
+- **统计选择门槛**：`n < min_samples`（默认 3）的资产不参与利用排序，只走探索分——防止小样本假置信
+- `confidence` 字段保留为**初始先验**（人工种子/经验值），进入利用排序后由 avg_reward 主导
+- env_tags 与当前环境指纹不匹配的候选降权（V32 环境维度）
+- 不支持向量嵌入，无关系图扩散
+
+**实现层定稿（V35，MVP-5：检索数学化）**——prompts 检索排序兑现上述 UCB 设计（meta.rs 现状为手填 confidence 降序，非学习统计）：
+
+```
+score(id) = μ(id) + C · √( ln N_total / (n_id + 1) )
+
+μ(id) = models/{id}.yaml 后验均值      （存在 ModelAsset）
+      | §6.4.1 先验映射 α=1+k·c, β=1+k·(1−c) → μ=α/(α+β)（无 ModelAsset，未采样）
+n_id  = usage_count（prompts 任务级回传计数，MVP-6 起增长）
+C     = 1.414（常量，不随资产量调整——UCB1 渐近最优性，§6.3 设计不变）
+```
+
+**确定性保证（硬约束）**：n+1 平滑而非 n=0→∞ 特判——全冷启动时 score = 先验 μ 降序（确定性二级键，与 read_dir 顺序无关）；μ 缺失时回退 confidence 直接映射（同一公式，非新先验）。**过滤防线保留**：confidence ≥ 0.3 阈值过滤仍先于排序执行（零资产降级路径不变）。排序位置：knowledge.rs `search_prompts` 调用后（返回前），MetaAgent 消费顺序即 UCB 序——装配顺序：`tags 匹配 → 阈值过滤 → 加载 → UCB 排序`。
+
+**信号粒度说明（V35）**：prompts 的采样信号是**任务级**（任务 PASS → 该任务编排所选 prompts 各记一次成功；FAIL/BACK_TO_META → 记失败），与 verifications 的**检查项级**（CheckResult 逐项）粒度不同——同一 backprop 管道、两套信号源（§8.21 MVP-6）。
+
+
+### 6.3 MCTS 四算子（V32：MCTS 四算子 + 被动/主动双轨）
+
+> **状态：** `dmn_consumer.rs` + `cognition_evolver.rs` 已实现（V31 及之前为占位/部分实现），V32 将占位算子升级为真实 MCTS 实现。纯云端架构下 DMN 在符号层（YAML）独立运作，不依赖本地模型。日常 `taiji run` 默认不激活以保持 周易只读模式，可通过 `--with-dmn` flag 启用。
+>
+> **激活条件：** 归藏各层有足够资产（每层至少 5 个）+ 累积 50+ 周易执行轨迹；统计选择需 `n ≥ min_samples`（3）。
+
+**回报函数（写死进 BCP，config `runtime.dmn.reward_weights` 可覆盖）：**
+
+```
+reward = w_pass·pass_rate + w_quality·avg_quality − w_cost·avg_cost_tokens − w_rounds·avg_verify_rounds
+默认: w_pass=0.5  w_quality=0.3  w_cost=0.2  w_rounds=0.1
+```
+
+- `pass_rate`：PASS 占比（stats.pass_count / n）
+- `avg_quality`：质量分均值——**派生而非新增字段**：route 映射（PASS=1.0 / BACK_TO_TPN=0.4 / BACK_TO_META=0.2）× VerificationReport.confidence（不改 VerificationReport schema）
+- `avg_cost_tokens`：trace `completion_response.usage.input_tokens` 累加均值（已在记录，零新增）
+- `avg_verify_rounds`：BACK_TO_TPN 次数均值（验证轮数 = 收敛速度倒数）
+
+**四维信号全部来自既有数据——零新增持久化文件。** 回报函数即 连山的改进方向（更省 token / 更精准 / 更快收敛 / 更高通过率），由系统价值判断写死，不由 LLM 自定。**V33 统计粒度：** 统计对象从「资产」精确到「检查项」（CheckResult 逐项通过率 / 耗时，随 verify_state.json 既有路径回传）——MCTS 演化的对象是契约有效性空间（fork/merge/prune 操作契约），资产级统计由检查项聚合（§8.21）。
+
+```mermaid
+flowchart LR
+    PASS["周易 PASS → enqueue pending/{id}.json（携带 assets_used）"] --> READ["TraceRewardExtractor\n读 meta_ctx.assets_used + trace usage + verify_state"]
+
+    subgraph "连山压缩算子（后台 tokio::spawn）"
+        READ --> BP["δ-backprop: 统计回传（父节点 γ=0.5 衰减）"]
+        BP --> FORK["δ-fork: 低回报资产 → 变体扩展（复制+降权+标记，内容修订走人工通道）"]
+        FORK --> MRG["δ-merge: 相似变体合并（内容相似 + 回报无显著差异）"]
+        MRG --> PRN["δ-prune: N≥5 且低于组内最优 >2σ → 淘汰"]
+        PRN --> WRITE["write YAML → 分区归藏 (version++, 单写者) + model_stats"]
+    end
+
+    WRITE --> NEXT["下轮 MetaAgent 自动读取最新认知偏置"]
+
+    subgraph "主动学习（空闲窗口）"
+        ACTIVE["pending 空 + 预算允许 → 高不确定性节点\n（低N/高方差，即 UCB 探索项最大者）"]
+        ACTIVE --> EXP["模板化探索任务\n（Execution/最小预算/不递归/每窗口限量）"]
+        EXP --> RUN["experiments/ 队列 → runner 执行 → trace 回传"]
+    end
+```
+
+**被动学习（任务驱动）**：周易 PASS → pending 入队 → 统计回传——只能在任务发生时学习。
+
+**主动学习（信息增益驱动）**：连山在 **pending 空 + 预算内**的空闲窗口，选择高不确定性节点（低 N / 高方差——即 UCB 探索项最大者）→ 生成**模板化探索任务**（静态模板，不调 LLM："用工作流 W 完成类型 X 的最小任务并记录 token 消耗与结果"）→ 入 experiments/ 队列执行（Execution 模式 + 最小预算 + **不递归** + 每窗口限量 + token 成本上限）→ trace 照常回传。**护栏：探索任务不产生新探索任务（无递归）；连山纯符号层承诺保持（不调 LLM 生成资产内容）。**
+
+**时序分离**：周易执行与 连山写入不并发（周易只读，单写者互斥，§8.3）；主动学习在空闲窗口进行。
+
+**元权重表（model_stats.yaml，V36 落地）**：`model_key → StatsRow(n/pass_count/cost_sum/quality_sum/rounds_sum)`（serde default 零迁移），存于 knowledge 根（跨分区共享），由 连山回传更新（dmn_consumer 在 backprop 分支读取 pending 的 `model_key` + checks 首项四维聚合——同任务摊派值一致，与 CheckResult 摊派同构），ModelRouter 读取（§8.8）——同一 UCB/bandit 机制服务资产选择与模型路由。**回传数据源全部来自既有 pending 负载**（`model_key`/`checks[].cost_tokens|verify_rounds|quality`），零新增持久化文件。模型级 `quality` 用任务级 passed 映射（PASS=1.0，pending 仅 PASS 入队 → 恒 1.0，字段保留供未来 FAIL 入队扩展）。
+
+
+### 6.3.1 贝叶斯后验接入（MVP-3.5，models/ 层激活）
+
+> **状态：** `ModelAsset`（header + alpha/beta）V22 已定义，本轮激活写入者与消费方（`bayesian_update` 由 log-only 占位升级为持久化）。频率统计（CheckStats）保留——n/pass_count 仍是贝叶斯更新的数据源，兼容既有消费方。
+
+**Beta-Bernoulli 共轭更新**（每验证契约一个后验，id 同名关联）：
+
+```
+先验映射（ModelAsset 初始化，§6.3 confidence=初始先验语义落地）：
+  α = 1 + k·confidence    β = 1 + k·(1 − confidence)   （k = prior_strength，默认 10）
+后验更新（backprop 双轨写入）：
+  α += success    β += fail    （success/fail 为该资产全部检查项的聚合成败）
+后验均值：  μ = α / (α + β)
+后验标准差：σ = √( α·β / ((α+β)² · (α+β+1)) )
+```
+
+**演化决策升级**（`bayesian_enabled` 默认 true；false 时回退频率路径）：
+
+| 算子 | 频率版（MVP-3，既有） | 贝叶斯版（MVP-3.5） |
+|------|------|------|
+| fork 阈值 | pass_rate < 0.6 | 后验均值 < 0.6（低采样自动收缩向先验，偶然失败不误触发） |
+| merge 判定 | 通过率差 < 0.1 | 后验均值差 < 0.1（同分根优先保留，既有规则不变） |
+| prune 淘汰 | 组内最优 − 2σ（组内率标准差） | 组内最优后验均值 − 2·σ(候选自身 Beta 后验) |
+
+**设计要点**：① 先验强度 k 配置化（`runtime.dmn.prior_strength`），k 大 → 低采样结果更贴先验；② fork 变体（`{root}-v1`）对应独立 ModelAsset（同名 id）——变体后验天然隔离，与 check_id 重命名机制同构；③ 主动学习探索分的 avg_reward 用后验均值（`bayesian_enabled` 开时）；④ 单写者约束保持——`bayesian_update` 仅在 `backprop_checks` 内被调用，backprop 仅被 连山压缩算子 调用；⑤ **惩罚通道（V34）**：TraceConsistency 机械 FAIL 的 CheckResult（passed=false）经既有 pending/backprop 路径 β++ ——编造诱发的资产自动降权，无需新算子。
+
+
 ## 连山关键架构决策（摘自原 §8）
 
 ### 8.3 周易只读 / 连山单写者（V32：分区维度）
@@ -1654,7 +1781,7 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 
 ### 10.1 按模型分区的资产树模型（V32 重构 / V36 实现层定稿 / V42 阴阳对偶 + 流型拓扑）
 
-> **状态：V36 落地**（V32 蓝图承诺，V33-35 未兑现，V36 实现）。V42 目录结构重新设计（阴阳对偶 + manifold + skills）——**本次为蓝图定稿，代码尚未迁移**。落地要点：① `LiluoClient` 支持 `root_dir`（knowledge 根）+ `data_dir`（活动目录）双路径——根 client 的 `for_model(key)` 派生分区 client（`data_dir = root/{model_key}`），`model_stats.yaml` 恒在根级；② 迁移函数 `migrate_to_partitioned(root, default_key)`（幂等：旧根资产目录 → 默认模型分区）；③ 检索/写回均走分区 client——MetaAgent 按路由结果分区检索（§8.8），DMN 按 pending 的 `model_key` 分区回传（§6.4）；④ `MetaContext.model` 是分区唯一载体（§8.3 分区一致性）。
+> **状态：V36 落地**（V32 蓝图承诺，V33-35 未兑现，V36 实现）。V42 目录结构重新设计（阴阳对偶 + manifold + skills）——**本次为蓝图定稿，代码尚未迁移**。落地要点：① `LiluoClient` 支持 `root_dir`（knowledge 根）+ `data_dir`（活动目录）双路径——根 client 的 `for_model(key)` 派生分区 client（`data_dir = root/{model_key}`），`model_stats.yaml` 恒在根级；② 迁移函数 `migrate_to_partitioned(root, default_key)`（幂等：旧根资产目录 → 默认模型分区）；③ 检索/写回均走分区 client——MetaAgent 按路由结果分区检索（§8.8），连山按 pending 的 `model_key` 分区回传（§6.4）；④ `MetaContext.model` 是分区唯一载体（§8.3 分区一致性）。
 
 **归藏按模型分区（V42 阴阳对偶结构）**：每个模型（`model_key = {provider}-{model}` slug）拥有独立的资产树：
 
@@ -1726,199 +1853,105 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 
 **模型-领域学习单元（V37 语义定稿）**：分区不只是资产隔离，而是**学习单元**——每个分区是 (模型 × 约束系统) 的绑定主体：**模型提供概率地形**（猜想源：LLM 生成候选），**约束系统**（prompts/workflows/verifications，V38 起 truths 内置化不属资产）**提供机械判据**（反驳源：ContractEngine 验证候选），**分区统计**（stats / models/ 贝叶斯后验）**提供累积**（选择源：连山回传与演化），三者绑定为一个**独立演化的领域学习单元**——模型不变，学习发生在围绕它的符号结构。推论（机制已存在，V37 显式化）：**契约难度随模型能力自适应**——各分区统计独立 → 弱模型分区通过率低 → fork 宽松变体（`strictness="loose"`）；强模型分区通过率高 → fork 严格变体（`strictness="strict"`）；同一领域契约在不同分区按各自统计独立演化（难度 = f(模型能力)），**变体树不跨分区**（fork/merge/prune 只作用于本分区资产）。
 
-周易执行期间只读，连山（连山）单写者更新（**分区维度：任务级路由下任务内所有 Agent 使用同一分区**——按路由模型的 model_key，MetaContext.model 是唯一载体；V37 相位级路由激活后各相位按其路由模型用对应分区，§8.8）。
+周易执行期间只读，连山单写者更新（**分区维度：任务级路由下任务内所有 Agent 使用同一分区**——按路由模型的 model_key，MetaContext.model 是唯一载体；V37 相位级路由激活后各相位按其路由模型用对应分区，§8.8）。
 
-**Skills 与归藏的关系：** 5 个内置 Skill（read/write/bash/search/webfetch）在 Rust 中硬编码注册到 FittingAgent，**不读取** `skills/` 目录。归藏中的技能统计（success_rate/use_count）作为元数据由连山（连山）维护。未来 SkillCompiler 激活后，skills/ 将成为完整的归藏第四类可演化资产（§1.4 泛化-压缩循环）。
+**Skills 与归藏的关系：** 5 个内置 Skill（read/write/bash/search/webfetch）在 Rust 中硬编码注册到 FittingAgent，**不读取** `skills/` 目录。归藏中的技能统计（success_rate/use_count）作为元数据由连山维护。未来 SkillCompiler 激活后，skills/ 将成为完整的归藏第四类可演化资产（§1.4 泛化-压缩循环）。
 
-**种子复制（V39，模型切换路径命令化）**：`taiji seed <target_key> [--from <source_key>]`——把源分区的**活跃种子资产**（`prompts/` + `verifications/` 中 status != pruned）文件级复制到目标分区（默认源 = 配置的默认模型分区）。复制范围定界（§6.1 学习单元语义）：**不复制 `models/`（贝叶斯后验 = 该模型的累积，新单元从零开始；复制旧统计会污染路由 UCB——用旧模型的成功经验指导新模型）**；不复制 skills/（内置硬编码）；version 保持原值（内容快照，非演化写）。幂等：目标已存在同名资产 → 跳过不覆盖；目标分区自动创建（`for_model`）。机械检查项（L0/L1）与模型无关可直接复用；llm_judgement/prompts 教学资产随模型地形可能失配，由目标分区 连山演化自然淘汰（贝叶斯降权 + prune）。源分区缺失 → 上抛（无降级原则）。
+**种子复制（V39，模型切换路径命令化）**：`taiji seed <target_key> [--from <source_key>]`——把源分区的**活跃种子资产**（`yang/prompts/` + `yang/workflows/` + `yin/prompts/` + `yin/verifications/` 中 status != pruned）文件级复制到目标分区（默认源 = 配置的默认模型分区）。复制范围定界（§6.1 学习单元语义）：**不复制 `models/`（贝叶斯后验 = 该模型的累积，新单元从零开始；复制旧统计会污染路由 UCB——用旧模型的成功经验指导新模型）**；不复制 skills/（标准化 Skills 是该模型分区的学习累积）；version 保持原值（内容快照，非演化写）。幂等：目标已存在同名资产 → 跳过不覆盖；目标分区自动创建（`for_model`）。机械检查项（L0/L1）与模型无关可直接复用；llm_judgement/prompts 教学资产随模型地形可能失配，由目标分区连山演化自然淘汰（贝叶斯降权 + prune）。源分区缺失 → 上抛（无降级原则）。
 
 
 ### 10.2 资产字段契约
 
-**通用字段（所有层共享）：**
+归藏资产按**阴阳对偶 + 拓扑 + 技能**三类组织，每类有独立的字段契约。所有资产共享通用树结构字段（`env_tags` / `parent_id` / `variant_of` / `stats`），serde default 零迁移。
+
+**通用字段（所有资产共享）：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `id` | String | 唯一标识（如 `prompt:orch-fitting`） |
-| `type` | String | prompt / truth（由目录隐式确定） |
-| `layer` | u32 | 4 / 5（沿用原层号；V38 起 truths 层移除，layer=4 仅存在于历史资产） |
+| `id` | String | 唯一标识（如 `orch-fitting`、`v-deliverables-nonempty`） |
+| `type` | String | 资产类型（`prompt` / `verification` / `skill` / `model` / `manifold`） |
 | `name` | String | 名称 |
 | `description` | String | 描述 |
-| `tags` | Vec[String] | 搜索标签 |
-| `confidence` | f64 | [0, 1] 置信度 |
-| `version` | u32 | 版本号（保存时递增） |
-
-**类型特有字段：**
-
-| 层 | 额外字段 |
-|----|---------|
-| Prompts | `content: String`（行为模板正文，含角色定义 + 工作流）, `agent_target: String`（"FittingAgent" \| "CausalAgent"）, `temperature: Option<f32>`（可选温度覆盖，None 时使用 Base 模板默认值）, `usage_count: u32`, `success_rate: f64`, **`stats: AssetStats`（V35：任务级 MCTS 统计，实现层补齐 §6.2 通用树字段承诺——MVP-6 回传写入）** |
-| Workflows（V32） | `content: String`（步骤序列/命令/验收要点）, `agent_target: String`, `usage_count: u32`, `success_rate: f64` |
-| Verifications（V32/V33） | `content: String`（契约语义描述，人读）, **`checks: Vec[CheckSpec]`（V33：结构化检查项，机器执行——§4）**, `agent_target: String`（"CausalAgent" 为主）, `usage_count: u32`, `success_rate: f64` |
-| Truths（V38 移除） | ~~`severity: String`; `justification`; `env_tags`~~ → 不再资产化；原语义内置为 ConstraintEngine L0 检查（severity 映射 ConstraintSeverity，justification 审计字段废弃） |
-| models/ | **贝叶斯后验层（MVP-3.5 激活，原「预留层」）** — 每验证契约一个资产（id 与 verification 同名关联）：`alpha: f64`, `beta: f64`（Beta-Bernoulli 共轭后验），`steering_vector: Option<Vec<f32>>`（介入向量，仍预留） |
+| `tags` | Vec\<String\> | 搜索标签 |
+| `confidence` | f64 | [0, 1] 置信度（人工种子先验；进入利用排序后由 avg_reward 主导） |
+| `version` | u32 | 版本号（每次连山回传写入时递增） |
+| `status` | String | `"active"` \| `"pruned"`（pruned 资产被 scan 过滤，不参与检索与演化） |
 
 **V32 通用树结构字段（所有可检索资产层共享，serde default 零迁移）：**
 
 | 字段 | 类型 | 说明 |
 |------|------|------|
-| `env_tags` | `Vec<String>` | 环境维度（空 = 环境无关）；检索时与当前环境指纹不匹配则降权 |
-| `parent_id` | `Option<String>` | fork 来源（None = 根资产） |
-| `variant_of` | `Option<String>` | 同源变体组 id（fork 树分组） |
-| `stats` | AssetStats | MCTS 统计块：`n / pass_count / cost_tokens_sum / cost_tokens_sq_sum / quality_sum / verify_rounds_sum` |
+| `env_tags` | Vec\<String\> | 环境维度（空 = 环境无关）；检索时与当前环境指纹不匹配则降权 |
+| `parent_id` | Option\<String\> | fork 来源（None = 根资产） |
+| `variant_of` | Option\<String\> | 同源变体组 id（fork 树分组） |
+| `stats` | AssetStats | MCTS 统计块：`n / pass_count / cost_tokens_sum / quality_sum / verify_rounds_sum` |
 
-**index.yaml 已移除（V38）**：标签检索改实时目录扫描（`scan_assets` 内存构建 tag → AssetRef 映射，不落盘；资产量级几十个，扫描毫秒级）。`relations`、`justification_depends_on`、`dependency_index` 不在资产模型中（历史：V22 起 index.yaml 仅剩 tag_index，V38 整个移除）。
+---
 
+**一、阴阳对偶资产（yang/ + yin/）**——作用于单任务节点的生成与验证两侧：
 
-### 6.2 UCB 检索（V32：UCB 选择替代纯 confidence 排序）
+| 资产 | 目录 | 特有字段 | 消费方 |
+|------|------|------|------|
+| **阳提示词** | `yang/prompts/` | `content: String`（编排/执行模板正文）, `agent_target: String`（"FittingAgent"）, `temperature: Option<f32>`, `usage_count: u32`, `success_rate: f64` | MetaAgent → FittingAgent system prompt |
+| **阳工作流** | `yang/workflows/` | `content: String`（步骤序列/命令/验收要点）, `agent_target: String`, `usage_count: u32`, `success_rate: f64` | MetaAgent → FittingAgent system prompt |
+| **阳技能** | `yang/skills/` | `content: String`（程序模板正文）, `tool_name: String`（Rig Tool 注册名）, `input_schema: String`（JSON Schema）, `agent_target: String`（"FittingAgent"）, `usage_count: u32`, `success_rate: f64` | SkillRegistry → FittingAgent 工具注册 |
+| **阴提示词** | `yin/prompts/` | `content: String`（verify/converge 模板正文）, `agent_target: String`（"CausalAgent"）, `temperature: Option<f32>`, `usage_count: u32`, `success_rate: f64` | MetaAgent → CausalAgent system prompt |
+| **阴契约** | `yin/verifications/` | `content: String`（契约语义描述，人读）, **`checks: Vec<CheckSpec>`**（结构化检查项，机器执行——§4）, `agent_target: String`（"CausalAgent"）, `usage_count: u32`, `success_rate: f64` | ContractEngine 机械执行 → LLM 裁决 |
+| **阴技能** | `yin/skills/` | `content: String`（程序模板正文）, `tool_name: String`, `input_schema: String`, `agent_target: String`（"CausalAgent"）, `usage_count: u32`, `success_rate: f64` | SkillRegistry → CausalAgent 工具注册 |
 
-```mermaid
-flowchart LR
-    subgraph "MetaAgent 加载归藏（当前模型分区）"
-        QUERY["task_type_tags → 标签匹配 assets"]
-        QUERY --> LOAD["加载候选资产（prompts + workflows + verifications）"]
-        LOAD --> RANK["UCB 排序（利用 + 探索）"]
-        RANK --> MC["产出 → MetaContext（含 assets_used）"]
-    end
+> **历史注记**：V38 起 truths/ 资产层移除——原 L0 输出健全性检查（summary 非空/有依据/可审计 + code-safety）内置为 ConstraintEngine 硬编码，不资产化、不参与连山演化。V33 的 `TruthAsset` 类型（`severity` / `justification` / `env_tags`）已从代码中删除。
 
-    subgraph "{model_key} 分区"
-        P1["prompts/*.yaml 节点"]
-        P2["workflows/*.yaml 节点（V32）"]
-        P3["verifications/*.yaml 节点（V32）"]
-        S["AssetStats 统计"]
-    end
+---
 
-    RANK --> S
-```
+**二、贝叶斯后验（models/）**——跨阴阳，按资产 id 同名关联：
 
-检索策略：标签精确匹配 → 关键词子串搜索 → **UCB 排序**（非纯 confidence）：
-
-```
-score = avg_reward + C · √(ln N_total / N_node)
-        └─利用：已验证好资产─┘ └───探索：样本少/新变体的加分──┘
-```
-
-- `avg_reward` 来自 AssetStats（§6.4 回报函数）；`N_total` 为候选集总采样数，`N_node` 为节点采样数
-- **N=0 新资产给最大探索分**——保证冷启动资产能被采样，避免好资产被饿死
-- **统计选择门槛**：`n < min_samples`（默认 3）的资产不参与利用排序，只走探索分——防止小样本假置信
-- `confidence` 字段保留为**初始先验**（人工种子/经验值），进入利用排序后由 avg_reward 主导
-- env_tags 与当前环境指纹不匹配的候选降权（V32 环境维度）
-- 不支持向量嵌入，无关系图扩散
-
-**实现层定稿（V35，MVP-5：检索数学化）**——prompts 检索排序兑现上述 UCB 设计（meta.rs 现状为手填 confidence 降序，非学习统计）：
-
-```
-score(id) = μ(id) + C · √( ln N_total / (n_id + 1) )
-
-μ(id) = models/{id}.yaml 后验均值      （存在 ModelAsset）
-      | §6.4.1 先验映射 α=1+k·c, β=1+k·(1−c) → μ=α/(α+β)（无 ModelAsset，未采样）
-n_id  = usage_count（prompts 任务级回传计数，MVP-6 起增长）
-C     = 1.414（常量，不随资产量调整——UCB1 渐近最优性，§6.3 设计不变）
-```
-
-**确定性保证（硬约束）**：n+1 平滑而非 n=0→∞ 特判——全冷启动时 score = 先验 μ 降序（确定性二级键，与 read_dir 顺序无关）；μ 缺失时回退 confidence 直接映射（同一公式，非新先验）。**过滤防线保留**：confidence ≥ 0.3 阈值过滤仍先于排序执行（零资产降级路径不变）。排序位置：knowledge.rs `search_prompts` 调用后（返回前），MetaAgent 消费顺序即 UCB 序——装配顺序：`tags 匹配 → 阈值过滤 → 加载 → UCB 排序`。
-
-**信号粒度说明（V35）**：prompts 的采样信号是**任务级**（任务 PASS → 该任务编排所选 prompts 各记一次成功；FAIL/BACK_TO_META → 记失败），与 verifications 的**检查项级**（CheckResult 逐项）粒度不同——同一 backprop 管道、两套信号源（§8.21 MVP-6）。
-
-
-### 6.3 MCTS 四算子（V32：MCTS 四算子 + 被动/主动双轨）
-
-> **状态：** `dmn_consumer.rs` + `cognition_evolver.rs` 已实现（V31 及之前为占位/部分实现），V32 将占位算子升级为真实 MCTS 实现。纯云端架构下 DMN 在符号层（YAML）独立运作，不依赖本地模型。日常 `taiji run` 默认不激活以保持 周易只读模式，可通过 `--with-dmn` flag 启用。
->
-> **激活条件：** 归藏各层有足够资产（每层至少 5 个）+ 累积 50+ 周易执行轨迹；统计选择需 `n ≥ min_samples`（3）。
-
-**回报函数（写死进 BCP，config `runtime.dmn.reward_weights` 可覆盖）：**
-
-```
-reward = w_pass·pass_rate + w_quality·avg_quality − w_cost·avg_cost_tokens − w_rounds·avg_verify_rounds
-默认: w_pass=0.5  w_quality=0.3  w_cost=0.2  w_rounds=0.1
-```
-
-- `pass_rate`：PASS 占比（stats.pass_count / n）
-- `avg_quality`：质量分均值——**派生而非新增字段**：route 映射（PASS=1.0 / BACK_TO_TPN=0.4 / BACK_TO_META=0.2）× VerificationReport.confidence（不改 VerificationReport schema）
-- `avg_cost_tokens`：trace `completion_response.usage.input_tokens` 累加均值（已在记录，零新增）
-- `avg_verify_rounds`：BACK_TO_TPN 次数均值（验证轮数 = 收敛速度倒数）
-
-**四维信号全部来自既有数据——零新增持久化文件。** 回报函数即 连山的改进方向（更省 token / 更精准 / 更快收敛 / 更高通过率），由系统价值判断写死，不由 LLM 自定。**V33 统计粒度：** 统计对象从「资产」精确到「检查项」（CheckResult 逐项通过率 / 耗时，随 verify_state.json 既有路径回传）——MCTS 演化的对象是契约有效性空间（fork/merge/prune 操作契约），资产级统计由检查项聚合（§8.21）。
-
-```mermaid
-flowchart LR
-    PASS["周易 PASS → enqueue pending/{id}.json（携带 assets_used）"] --> READ["TraceRewardExtractor\n读 meta_ctx.assets_used + trace usage + verify_state"]
-
-    subgraph "连山压缩算子（后台 tokio::spawn）"
-        READ --> BP["δ-backprop: 统计回传（父节点 γ=0.5 衰减）"]
-        BP --> FORK["δ-fork: 低回报资产 → 变体扩展（复制+降权+标记，内容修订走人工通道）"]
-        FORK --> MRG["δ-merge: 相似变体合并（内容相似 + 回报无显著差异）"]
-        MRG --> PRN["δ-prune: N≥5 且低于组内最优 >2σ → 淘汰"]
-        PRN --> WRITE["write YAML → 分区归藏 (version++, 单写者) + model_stats"]
-    end
-
-    WRITE --> NEXT["下轮 MetaAgent 自动读取最新认知偏置"]
-
-    subgraph "主动学习（空闲窗口）"
-        ACTIVE["pending 空 + 预算允许 → 高不确定性节点\n（低N/高方差，即 UCB 探索项最大者）"]
-        ACTIVE --> EXP["模板化探索任务\n（Execution/最小预算/不递归/每窗口限量）"]
-        EXP --> RUN["experiments/ 队列 → runner 执行 → trace 回传"]
-    end
-```
-
-**被动学习（任务驱动）**：周易 PASS → pending 入队 → 统计回传——只能在任务发生时学习。
-
-**主动学习（信息增益驱动）**：连山在 **pending 空 + 预算内**的空闲窗口，选择高不确定性节点（低 N / 高方差——即 UCB 探索项最大者）→ 生成**模板化探索任务**（静态模板，不调 LLM："用工作流 W 完成类型 X 的最小任务并记录 token 消耗与结果"）→ 入 experiments/ 队列执行（Execution 模式 + 最小预算 + **不递归** + 每窗口限量 + token 成本上限）→ trace 照常回传。**护栏：探索任务不产生新探索任务（无递归）；连山纯符号层承诺保持（不调 LLM 生成资产内容）。**
-
-**时序分离**：周易执行与 连山写入不并发（周易只读，单写者互斥，§8.3）；主动学习在空闲窗口进行。
-
-**元权重表（model_stats.yaml，V36 落地）**：`model_key → StatsRow(n/pass_count/cost_sum/quality_sum/rounds_sum)`（serde default 零迁移），存于 knowledge 根（跨分区共享），由 连山回传更新（dmn_consumer 在 backprop 分支读取 pending 的 `model_key` + checks 首项四维聚合——同任务摊派值一致，与 CheckResult 摊派同构），ModelRouter 读取（§8.8）——同一 UCB/bandit 机制服务资产选择与模型路由。**回传数据源全部来自既有 pending 负载**（`model_key`/`checks[].cost_tokens|verify_rounds|quality`），零新增持久化文件。模型级 `quality` 用任务级 passed 映射（PASS=1.0，pending 仅 PASS 入队 → 恒 1.0，字段保留供未来 FAIL 入队扩展）。
-
-
-### 6.3.1 贝叶斯后验接入（MVP-3.5，models/ 层激活）
-
-> **状态：** `ModelAsset`（header + alpha/beta）V22 已定义，本轮激活写入者与消费方（`bayesian_update` 由 log-only 占位升级为持久化）。频率统计（CheckStats）保留——n/pass_count 仍是贝叶斯更新的数据源，兼容既有消费方。
-
-**Beta-Bernoulli 共轭更新**（每验证契约一个后验，id 同名关联）：
-
-```
-先验映射（ModelAsset 初始化，§6.3 confidence=初始先验语义落地）：
-  α = 1 + k·confidence    β = 1 + k·(1 − confidence)   （k = prior_strength，默认 10）
-后验更新（backprop 双轨写入）：
-  α += success    β += fail    （success/fail 为该资产全部检查项的聚合成败）
-后验均值：  μ = α / (α + β)
-后验标准差：σ = √( α·β / ((α+β)² · (α+β+1)) )
-```
-
-**演化决策升级**（`bayesian_enabled` 默认 true；false 时回退频率路径）：
-
-| 算子 | 频率版（MVP-3，既有） | 贝叶斯版（MVP-3.5） |
+| 字段 | 类型 | 说明 |
 |------|------|------|
-| fork 阈值 | pass_rate < 0.6 | 后验均值 < 0.6（低采样自动收缩向先验，偶然失败不误触发） |
-| merge 判定 | 通过率差 < 0.1 | 后验均值差 < 0.1（同分根优先保留，既有规则不变） |
-| prune 淘汰 | 组内最优 − 2σ（组内率标准差） | 组内最优后验均值 − 2·σ(候选自身 Beta 后验) |
+| `alpha` | f64 | Beta 分布 α 参数（等效成功证据 + 先验伪计数） |
+| `beta` | f64 | Beta 分布 β 参数（等效失败证据 + 先验伪计数） |
+| `steering_vector` | Option\<Vec\<f32\>\> | 介入向量（预留，不承诺、不设计——微调是模型厂家的事） |
 
-**设计要点**：① 先验强度 k 配置化（`runtime.dmn.prior_strength`），k 大 → 低采样结果更贴先验；② fork 变体（`{root}-v1`）对应独立 ModelAsset（同名 id）——变体后验天然隔离，与 check_id 重命名机制同构；③ 主动学习探索分的 avg_reward 用后验均值（`bayesian_enabled` 开时）；④ 单写者约束保持——`bayesian_update` 仅在 `backprop_checks` 内被调用，backprop 仅被 连山压缩算子 调用；⑤ **惩罚通道（V34）**：TraceConsistency 机械 FAIL 的 CheckResult（passed=false）经既有 pending/backprop 路径 β++ ——编造诱发的资产自动降权，无需新算子。
+后验均值 μ = α/(α+β) 用于 UCB 排序与演化决策（fork 阈值 / merge 差 / prune 判定）。先验初始化：α = 1 + k·c, β = 1 + k·(1−c)（k = 先验强度 10.0，c = 资产 confidence）。
+
+---
+
+**三、非线性流型拓扑（manifold/）**——连山压缩根任务执行/主动学习迹后的低维固化：
+
+| 文件 | 字段 | 说明 |
+|------|------|------|
+| `bcp.yaml` | `interfaces: Vec<InterfaceSpec>`, `dataflows: Vec<DataflowSpec>`, `modules: Vec<ModuleSpec>` | BCP 蓝图协议结构化版本 |
+| `agents.yaml` | `rules: Vec<RuleSpec>`（id / pattern / severity / action） | AGENTS.md 避坑规则结构化版本 |
+| `topology.yaml` | `nodes: Vec<NodeSpec>`, `edges: Vec<EdgeSpec>` | 流型拓扑图 |
+| `contracts.yaml` | `contracts: Vec<ContractSpec>`（name / input / output / errors） | 接口契约定义表 |
+| `env.yaml` | `model_version: String`, `config_hash: String`, `partition_key: String`, `runtime_constraints: Map` | 环境信息 |
+
+manifold/ 资产不参与 UCB 检索（它不注入单节点 prompt），不参与 fork/merge/prune（它是根级拓扑，演化通过 BCP 人类修订 + 周易 BCP→Skills 压缩任务间接进行）。
+
+---
+
+**四、标准化 Skills（skills/）**——从 manifold/ 经周易执行压缩而来的可复用程序：
+
+| 字段 | 类型 | 说明 |
+|------|------|------|
+| `tool_name` | String | Rig Tool 注册名（如 `rust_project_init`） |
+| `input_schema` | String | JSON Schema——工具的 input 参数定义 |
+| `content` | String | 程序模板正文（bash 脚本/操作步骤/YAML 工作流定义） |
+| `agent_target` | String | "FittingAgent" \| "CausalAgent" \| "Both" |
+| `usage_count` | u32 | 累计使用次数 |
+| `success_rate` | f64 | 成功率 |
+
+标准化 Skills 是归藏的"最终产物"——BCP 人类设计 → manifold 结构化投影 → 周易执行压缩 → skills 可复用程序 → 反作用单节点执行效率 → 四维权重增强。它们与 yang/skills、yin/skills 的区别：前者是通用标准化流程（如 git-workflow、rust-project），后者是模型特定的工具适配（如针对某 LLM 优化的 bash 调用方式）。
+
+---
+
+**index.yaml 已移除（V38）**：标签检索改实时目录扫描（`scan_assets` 内存构建 tag → AssetRef 映射，不落盘）。`relations`、`justification_depends_on`、`dependency_index` 不在资产模型中。
 
 
-### 10.3 真值维护 (Truth Maintenance — 精简版)
+### 10.3 约束体系（V38 后：L0 内置 + L1 契约 + L2 兜底）
 
-真值维护采用**精简版**：无依赖传播（PROPAGATE/dependency_index/stale 标记不存在），仅保留 ASSERT/RETRACT 两种状态操作。连山接入或 Truths 资产累积后再评估恢复传播机制。
-
-**精简理由（原 §8.13 并入）：**
-> - **空集运行** — L4 Truths 目录当前为空，TMS 传播引擎从未被真实数据触发，复杂性未经验证
-> - **与 ConstraintEngine 职责重叠** — ConstraintEngine 已通过 Hard/Soft severity + active/retracted 状态过滤实现核心校验，TMS 的依赖传播是叠加的增量收益
-> - **连山接入后重新评估** — 若未来 Truths 资产累积且需要跨约束依赖推理，再恢复 PROPAGATE 机制
-
-**保留的机制：**
-
-```
-ASSERT:  写入新 Truth 资产 → 标记 active → ConstraintEngine 下次加载可见
-RETRACT: 手动标记 truth 为 retracted → ConstraintEngine 不再加载
-```
-
-**与 ConstraintEngine 的关系：** ConstraintEngine 只加载 `active` 状态的 Truth。`retracted` 或 `stale` 的 Truth 不参与前置检查，防止过时约束错误拒绝合法输出。状态持久化于 YAML `status` 字段。
-
-**移除的机制：** `justification_depends_on` 依赖链、`dependency_index` 反向索引、PROPAGATE BFS 传播、跨层权重几何平均聚合。`justification` 字段保留作为审计信息。
-
-
-> **原 §8.13（真值维护精简）已并入本节**——「TruthConstraint 无 `justification_depends_on` 字段；`PropagationEngine` / `GridRewireEngine` / `RelationEngine` 模块不存在于代码中」。
+> V38 起 truths/ 资产层已移除。L0 输出健全性检查内置为 ConstraintEngine 硬编码（summary 非空/有依据/可审计 + code-safety），不资产化、不参与连山演化。L1 契约（yin/verifications/）经 ContractEngine 机械执行。L2 兜底由 CausalAgent LLM 裁决 llm_judgement 项。
+>
+> 旧 TMS（Truth Maintenance System）的 ASSERT/RETRACT/PROPAGATE 机制、justification_depends_on 依赖链、dependency_index 反向索引——已随 V38 truths/ 移除一并删除。`PropagationEngine` / `GridRewireEngine` / `RelationEngine` 模块不存在于代码中。
 
 ## 附录 A：版本历史（全文存档）
 
