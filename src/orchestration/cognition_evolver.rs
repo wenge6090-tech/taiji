@@ -71,17 +71,12 @@ impl CognitionEvolver {
         &self.liluo
     }
 
-    /// V36：按 pending 的 model_key 派生分区 client（BCP §6.1/§8.3——DMN 回传
-    /// 落到路由模型分区；None → 根 client（legacy/未接线，行为与 V35 一致）。
-    /// 分区目录由 for_model 自动创建（含五资产目录 + index 初始化）。
+    /// V44 去分区化：回传统一落根级资产树（model_key 仅作统计键，不派生 client）。
     async fn partition_liluo(
         &self,
-        model_key: Option<&str>,
+        _model_key: Option<&str>,
     ) -> Result<Arc<LiluoClient>, TaijiError> {
-        match model_key {
-            Some(key) => Ok(Arc::new(self.liluo.for_model(key).await?)),
-            None => Ok(self.liluo.clone()),
-        }
+        Ok(self.liluo.clone())
     }
 
     /// δ₀: Prune low-confidence cognitive assets.
@@ -1301,7 +1296,7 @@ mod tests {
         let _report = evolver.evolve("write_test", &[]).await.unwrap();
 
         // V22: grids/ removed — evolution must NOT persist any asset.
-        // V33: verifications/ 由 ensure_dirs 创建（阴轨验证契约层），允许存在。
+        // V44：根级资产树目录（yang/ + yin/ + models/ 等）由 new 创建，允许存在。
         let mut dir_exists = tokio::fs::read_dir(&dir).await.unwrap();
         let mut assets: Vec<String> = Vec::new();
         while let Ok(Some(entry)) = dir_exists.next_entry().await {
@@ -1309,11 +1304,10 @@ mod tests {
         }
         assert!(
             assets.iter().all(|n| {
-                // V38：不再创建 truths/ 与 index.yaml
+                // V44：不再创建 truths/ 与 index.yaml；不再有 {model_key}/ 分区
                 n == "models"
-                    || n == "skills"
-                    || n == "prompts"
-                    || n == "verifications"
+                    || n == "yang"
+                    || n == "yin"
             }),
             "unexpected files written during evolve: {assets:?}"
         );

@@ -165,22 +165,14 @@ impl IndexData {
 /// `GuizangClient` is `Send + Sync`.  Internal state (`data_dir`) is immutable
 /// after construction.
 ///
-/// # 分区（V36，BCP §6.1）
-/// - `root_dir` = knowledge 根（构造时传入的 `data_dir`），`model_stats.yaml`
-///   恒在根级（跨分区共享，ModelRouter 数据源）。
-/// - `data_dir` = 活动目录：根 client 时 = root_dir；分区 client 时 =
-///   `root_dir/{model_key}`（`for_model` 派生）。
-/// - 分区一致性（§8.3）：一个任务内所有 Agent 使用同一分区——`MetaContext.model`
-///   是唯一载体；MetaAgent 按路由结果 `for_model` 检索，DMN 按 pending 的
-///   `model_key` 分区回传。
+/// # V44 去分区化（BCP §10.1）
+/// 单一资产树：`data_dir` = knowledge 根，直接承载 yang/ + yin/ + models/。
+/// 模型维度仅在统计层区分（`model_stats.yaml` 按 model_key 索引），
+/// 不产生资产副本。V36-V43 的 `for_model` 分区派生已删除。
 #[derive(Debug)]
 pub struct GuizangClient {
-    /// knowledge 根目录（构造时传入）——model_stats.yaml 所在层。
-    root_dir: PathBuf,
-    /// 活动目录：根 client = root_dir；分区 client = root_dir/{model_key}。
+    /// knowledge 根目录（构造时传入）——资产树 + model_stats.yaml 所在层。
     data_dir: PathBuf,
-    /// 分区键（None = 根/未分区）。
-    partition: Option<String>,
 }
 
 /// Compatibility alias — 旧代码中的 `LiluoClient` 等效于 `GuizangClient`。
@@ -212,10 +204,7 @@ impl GuizangClient {
 
     /// Create a new `GuizangClient`, ensuring the root directory exists.
     ///
-    /// V41：根 client **不再创建资产层目录**（models/prompts/skills/
-    /// verifications）——资产检索/写入全部走 `for_model` 分区 client（分区
-    /// ensure_dirs 建层）；根目录只保留 `model_stats.yaml`（跨分区共享）与
-    /// 分区子目录。未分区写路径仍可用（`save_asset` 内部自建父目录）。
+    /// V44：创建根级资产层目录（yang/ + yin/ + models/，BCP §10.1）。
     ///
     /// # Errors
     /// Returns `TaijiError::IO` if the root directory cannot be created.
@@ -225,57 +214,27 @@ impl GuizangClient {
                 context: format!("failed to create knowledge root {:?}: {e}", data_dir),
             }
         })?;
-        Ok(Self {
-            root_dir: data_dir.to_path_buf(),
-            data_dir: data_dir.to_path_buf(),
-            partition: None,
-        })
-    }
-
-    /// 派生指定模型分区 client（V36，BCP §6.1）——`data_dir = root/{model_key}`，
-    /// root_dir 保持（model_stats 仍根级）。自动创建分区目录 + 资产目录，
-    /// 调用方拿到即可检索/写入。
-    ///
-    /// 从根 client 或分区 client 均可派生（从分区派生会切换到新分区）。
-    pub async fn for_model(&self, model_key: &str) -> Result<Self, TaijiError> {
-        let partition_dir = self.root_dir.join(model_key);
         let this = Self {
-            root_dir: self.root_dir.clone(),
-            data_dir: partition_dir,
-            partition: Some(model_key.to_string()),
+            data_dir: data_dir.to_path_buf(),
         };
         this.ensure_dirs().await?;
         Ok(this)
     }
 
-    /// 当前分区键（None = 根/未分区）。
-    pub fn partition_key(&self) -> Option<&str> {
-        self.partition.as_deref()
-    }
-
-    /// knowledge 根目录（model_stats.yaml 所在层）。
-    pub fn root_dir(&self) -> &Path {
-        &self.root_dir
-    }
-
-    /// Create a sparse `GuizangClient` that skips index building.
+    /// Create a sparse `GuizangClient` that skips directory creation.
     ///
-    /// V41：与 [`new`](Self::new) 同语义——不创建资产层目录（根 client 只
-    /// 服务 model_stats / for_model 派生；分区 client 才建资产层）。
+    /// V44：与 [`new`](Self::new) 同语义（根级资产树）；不建目录，
+    /// 适合只读/迁移场景。
     pub async fn new_sparse(data_dir: &Path) -> Result<Self, TaijiError> {
         Ok(Self {
-            root_dir: data_dir.to_path_buf(),
             data_dir: data_dir.to_path_buf(),
-            partition: None,
         })
     }
 
-    /// Create directories for all asset types (yang/yin 对偶，BCP §10.1)。
+    /// Create directories for all asset types (yang/yin 对偶，BCP §10.1，V44 根级)。
     async fn ensure_dirs(&self) -> Result<(), TaijiError> {
         let dirs = [
             self.data_dir.join("models"),
-            self.data_dir.join("skills"),
-            self.data_dir.join("prompts"),               // 旧兼容
             self.data_dir.join("yang/prompts"),           // 阳轨 FittingAgent 提示词
             self.data_dir.join("yang/skills/orch"),       // 阳轨编排 Skill
             self.data_dir.join("yang/skills/exec"),       // 阳轨执行 Skill
@@ -324,7 +283,7 @@ impl GuizangClient {
     pub async fn load_model_stats(
         &self,
     ) -> Result<std::collections::BTreeMap<String, crate::types::agent::ModelStatsRow>, TaijiError> {
-        let path = self.root_dir.join("model_stats.yaml");
+        let path = self.data_dir.join("model_stats.yaml");
         match fs::read_to_string(&path).await {
             Ok(content) => match serde_yaml::from_str::<
                 std::collections::BTreeMap<String, crate::types::agent::ModelStatsRow>,
@@ -354,7 +313,7 @@ impl GuizangClient {
         &self,
         stats: &std::collections::BTreeMap<String, crate::types::agent::ModelStatsRow>,
     ) -> Result<(), TaijiError> {
-        let path = self.root_dir.join("model_stats.yaml");
+        let path = self.data_dir.join("model_stats.yaml");
         let yaml = serde_yaml::to_string(stats).map_err(|e| {
             TaijiError::KnowledgeStoreUnavailable {
                 context: format!("failed to serialise model_stats: {e}"),
@@ -1101,66 +1060,125 @@ impl CognitiveAsset {
     }
 }
 
-/// V36：把未分区的旧根资产迁移到默认模型分区（BCP §6.1）——幂等。
+/// V44：把既有 `{model_key}/` 分区资产合并回根级（BCP §10.1 去分区化）——幂等。
 ///
-/// 迁移对象：根目录的资产层（prompts/models/skills/verifications；
-/// V38：不再迁移 truths/ 与 index.yaml——资产层已移除）。
-/// 幂等规则：目标分区已存在同名目录/文件 → 跳过（可重复调用）；两者都不存在
-/// → 跳过；仅源存在 → 移动。移动失败 → Err 上抛（带路径，诊断性——无降级原则
-/// §23：迁移是数据完整性操作，不允许静默吞错）。
+/// 迁移对象：knowledge 根下所有子目录（每个子目录视为一个旧分区），
+/// 将其中资产层（yang/ yin/ models/ 等）合并回根。
+/// 幂等规则：根级已存在同名目录/文件 → 跳过（可重复调用）；两者都不存在
+/// → 跳过；仅分区有 → 移动（copy 后删源，兼容跨设备）。移动失败 → Err 上抛
+/// （带路径，诊断性——无降级原则：迁移是数据完整性操作，不允许静默吞错）。
 ///
 /// 调用时机：`build_engine`（所有命令入口）在 `GuizangClient::new` 之后调用一次。
-pub async fn migrate_to_partitioned(
-    root: &Path,
-    default_key: &str,
-) -> Result<(), TaijiError> {
-    const ASSET_LAYERS: [&str; 4] = ["prompts", "models", "skills", "verifications"];
-    let partition_dir = root.join(default_key);
-    // rename 要求目标父目录存在——先建分区目录（幂等）。
-    fs::create_dir_all(&partition_dir).await.map_err(|e| {
+pub async fn migrate_from_partitioned(root: &Path) -> Result<(), TaijiError> {
+    const ASSET_LAYERS: [&str; 5] = ["yang", "yin", "models", "skills", "prompts"];
+    let mut read_dir = fs::read_dir(root).await.map_err(|e| {
         TaijiError::KnowledgeStoreUnavailable {
             context: format!(
-                "migrate_to_partitioned: failed to create partition dir {:?}: {e}",
-                partition_dir
+                "migrate_from_partitioned: failed to read knowledge root {:?}: {e}",
+                root
             ),
         }
     })?;
-
-    for layer in ASSET_LAYERS {
-        let src = root.join(layer);
-        let dst = partition_dir.join(layer);
-        let src_exists = fs::metadata(&src).await.is_ok();
-        let dst_exists = fs::metadata(&dst).await.is_ok();
-        if !src_exists || dst_exists {
+    while let Some(entry) = read_dir.next_entry().await.transpose() {
+        let Ok(entry) = entry else { continue };
+        // 只处理目录型分区候选；根级白名单目录（model_stats.yaml 等文件忽略）。
+        let Ok(ft) = entry.file_type().await else { continue };
+        if !ft.is_dir() {
             continue;
         }
-        fs::rename(&src, &dst).await.map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!(
-                    "migrate_to_partitioned: failed to move {:?} → {:?}: {e}",
-                    src, dst
-                ),
+        let partition_dir = entry.path();
+        let Some(dir_name) = partition_dir.file_name().map(|n| n.to_string_lossy().into_owned())
+        else {
+            continue;
+        };
+        // 跳过根级资产目录本身（非分区候选）。
+        if ASSET_LAYERS.contains(&dir_name.as_str()) {
+            continue;
+        }
+
+        for layer in ASSET_LAYERS {
+            let src = partition_dir.join(layer);
+            let dst = root.join(layer);
+            let src_exists = fs::metadata(&src).await.is_ok();
+            let dst_exists = fs::metadata(&dst).await.is_ok();
+            if !src_exists {
+                continue;
             }
-        })?;
-        tracing::info!(
-            layer,
-            partition = %default_key,
-            "migrated legacy asset layer into default partition"
-        );
+            if dst_exists {
+                // 目标已存在：逐文件幂等合并（copy，不覆盖已有）。
+                merge_dir_recursive(src, dst).await?;
+            } else {
+                fs::rename(&src, &dst).await.map_err(|e| {
+                    TaijiError::KnowledgeStoreUnavailable {
+                        context: format!(
+                            "migrate_from_partitioned: failed to move {:?} → {:?}: {e}",
+                            src, dst
+                        ),
+                    }
+                })?;
+                tracing::info!(
+                    layer,
+                    partition = %dir_name,
+                    "merged legacy partition asset layer into knowledge root"
+                );
+            }
+        }
+
+        // 分区目录已空（所有资产层已移出）→ 删除；非空（有其他文件）→ 保留。
+        let _ = fs::remove_dir(&partition_dir).await;
     }
 
-    // V38：index.yaml 已移除——不再迁移（旧根目录遗留的 index.yaml 忽略，
-    // 实时扫描不消费；如目标分区存在也不覆盖）。
-    let src_index = root.join("index.yaml");
-    let dst_index = partition_dir.join("index.yaml");
-    let src_exists = fs::metadata(&src_index).await.is_ok();
-    let dst_exists = fs::metadata(&dst_index).await.is_ok();
-    if src_exists && !dst_exists {
-        tracing::warn!(
-            "legacy index.yaml found at root — V38 不再维护，跳过迁移（保留原文件）"
-        );
-    }
+    Ok(())
+}
 
+/// 递归合并目录（目标已有同名文件 → 跳过不覆盖；仅源存在 → 复制后删源 = 移动）。
+/// 递归经 `Box::pin` 打破 async 递归大小约束（E0733）。
+async fn merge_dir_recursive(src: PathBuf, dst: PathBuf) -> Result<(), TaijiError> {
+    fs::create_dir_all(&dst).await.map_err(|e| {
+        TaijiError::KnowledgeStoreUnavailable {
+            context: format!(
+                "migrate_from_partitioned: failed to create {:?}: {e}",
+                dst
+            ),
+        }
+    })?;
+    let mut read_dir = fs::read_dir(&src).await.map_err(|e| {
+        TaijiError::KnowledgeStoreUnavailable {
+            context: format!(
+                "migrate_from_partitioned: failed to read {:?}: {e}",
+                src
+            ),
+        }
+    })?;
+    while let Some(entry) = read_dir.next_entry().await.transpose() {
+        let Ok(entry) = entry else { continue };
+        let child_src = entry.path();
+        let child_dst = dst.join(entry.file_name());
+        let Ok(ft) = entry.file_type().await else { continue };
+        if ft.is_dir() {
+            Box::pin(merge_dir_recursive(child_src, child_dst)).await?;
+        } else if !fs::metadata(&child_dst).await.is_ok() {
+            fs::copy(&child_src, &child_dst).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!(
+                        "migrate_from_partitioned: failed to copy {:?} → {:?}: {e}",
+                        child_src, child_dst
+                    ),
+                }
+            })?;
+            // 移动语义：复制成功后删除源文件（迁移 = 合并回根）。
+            fs::remove_file(&child_src).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!(
+                        "migrate_from_partitioned: failed to remove source {:?}: {e}",
+                        child_src
+                    ),
+                }
+            })?;
+        }
+    }
+    // 源目录处理完毕 → 删除（仅当空；冲突保留文件时静默失败不影响迁移）。
+    let _ = fs::remove_dir(&src).await;
     Ok(())
 }
 
@@ -1182,92 +1200,80 @@ pub struct SeedReport {
 /// - `yin/verifications/*.yaml` → `yin/skills/verify/`（V43：迁移过渡目录）
 /// - models/ 不迁移（分区级，无需 yang/yin 拆分）
 /// - 目标已存在同名文件 → 跳过，不覆盖
+/// V42 归藏目录 yang/yin 迁移（BCP §10.1）——幂等，可重跑。
+/// V44：改为根级处理（不再遍历模型分区——分区已合并回根）。
+/// - `prompts/*.yaml` → 按 agent_target 分派：
+///   `"CausalAgent"` → `yin/prompts/`，其余 → `yang/prompts/`
+/// - `verifications/*.yaml` → `yin/skills/verify/`（V43：verifications 概念已废弃）
+/// - `yin/verifications/*.yaml` → `yin/skills/verify/`（V43：迁移过渡目录）
+/// - models/ 不迁移（无需 yang/yin 拆分）
 pub async fn migrate_to_yang_yin(root: &Path) -> Result<(), TaijiError> {
-    // 遍历所有模型分区
-    let mut read_dir = match fs::read_dir(root).await {
-        Ok(d) => d,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-        Err(e) => return Err(TaijiError::IO(e)),
-    };
+    // 迁移 prompts/（根级）
+    let old_prompts = root.join("prompts");
+    if old_prompts.exists() {
+        let yang_dir = root.join("yang/prompts");
+        let yin_dir = root.join("yin/prompts");
+        fs::create_dir_all(&yang_dir).await.map_err(TaijiError::IO)?;
+        fs::create_dir_all(&yin_dir).await.map_err(TaijiError::IO)?;
 
-    while let Some(entry) = read_dir.next_entry().await.transpose() {
-        let Ok(e) = entry else { continue };
-        let path = e.path();
-        if !path.is_dir() { continue; }
-        let model_key = match path.file_name().and_then(|n| n.to_str()) {
-            Some(n) if !n.starts_with('.') => n.to_string(),
-            _ => continue,
-        };
+        let mut r = fs::read_dir(&old_prompts).await.map_err(TaijiError::IO)?;
+        while let Some(f) = r.next_entry().await.transpose() {
+            let Ok(f) = f else { continue };
+            let fp = f.path();
+            if fp.extension().is_none_or(|e| e != "yaml") { continue; }
+            let Some(name) = fp.file_name() else { continue };
 
-        // 迁移 prompts/
-        let old_prompts = path.join("prompts");
-        if old_prompts.exists() {
-            let yang_dir = path.join("yang/prompts");
-            let yin_dir = path.join("yin/prompts");
-            fs::create_dir_all(&yang_dir).await.map_err(TaijiError::IO)?;
-            fs::create_dir_all(&yin_dir).await.map_err(TaijiError::IO)?;
-
-            let mut r = fs::read_dir(&old_prompts).await.map_err(TaijiError::IO)?;
-            while let Some(f) = r.next_entry().await.transpose() {
-                let Ok(f) = f else { continue };
-                let fp = f.path();
-                if fp.extension().is_none_or(|e| e != "yaml") { continue; }
-                let Some(name) = fp.file_name() else { continue };
-
-                // 解析 agent_target 决定目标目录
-                let target_dir = match fs::read_to_string(&fp).await {
-                    Ok(content) => {
-                        if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                            match val.get("agent_target").and_then(|v| v.as_str()) {
-                                Some("CausalAgent") => &yin_dir,
-                                _ => &yang_dir, // FittingAgent / 空 / 其他 → 阳轨
-                            }
-                        } else {
-                            &yang_dir
+            // 解析 agent_target 决定目标目录
+            let target_dir = match fs::read_to_string(&fp).await {
+                Ok(content) => {
+                    if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
+                        match val.get("agent_target").and_then(|v| v.as_str()) {
+                            Some("CausalAgent") => &yin_dir,
+                            _ => &yang_dir, // FittingAgent / 空 / 其他 → 阳轨
                         }
+                    } else {
+                        &yang_dir
                     }
-                    Err(_) => &yang_dir,
-                };
+                }
+                Err(_) => &yang_dir,
+            };
 
-                let dst = target_dir.join(name);
-                if !dst.exists() {
-                    if let Err(e) = fs::rename(&fp, &dst).await {
-                        tracing::warn!(
-                            partition = %model_key,
-                            file = %fp.display(),
-                            error = %e,
-                            "migrate_to_yang_yin: rename prompts failed, copying instead"
-                        );
-                        fs::copy(&fp, &dst).await.map_err(TaijiError::IO)?;
-                    }
+            let dst = target_dir.join(name);
+            if !dst.exists() {
+                if let Err(e) = fs::rename(&fp, &dst).await {
+                    tracing::warn!(
+                        file = %fp.display(),
+                        error = %e,
+                        "migrate_to_yang_yin: rename prompts failed, copying instead"
+                    );
+                    fs::copy(&fp, &dst).await.map_err(TaijiError::IO)?;
                 }
             }
         }
+    }
 
-        // V43: 迁移 verifications/ + yin/verifications/ → yin/skills/verify/（BCP §10.1）
-        // verifications 概念已废弃——统一收敛到 yin/skills/verify/。
-        let yin_verify_dir = path.join("yin/skills/verify");
-        fs::create_dir_all(&yin_verify_dir).await.map_err(TaijiError::IO)?;
-        for old_dir in ["verifications", "yin/verifications"] {
-            let old = path.join(old_dir);
-            if !old.exists() { continue; }
-            let mut r = fs::read_dir(&old).await.map_err(TaijiError::IO)?;
-            while let Some(f) = r.next_entry().await.transpose() {
-                let Ok(f) = f else { continue };
-                let fp = f.path();
-                if fp.extension().is_none_or(|e| e != "yaml") { continue; }
-                let Some(name) = fp.file_name() else { continue };
-                let dst = yin_verify_dir.join(name);
-                if !dst.exists() {
-                    if let Err(e) = fs::rename(&fp, &dst).await {
-                        tracing::warn!(
-                            partition = %model_key,
-                            file = %fp.display(),
-                            error = %e,
-                            "migrate_to_yang_yin: rename {old_dir} failed, copying"
-                        );
-                        fs::copy(&fp, &dst).await.map_err(TaijiError::IO)?;
-                    }
+    // V43: 迁移 verifications/ + yin/verifications/ → yin/skills/verify/（BCP §10.1）
+    // verifications 概念已废弃——统一收敛到 yin/skills/verify/。
+    let yin_verify_dir = root.join("yin/skills/verify");
+    fs::create_dir_all(&yin_verify_dir).await.map_err(TaijiError::IO)?;
+    for old_dir in ["verifications", "yin/verifications"] {
+        let old = root.join(old_dir);
+        if !old.exists() { continue; }
+        let mut r = fs::read_dir(&old).await.map_err(TaijiError::IO)?;
+        while let Some(f) = r.next_entry().await.transpose() {
+            let Ok(f) = f else { continue };
+            let fp = f.path();
+            if fp.extension().is_none_or(|e| e != "yaml") { continue; }
+            let Some(name) = fp.file_name() else { continue };
+            let dst = yin_verify_dir.join(name);
+            if !dst.exists() {
+                if let Err(e) = fs::rename(&fp, &dst).await {
+                    tracing::warn!(
+                        file = %fp.display(),
+                        error = %e,
+                        "migrate_to_yang_yin: rename {old_dir} failed, copying"
+                    );
+                    fs::copy(&fp, &dst).await.map_err(TaijiError::IO)?;
                 }
             }
         }
@@ -1296,12 +1302,12 @@ fn validate_partition_key(key: &str) -> Result<(), TaijiError> {
     Ok(())
 }
 
-/// V39 种子复制（BCP §6.1）——把源分区的活跃种子资产（`prompts/` +
-/// `verifications/`，status != "pruned"）文件级复制到目标分区。
+/// V44 种子复制（BCP §10.1 去分区化）——从指定旧分区目录把活跃种子资产
+/// （`prompts/` + `verifications/`，status != "pruned"）文件级复制回根级。
 ///
-/// - 目标分区自动创建（`for_model` 语义：分区目录 + 四资产层）。
-/// - **不复制** `models/`（贝叶斯后验 = 该模型的学习单元累积，新单元从零
-///   开始——复制旧统计会污染路由 UCB）。
+/// - 目标根级资产层自动创建。
+/// - **不复制** `models/`（贝叶斯后验 = 学习单元累积，新单元从零开始——
+///   复制旧统计会污染路由 UCB）。
 /// - version 保持原值（种子 = 内容快照，非演化写；目标不存在同名文件）。
 /// - 幂等：目标已存在同名资产 → 跳过不覆盖。
 /// - 源分区缺失 → Err 上抛（无降级原则）；单资产文件损坏 → warn 跳过。
@@ -1309,13 +1315,11 @@ fn validate_partition_key(key: &str) -> Result<(), TaijiError> {
 /// # Errors
 /// 分区键非法 / 源分区缺失 → `TaijiError::KnowledgeStoreUnavailable`。
 ///
-/// 调用方：`taiji seed <target_key> [--from <source_key>]`（main.rs cmd_seed）。
+/// 调用方：`taiji seed <source_key>`（main.rs cmd_seed，V44 去分区后从旧分区恢复种子）。
 pub async fn seed_partition(
     root: &Path,
     source_key: &str,
-    target_key: &str,
 ) -> Result<SeedReport, TaijiError> {
-    validate_partition_key(target_key)?;
     validate_partition_key(source_key)?;
 
     let source_dir = root.join(source_key);
@@ -1329,7 +1333,6 @@ pub async fn seed_partition(
         });
     }
 
-    let partition = GuizangClient::for_model(&GuizangClient::new(root).await?, target_key).await?;
     let mut report = SeedReport::default();
 
     // 复制范围：prompts（yang/yin 对偶 + 旧兼容）+ verify Skill（活跃种子资产，V43）。
@@ -1347,7 +1350,7 @@ pub async fn seed_partition(
         if !fs::metadata(&src_layer).await.map(|m| m.is_dir()).unwrap_or(false) {
             continue;
         }
-        let dst_layer = partition.data_dir.join(layer);
+        let dst_layer = root.join(layer);
         fs::create_dir_all(&dst_layer).await.map_err(|e| {
             TaijiError::KnowledgeStoreUnavailable {
                 context: format!("seed_partition: failed to create {:?}: {e}", dst_layer),
@@ -1423,9 +1426,8 @@ pub async fn seed_partition(
                     report.copied += 1;
                     tracing::info!(
                         source = %source_key,
-                        target = %target_key,
                         file = %file_name,
-                        "seeded asset into target partition"
+                        "seeded asset into knowledge root (V44)"
                     );
                 }
                 Err(e) => {
@@ -1468,32 +1470,31 @@ mod tests {
     async fn test_new_creates_dirs() {
         let dir = test_dir("new_creates_dirs").await;
         let root = GuizangClient::new(&dir).await.unwrap();
-        // V41：根 client 不创建资产层目录（根只保留 model_stats 与分区子目录）
+        // V44：根级资产树（单一资产树，BCP §10.1）
         assert!(dir.exists());
-        assert!(!dir.join("models").exists());
-        assert!(!dir.join("skills").exists());
-        assert!(!dir.join("prompts").exists());
+        assert!(dir.join("models").exists());
+        assert!(dir.join("yang/prompts").exists());
+        assert!(dir.join("yang/skills/orch").exists());
+        assert!(dir.join("yang/skills/exec").exists());
+        assert!(dir.join("yin/prompts").exists());
+        assert!(dir.join("yin/skills/verify").exists());
+        assert!(dir.join("yin/skills/converge").exists());
+        // 不再创建分区目录（V44 去分区化）
+        assert!(!dir.join("deepseek-deepseek-chat").exists());
         assert!(!dir.join("verifications").exists());
         assert!(!dir.join("truths").exists());
         assert!(!dir.join("index.yaml").exists());
-        // 分区 client 创建资产层
-        let partition = root.for_model("deepseek-deepseek-chat").await.unwrap();
-        assert!(dir.join("deepseek-deepseek-chat/prompts").exists());
-        assert!(dir.join("deepseek-deepseek-chat/yin/skills/verify").exists());
-        assert!(dir.join("deepseek-deepseek-chat/yin/skills/converge").exists());
-        assert!(dir.join("deepseek-deepseek-chat/models").exists());
-        assert!(!dir.join("deepseek-deepseek-chat/verifications").exists());
         cleanup(&dir).await;
     }
 
-    // ── V36 分区（BCP §6.1）──────────────────────────────────────────
+    // ── V44 去分区化（BCP §10.1）──────────────────────────────────
 
     #[tokio::test]
-    async fn test_for_model_partitions_paths_and_isolates() {
-        let dir = test_dir("for_model_partition").await;
+    async fn test_single_asset_tree_root_writes() {
+        let dir = test_dir("single_tree").await;
         let root = GuizangClient::new(&dir).await.unwrap();
 
-        // 根 client 写根资产
+        // 根 client 写根资产（V44：无分区，写入根级资产树）
         let mut prompt = crate::types::agent::PromptAsset::new(
             "root-prompt",
             "根提示词",
@@ -1502,89 +1503,51 @@ mod tests {
             "FittingAgent",
             vec!["general".into()],
         );
-        root.save_asset(&mut CognitiveAsset::Prompt(prompt))
-            .await
-            .unwrap();
+        root.save_prompt(&mut prompt).await.unwrap();
 
-        // 派生分区 client：活动目录 = root/{model_key}
-        let partition = root.for_model("deepseek-deepseek-chat").await.unwrap();
-        assert_eq!(partition.partition_key(), Some("deepseek-deepseek-chat"));
-        assert!(dir.join("deepseek-deepseek-chat").exists());
-        assert!(dir.join("deepseek-deepseek-chat/prompts").exists());
-        assert!(dir.join("deepseek-deepseek-chat/yin/skills/verify").exists());
-        assert!(dir.join("deepseek-deepseek-chat/yin/skills/converge").exists());
-        // V38：分区不再创建 index.yaml
-        assert!(!dir.join("deepseek-deepseek-chat/index.yaml").exists());
-        // root_dir 恒为 knowledge 根（model_stats 层）
-        assert_eq!(partition.root_dir(), &dir);
+        // 资产落根级 yang/prompts（agent_target=FittingAgent）
+        assert!(dir.join("yang/prompts/root-prompt.yaml").exists());
+        let loaded = root.load_asset("yang_prompt", "root-prompt").await;
+        assert!(loaded.is_ok(), "root asset loadable from root client");
 
-        // 分区内写资产，根不可见（隔离）
-        let mut p = crate::types::agent::PromptAsset::new(
-            "partition-prompt",
-            "分区提示词",
-            "p",
-            "content",
-            "FittingAgent",
-            vec!["general".into()],
-        );
-        partition
-            .save_asset(&mut CognitiveAsset::Prompt(p))
-            .await
-            .unwrap();
-        let root_loaded = root.load_asset("prompt", "partition-prompt").await;
-        assert!(root_loaded.is_err(), "partition asset must not leak to root");
-        let part_loaded = partition.load_asset("prompt", "partition-prompt").await;
-        assert!(part_loaded.is_ok(), "partition asset loadable in partition");
-
-        // 搜索也按分区隔离
-        let root_hits = root.search_prompts(&["general"]).await.unwrap();
-        let part_hits = partition.search_prompts(&["general"]).await.unwrap();
-        assert!(
-            !root_hits.iter().any(|x| x.id == "partition-prompt"),
-            "root search must not see partition assets"
-        );
-        assert!(part_hits.iter().any(|x| x.id == "partition-prompt"));
+        // 检索根级可见
+        let hits = root.search_prompts(&["general"]).await.unwrap();
+        assert!(hits.iter().any(|x| x.id == "root-prompt"));
 
         cleanup(&dir).await;
     }
 
     #[tokio::test]
-    async fn test_migrate_to_partitioned_idempotent() {
-        let dir = test_dir("migrate_partition").await;
+    async fn test_migrate_from_partitioned_idempotent() {
+        let dir = test_dir("migrate_back").await;
         let root = GuizangClient::new(&dir).await.unwrap();
 
-        // 根资产层放一个资产
-        let mut prompt = crate::types::agent::PromptAsset::new(
-            "legacy-prompt",
-            "旧根提示词",
-            "legacy",
-            "content",
-            "FittingAgent",
-            vec!["legacy".into()],
-        );
-        root.save_asset(&mut CognitiveAsset::Prompt(prompt))
-            .await
-            .unwrap();
-        assert!(dir.join("prompts/legacy-prompt.yaml").exists());
+        // 模拟旧分区布局：{model_key}/yang/prompts/ + models/
+        let part = dir.join("deepseek-deepseek-chat");
+        let part_yang_prompts = part.join("yang/prompts");
+        fs::create_dir_all(&part_yang_prompts).await.unwrap();
+        fs::write(
+            part_yang_prompts.join("legacy-prompt.yaml"),
+            "id: legacy-prompt\ntype: prompt\nname: 旧提示词\ndescription: test\nlayer: 1\ntags: [legacy]\nconfidence: 0.9\nversion: 1\ncontent: content\nagent_target: FittingAgent\n",
+        )
+        .await
+        .unwrap();
+        let part_models = part.join("models");
+        fs::create_dir_all(&part_models).await.unwrap();
+        fs::write(part_models.join("m.yaml"), "id: m\n").await.unwrap();
 
-        // 首次迁移：prompts/ 整体移入默认分区
-        migrate_to_partitioned(&dir, "deepseek-deepseek-chat")
-            .await
-            .unwrap();
-        assert!(!dir.join("prompts/legacy-prompt.yaml").exists());
-        assert!(dir
-            .join("deepseek-deepseek-chat/prompts/legacy-prompt.yaml")
-            .exists());
+        // 首次合并：分区资产层移回根
+        migrate_from_partitioned(&dir).await.unwrap();
+        assert!(dir.join("yang/prompts/legacy-prompt.yaml").exists());
+        assert!(dir.join("models/m.yaml").exists());
+        assert!(!part.join("yang/prompts/legacy-prompt.yaml").exists());
 
         // 幂等：重复调用无操作不报错
-        migrate_to_partitioned(&dir, "deepseek-deepseek-chat")
-            .await
-            .unwrap();
+        migrate_from_partitioned(&dir).await.unwrap();
 
-        // 分区 client 可读迁移后的资产
-        let partition = root.for_model("deepseek-deepseek-chat").await.unwrap();
-        let loaded = partition.load_asset("prompt", "legacy-prompt").await;
-        assert!(loaded.is_ok(), "migrated asset readable in partition");
+        // 根 client 可读迁移后的资产
+        let loaded = root.load_asset("yang_prompt", "legacy-prompt").await;
+        assert!(loaded.is_ok(), "migrated asset readable from root");
 
         cleanup(&dir).await;
     }
@@ -1597,71 +1560,52 @@ mod tests {
         let root = GuizangClient::new(&dir).await.unwrap();
 
         // 源分区：一个 active prompt + 一个 pruned prompt + 一个 active verification
-        let src = root.for_model("deepseek-deepseek-src").await.unwrap();
-        let mut p = crate::types::agent::PromptAsset::new(
-            "seed-prompt",
-            "种子提示词",
-            "seed",
-            "content",
-            "FittingAgent",
-            vec!["general".into()],
-        );
-        src.save_asset(&mut CognitiveAsset::Prompt(p)).await.unwrap();
+        // （V44：源 = 旧 {model_key}/ 分区目录，目标 = 根级资产树）
+        let src = dir.join("deepseek-deepseek-src");
+        let src_prompts = src.join("prompts");
+        fs::create_dir_all(&src_prompts).await.unwrap();
+        let write_prompt = |path: &std::path::Path, id: &str, status: &str| {
+            let yaml = format!(
+                "id: {id}\ntype: prompt\nname: {id}\ndescription: test\nstatus: {status}\nlayer: 1\nconfidence: 0.9\nversion: 1\nagent_target: FittingAgent\ntags: [general]\ncontent: content\n"
+            );
+            std::fs::write(path, yaml).unwrap();
+        };
+        write_prompt(&src_prompts.join("seed-prompt.yaml"), "seed-prompt", "active");
+        write_prompt(&src_prompts.join("pruned-prompt.yaml"), "pruned-prompt", "pruned");
+        let src_verifications = src.join("verifications");
+        fs::create_dir_all(&src_verifications).await.unwrap();
+        fs::write(
+            src_verifications.join("seed-verification.yaml"),
+            "id: seed-verification\ntype: verification\nname: 种子契约\ndescription: test\nstatus: active\nlayer: 1\nconfidence: 0.9\nversion: 1\ntags: [general]\nchecks: []\n",
+        )
+        .await
+        .unwrap();
 
-        let mut pruned = crate::types::agent::PromptAsset::new(
-            "pruned-prompt",
-            "淘汰提示词",
-            "p",
-            "content",
-            "FittingAgent",
-            vec!["general".into()],
-        );
-        pruned.status = "pruned".into();
-        src.save_asset(&mut CognitiveAsset::Prompt(pruned)).await.unwrap();
+        // 根级已存在同名资产（幂等跳过测试用）
+        fs::create_dir_all(dir.join("prompts")).await.unwrap();
+        fs::write(
+            dir.join("prompts/seed-prompt.yaml"),
+            "id: seed-prompt\ntype: prompt\nname: 已存在\ndescription: test\nstatus: active\nlayer: 1\nconfidence: 0.9\nversion: 1\nagent_target: FittingAgent\ntags: [general]\ncontent: content\n",
+        )
+        .await
+        .unwrap();
 
-        let mut v = crate::types::agent::VerificationAsset::new(
-            "seed-verification",
-            "种子契约",
-            "seed",
-            "content",
-            Vec::new(),
-            vec!["general".into()],
-        );
-        src.save_asset(&mut CognitiveAsset::Verification(v)).await.unwrap();
-
-        // 目标分区：已存在一个同名资产（幂等跳过测试用）
-        let dst = root.for_model("deepseek-deepseek-dst").await.unwrap();
-        let mut existing = crate::types::agent::PromptAsset::new(
-            "seed-prompt",
-            "已存在",
-            "x",
-            "content",
-            "FittingAgent",
-            vec!["general".into()],
-        );
-        dst.save_asset(&mut CognitiveAsset::Prompt(existing))
-            .await
-            .unwrap();
-
-        let report = seed_partition(&dir, "deepseek-deepseek-src", "deepseek-deepseek-dst")
-            .await
-            .unwrap();
-        // 复制：seed-verification（seed-prompt 被目标已存在跳过，pruned 排除）
+        let report = seed_partition(&dir, "deepseek-deepseek-src").await.unwrap();
+        // 复制：seed-verification（seed-prompt 被根级已存在跳过，pruned 排除）
         assert_eq!(report.copied, 1);
         assert_eq!(report.skipped, 1);
         assert_eq!(report.pruned_skipped, 1);
 
         // 幂等：二次调用全部跳过
-        let report2 = seed_partition(&dir, "deepseek-deepseek-src", "deepseek-deepseek-dst")
-            .await
-            .unwrap();
+        let report2 = seed_partition(&dir, "deepseek-deepseek-src").await.unwrap();
         assert_eq!(report2.copied, 0);
         assert!(report2.skipped >= 2);
 
         // pruned 未复制；models/ 不复制
-        let dst_loaded = dst.load_asset("prompt", "pruned-prompt").await;
-        assert!(dst_loaded.is_err(), "pruned asset must not be seeded");
-        assert!(!dir.join("deepseek-deepseek-dst/models").join("seed-verification.yaml").exists());
+        assert!(!dir.join("prompts/pruned-prompt.yaml").exists());
+        assert!(!dir.join("models/seed-verification.yaml").exists());
+        // 根级验证资产可见
+        assert!(dir.join("verifications/seed-verification.yaml").exists());
 
         cleanup(&dir).await;
     }
@@ -1671,9 +1615,7 @@ mod tests {
         let dir = test_dir("seed_missing_source").await;
         GuizangClient::new(&dir).await.unwrap();
 
-        let err = seed_partition(&dir, "deepseek-no-such-model", "deepseek-deepseek-dst")
-            .await
-            .unwrap_err();
+        let err = seed_partition(&dir, "deepseek-no-such-model").await.unwrap_err();
         assert!(err.to_string().contains("source partition"), "{err}");
 
         cleanup(&dir).await;
@@ -1686,9 +1628,7 @@ mod tests {
 
         // 路径穿越 / 非法字符一律拒绝（CLI 输入即攻击面）。
         for bad in ["../evil", "a/b", "a\\b", "a b", "a.b", ""] {
-            let err = seed_partition(&dir, "deepseek-deepseek-src", bad)
-                .await
-                .unwrap_err();
+            let err = seed_partition(&dir, bad).await.unwrap_err();
             assert!(
                 err.to_string().contains("invalid partition key"),
                 "key '{bad}' must be rejected: {err}"
@@ -1728,10 +1668,9 @@ mod tests {
         assert!((row.quality_sum - 2.5).abs() < 1e-9);
         assert_eq!(row.rounds_sum, 4);
 
-        // 分区 client 的 root_dir 恒为根——model_stats 跨分区可见
-        let partition = root.for_model("deepseek-other").await.unwrap();
-        let p_stats = partition.load_model_stats().await.unwrap();
-        assert_eq!(p_stats.get("deepseek-deepseek-chat").unwrap().n, 3);
+        // V44：单一资产树——model_stats 根级可见（无分区派生）
+        let stats2 = root.load_model_stats().await.unwrap();
+        assert_eq!(stats2.get("deepseek-deepseek-chat").unwrap().n, 3);
 
         cleanup(&dir).await;
     }

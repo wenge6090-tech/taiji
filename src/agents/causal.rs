@@ -265,19 +265,11 @@ impl CausalVerifyAgentBuilder {
         // guizang 未接线（None）→ 契约层跳过并 warn（测试/异常路径）。
         // contracts 提升到外层作用域：一次加载，供 llm_judgement 收集复用。
         // V36 分区一致性（§8.3）：契约从路由模型分区加载（meta_ctx.model →
-        // for_model 派生）；None = 根 client（legacy/未接线）。
-        // V37 异源裁判：verify_model 优先（验证契约随验证模型分区——异源模型
-        // 的分区可能持有不同的契约集，§6.1 学习单元语义）。
+        // V44 去分区化：统一从根级资产树加载（verify_model 仍优先决定验证模型，
+        // 但资产不再按模型分区——§10.1 统计层隔离）。
         let contracts: Vec<crate::types::agent::VerificationAsset> =
             if let Some(guizang) = &self.guizang {
-                let contract_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
-                match contract_key {
-                    Some(key) => {
-                        let partition = guizang.for_model(key.key()).await?;
-                        SkillEngine::load_skills(&partition).await?
-                    }
-                    None => SkillEngine::load_skills(guizang).await?,
-                }
+                SkillEngine::load_skills(guizang).await?
             } else {
                 tracing::warn!(
                     task_id = %self.engine_ctx.task_id,
@@ -680,17 +672,10 @@ impl CausalConvergeAgentBuilder {
         // 确定性裁决。converge Skill 的 checks 全部为 llm_judgement 类（soft）——
         // 不触发 hard 短路，仅收集注入 LLM prompt 供参考。
         // guizang 未接线（None）→ converge Skill 层跳过并 warn。
+        // V44 去分区化：统一从根级资产树加载 converge Skill。
         let (converge_skills, converge_skill_report) = if let Some(guizang) = &self.guizang {
-            let converge_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
-            let skills = match converge_key {
-                Some(key) => {
-                    let partition = guizang.for_model(key.key()).await?;
-                    SkillEngine::load_skills_by_category(&partition, SkillCategory::Converge).await?
-                }
-                None => {
-                    SkillEngine::load_skills_by_category(guizang, SkillCategory::Converge).await?
-                }
-            };
+            let skills =
+                SkillEngine::load_skills_by_category(guizang, SkillCategory::Converge).await?;
             if skills.is_empty() {
                 (skills, None)
             } else {

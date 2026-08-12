@@ -4,7 +4,7 @@
 >
 > **核心动态**：周易（泛化执行）→ 连山（非线性流形压缩）→ 归藏（符号固化）三位一体的同构循环。归藏资产树与周易递归任务树异层同构——fork=decompose、merge=converge、prune=FAIL 终止、backprop=子→父统计上浮。
 >
-> **架构定论（不可推翻）**：① 概率系统不能验证概率系统——收敛验证符号化；② 归藏不是 RAG 知识库——是压缩固化后的可复用符号系统；③ 激励问题不需要 ground truth——断言证据链机械可判定；④ 权重微调是模型厂家的事；⑤ 一个模型 + 它的约束系统 = 一个领域学习单元——分区独立演化。
+> **架构定论（不可推翻）**：① 概率系统不能验证概率系统——收敛验证符号化；② 归藏不是 RAG 知识库——是压缩固化后的可复用符号系统；③ 激励问题不需要 ground truth——断言证据链机械可判定；④ 权重微调是模型厂家的事；⑤ 一个模型 + 它的约束系统 = 一个领域学习单元——统计层独立演化（资产树共享，V44）。
 >
 > **术语**：全文采用周易 (Zhouyi) / 连山 (Lianshan) / 归藏 (Guizang)。神经科学名词 TPN / DMN 为工程实现的曾用名（见术语对照）。代码标识符（`TpnCycle`、`dmn_consumer.rs` 等）暂不改动。
 >
@@ -167,7 +167,7 @@ taiji 的核心动态不是一个执行引擎加上一个知识库。它是一�
 
 ### 1.7 心流 (Flow) — 压缩与消溶
 
-taiji 归藏资产按模型分区（§10.1），在 周易执行的不同深度展现不同的"压缩态"：
+taiji 归藏资产树共享（§10.1，V44 去分区化），在 周易执行的不同深度展现不同的"压缩态"：
 
 | 资产类型 | 浅层执行（舒张期） | 深层执行（心流·收缩期） | 压缩态 |
 |:---:|------|------|------|
@@ -264,7 +264,7 @@ taiji 的核心理念植根于两个千年结构的统一：中国古典哲学�
 
 | 组件 | 角色 | 运行时行为 | 周易-连山-归藏 |
 |------|------|------|:---:|
-| **归藏 (Guizang)** | **压缩固化后的可复用符号系统** | 按模型分区的符号资产树（prompts 教学层 + skills 能力层四类别 + models 贝叶斯后验 + manifold 流型拓扑 + programs 标准化程序），周易执行期 UCB 检索注入→只读，连山压缩期 backprop+evolve→单写。`{model_key}/prompts/`（4 份系统提示词）+ `{model_key}/skills/`（orch/exec/verify/converge 四类）+ `{model_key}/models/`（跨类别贝叶斯后验）+ `{model_key}/manifold/`（流型拓扑）+ `{model_key}/programs/`（标准化程序）。`model_stats.yaml` 恒在 knowledge 根。 | 归藏 |
+| **归藏 (Guizang)** | **压缩固化后的可复用符号系统** | 单一符号资产树（prompts 教学层 + skills 能力层四类别 + models 贝叶斯后验 + manifold 流型拓扑 + programs 标准化程序），周易执行期 UCB 检索注入→只读，连山压缩期 backprop+evolve→单写。`yang/prompts/`（4 份系统提示词）+ `yang/skills/` + `yin/skills/`（orch/exec/verify/converge 四类）+ `models/`（跨类别贝叶斯后验）+ `manifold/`（流型拓扑）+ `programs/`（标准化程序）。`model_stats.yaml` 按模型区分统计（路由依据）。 | 归藏 |
 | **MetaPhase** | 权重更新·元 | 查询归藏统计 → UCB bandit 路由模型 + 路由模式 + 排序资产 → 选择最佳匹配 system prompt → 组装 MetaContext。**纯符号函数复合，零 LLM（V43）** | 周易 |
 | **FittingAgent** | 概率拟合·阳 | 瞬态 Rig Agent，注册 5 L1 Skills + causal_verify（全节点）+ recursive_decompose（仅编排模式）。受上下文预算约束（V29） | 周易 |
 | **CausalAgent** | 因果验证·阴 | 瞬态 Rig Agent（双模式 verify/converge）。前置管线：ConstraintEngine → SkillEngine 机械执行 → LLM 裁决 | 周易 |
@@ -340,13 +340,13 @@ flowchart TD
 
 - **周易）执行期只读归藏**——任何 Agent（Meta / Fitting / Causal / SkillEngine）不得写资产
 - **连山是唯一写者**（单线程后台任务，`--with-dmn` 激活），写路径 = pending / experiments 队列
-- **分区一致性**：任务级路由下任务内所有 Agent 使用同一分区（按路由模型 model_key），`MetaContext.model` 是唯一载体；相位级路由激活后各相位按其路由模型用对应分区（§8.8）
+- **资产共享**：任务内所有 Agent 共享同一根级资产树（V44 去分区化）；`MetaContext.model` 是模型选择载体，仅影响路由与统计回传键，不产生资产副本
 
 ### 数据流：归藏 → 周易（前向 · 检索注入）
 
 ```
 ModelRouter（读 model_stats 元权重表，纯符号层）
-  → LiluoClient.for_model(model_key) 分区检索
+  → 归藏根级检索
   → UCB 排序（利用 + 探索，§6.2）
   → 元 (MetaPhase) 纯符号流水线（路由模型 + 路由模式 + UCB 排序资产 → 选择 system prompt → 组装 MetaContext）
   → MetaContext { mode, model, assets_used, prompts } 注入 Fitting / Causal
@@ -376,7 +376,7 @@ ModelRouter（读 model_stats 元权重表，纯符号层）
 ```
 周易执行（只读归藏）→ 产出 deliverables / trace / verify_state
   → PASS 入队 pending ──→ 连山压缩算子 回传（backprop → evolve → model_stats）
-  → 资产版本++（分区写入）──→ 下轮 元 (MetaPhase) 检索到新资产 → 周易行为被引导
+  → 资产版本++（根级写入）──→ 下轮 元 (MetaPhase) 检索到新资产 → 周易行为被引导
 ```
 
 ### 章节导航
@@ -494,7 +494,7 @@ flowchart TB
 | L1 | infra/config | TaijiConfig 加载与验证 |
 | L1 | infra/error | TaijiError 枚举（含 context 字段） |
 | L1 | infra/provider | ProviderRegistry：Rig client 管理（创建/复用/fallback） |
-| L1 | infra/knowledge | KnowledgeStore：**按模型分区的归藏读写 + 标签搜索 + UCB 聚合查询 + model_stats 读写 + Skill（verify 类）加载** |
+| L1 | infra/knowledge | KnowledgeStore：**归藏读写（单一资产树）+ 标签搜索 + UCB 聚合查询 + model_stats 读写 + Skill（verify/converge 类）加载** |
 | L1 | infra/trace | TraceWriter：JSONL 写入 + 10MB 轮转 + read_tree 合并 |
 | L2 | hooks/safety | ToolSafetyGuard：路径穿越 / 命令注入 / SSRF 拦截 |
 | L2 | hooks/trace | TraceHook：自动捕获 StepEvent 写入 trace.jsonl |
@@ -528,7 +528,7 @@ flowchart TB
 | 3 | `FittingAgentBuilder { depth, mode, meta_ctx, engine_ctx, factory, model, cancel: CancellationToken }` | 阳 Agent 构建器，**按模式选模板**（编排模板 / 执行模板）；recursive_decompose 仅编排模式注册。**V30 身份自觉**：run() 注入「身份与地位」段（身份册 + mode + 兄弟贡品索引，`build_identity_section`，读册失败上抛——无降级 §8.20） |
 | 4 | `SafetyHook (AgentHook)` | 在 ToolCall 事件上检查路径穿越/命令注入/SSRF，返回 Flow::cont() 或 Flow::skip() |
 | 5 | `ConstraintEngine.check_constraints(output, constraints) -> ConstraintResult` | CausalAgent.verify 前置检查，Hard 违反直接短路返回 BACK_TO_META |
-| 6 | `MetaPhase.run(task_description, task_type_tags, handoff: Option<HandoffContext>) -> MetaContext`（builder 经 `depth()` / `max_depth()` 注入递归层数规则） | **V43 纯符号化——零 LLM 调用**：① 读 model_stats → UCB bandit 路由模型（冷启动 → 默认）；② 读 mode_stats → UCB bandit 路由模式（冷启动 → Execution）；③ 分区检索资产 → UCB 排序 → 选最佳匹配 system prompt；④ `guard_depth` 强制叶子节点 Execution；⑤ `guard_pairing` 校验 mode-prompt 配对；⑥ 组装 MetaContext。降级：无资产 → prompt 字段全部 None（下游 Base 模板兜底），mode 保持路由结果；model_stats 损坏 → 默认模型 |
+| 6 | `MetaPhase.run(task_description, task_type_tags, handoff: Option<HandoffContext>) -> MetaContext`（builder 经 `depth()` / `max_depth()` 注入递归层数规则） | **V43 纯符号化——零 LLM 调用**：① 读 model_stats → UCB bandit 路由模型（冷启动 → 默认）；② 读 mode_stats → UCB bandit 路由模式（冷启动 → Execution）；③ 根级检索资产 → UCB 排序 → 选最佳匹配 system prompt；④ `guard_depth` 强制叶子节点 Execution；⑤ `guard_pairing` 校验 mode-prompt 配对；⑥ 组装 MetaContext。降级：无资产 → prompt 字段全部 None（下游 Base 模板兜底），mode 保持路由结果；model_stats 损坏 → 默认模型 |
 | 7 | `连山压缩算子 (独立 tokio::spawn)` | 指数退避轮询 pending/ 队列（被动学习）+ experiments/ 队列（主动学习，空闲窗口 + 预算上限），执行 **MCTS 四算子**：δ-backprop（trace 统计回传，父节点 γ=0.5 衰减）→ δ-fork（低回报资产扩展变体，复制+降权，内容修订走人工通道）→ δ-merge（相似变体合并）→ δ-prune（N≥5 且低于组内最优 >2σ 淘汰）——单写者更新归藏 + model_stats。**纯符号层确定性操作，不涉及 LLM**。数据源：`pending/{id}.json` 携带 assets_used 链 → TraceRewardExtractor 提取 (资产 × 回报) |
 | 8 | `CausalVerifyAgentBuilder.verify(output, tool_results, meta_ctx) -> VerificationReport` | 前置管线：ConstraintEngine（L0 内置检查 Hard 短路）→ SkillEngine 机械执行 verify/converge Skill（hard 失败直接短路，LLM 不可翻案）→ 剩余 llm_judgement 项 + SkillReport 注入 LLM 裁决。优先使用 meta_ctx.verify_system_prompt，None 时按 `meta_ctx.mode` 降级到 VERIFY_ORC / VERIFY_EXEC 硬编码模板（编排-验证 / 执行-验证配对）。`tool_results` 由 `TpnCycle.collect_tool_results()` 从 trace.jsonl 自动提取最近 10 条工具调用输出，非空数组 |
 | 9 | `CausalConvergeAgentBuilder.converge(subtask_results, meta_ctx) -> ConvergenceDecision` | 优先使用 meta_ctx.converge_system_prompt，None 时按 `meta_ctx.mode` 降级到 CONVERGE_ORC / CONVERGE_EXEC 硬编码模板（编排-收敛 / 执行-收敛配对）。**V31 完整汇报输入**：subtask_results 含成功与失败（Diverged）条目——LLM 基于失败原因/交接产物裁决 Partial/Diverged，并把**失败分析与 rerun 建议输出到 task_summary**（决策进 LLM，不加结构化字段）；父阳（阳·管理）据此 rerun_of 再启用或接受残缺综合 |
@@ -591,7 +591,7 @@ classDiagram
         +yang_prompt: YangPrompt
         +mode: AgentMode
         +model: Option[ModelKey]  %% 元权重模型路由结果 (None=配置默认)
-        +assets_used: Vec[AssetRef]  %% 本次编排选用的资产引用（含分区，连山回传依据）
+        +assets_used: Vec[AssetRef]  %% 本次编排选用的资产引用（连山回传依据）
         +temperature: Option[f32]
         +fitting_system_prompt: Option[String]
         +verify_system_prompt: Option[String]
@@ -931,7 +931,7 @@ sequenceDiagram
     RR->>MA: run(description, task_type_tags)
     MA->>MA: ① 读 model_stats → UCB bandit 路由模型
     MA->>MA: ② 读 mode_stats → UCB bandit 路由模式（冷启动 → Execution）
-    MA->>MA: ③ 分区检索资产 → 置信度过滤 → UCB 排序
+    MA->>MA: ③ 根级检索资产 → 置信度过滤 → UCB 排序
     MA->>MA: ④ select_best → 选匹配 system prompt
     MA->>MA: ⑤ guard_depth（叶子节点强制 Execution）
     MA->>MA: ⑥ guard_pairing（校验 mode-prompt 配对）
@@ -1394,7 +1394,7 @@ output_refs: [deliverables/xxx.md]
 
 ### 8.22 验证 Skill 引擎（SkillEngine）
 
-**职责**：CausalAgent.verify 前置的确定性验证执行器——加载当前模型分区 `yin/skills/verify/` 结构化契约，机械执行 checks，产出 SkillReport。**确定性保证：同一契约 + 同一产出 → 同一结果**，与 LLM 无关。
+**职责**：CausalAgent.verify 前置的确定性验证执行器——加载根级 `yin/skills/verify/` 结构化契约，机械执行 checks，产出 SkillReport。**确定性保证：同一契约 + 同一产出 → 同一结果**，与 LLM 无关。
 
 **执行顺序**：
 
@@ -1504,7 +1504,7 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 | **fork** | 根资产 + 低通过率信号 | 新变体资产（strictness 参数化，id=`{root}-v1`） | 下次检索时作为新候选 |
 | **merge** | 两个通过率无显著差异的近邻变体 | 合并为单个资产（stats 加权合并） | 减少冗余 |
 | **prune** | N≥5 且 μ < best_μ − 2σ 的变体 | status="pruned" | 淘汰低效路径 |
-| **模型路由** | (model_key × tag) 的多维统计 | UCB bandit 选择最佳模型 | 元 (MetaPhase) 分区选择 |
+| **模型路由** | (model_key × tag) 的多维统计 | UCB bandit 选择最佳模型 | 元 (MetaPhase) 根级统计检索 |
 
 **连山的三个特征：**
 1. **纯符号层**：所有操作是确定性数学运算（贝叶斯公式 / UCB 不等式 / 统计聚合 / 阈值比较），不调用 LLM
@@ -1531,14 +1531,14 @@ taiji 使用 `rig = { version = "0.39" }`（语法占位）+ `[patch.crates-io]`
 
 ```mermaid
 flowchart LR
-    subgraph "MetaPhase 加载归藏（当前模型分区）"
+    subgraph "MetaPhase 加载归藏（根级资产树）"
         QUERY["task_type_tags → 标签匹配 assets"]
         QUERY --> LOAD["加载候选资产（prompts + workflows + verifications）"]
         LOAD --> RANK["UCB 排序（利用 + 探索）"]
         RANK --> MC["产出 → MetaContext（含 assets_used）"]
     end
 
-    subgraph "{model_key} 分区"
+    subgraph "知识库根（单一资产树）"
         P1["yang/prompts/*.yaml + yin/prompts/*.yaml 节点"]
         P2["yang/skills/orch/*.yaml 节点"]
         P3["yin/skills/verify/*.yaml 节点"]
@@ -1607,7 +1607,7 @@ flowchart LR
         BP --> FORK["δ-fork: 低回报资产 → 变体扩展（复制+降权+标记，内容修订走人工通道）"]
         FORK --> MRG["δ-merge: 相似变体合并（内容相似 + 回报无显著差异）"]
         MRG --> PRN["δ-prune: N≥5 且低于组内最优 >2σ → 淘汰"]
-        PRN --> WRITE["write YAML → 分区归藏 (version++, 单写者) + model_stats"]
+        PRN --> WRITE["write YAML → 根级归藏 (version++, 单写者) + model_stats"]
     end
 
     WRITE --> NEXT["下轮 元 (MetaPhase) 自动读取最新认知偏置"]
@@ -1625,7 +1625,7 @@ flowchart LR
 
 **时序分离**：周易执行与 连山写入不并发（周易只读，单写者互斥，§8.3）；主动学习在空闲窗口进行。
 
-**元权重表（model_stats.yaml，）**：`model_key → StatsRow(n/pass_count/cost_sum/quality_sum/rounds_sum)`（serde default 零迁移），存于 knowledge 根（跨分区共享），由 连山回传更新（dmn_consumer 在 backprop 分支读取 pending 的 `model_key` + checks 首项四维聚合——同任务摊派值一致，与 SkillResult 摊派同构），ModelRouter 读取（§8.8）——同一 UCB/bandit 机制服务资产选择与模型路由。**回传数据源全部来自既有 pending 负载**（`model_key`/`checks[].cost_tokens|verify_rounds|quality`），零新增持久化文件。模型级 `quality` 用任务级 passed 映射（PASS=1.0，pending 仅 PASS 入队 → 恒 1.0，字段保留供未来 FAIL 入队扩展）。
+**元权重表（model_stats.yaml，）**：`model_key → StatsRow(n/pass_count/cost_sum/quality_sum/rounds_sum)`（serde default 零迁移），存于 knowledge 根（按模型区分，资产树共享），由 连山回传更新（dmn_consumer 在 backprop 分支读取 pending 的 `model_key` + checks 首项四维聚合——同任务摊派值一致，与 SkillResult 摊派同构），ModelRouter 读取（§8.8）——同一 UCB/bandit 机制服务资产选择与模型路由。**回传数据源全部来自既有 pending 负载**（`model_key`/`checks[].cost_tokens|verify_rounds|quality`），零新增持久化文件。模型级 `quality` 用任务级 passed 映射（PASS=1.0，pending 仅 PASS 入队 → 恒 1.0，字段保留供未来 FAIL 入队扩展）。
 
 
 ### 6.3.1 贝叶斯后验接入
@@ -1658,9 +1658,9 @@ flowchart LR
 
 ### 8.3 周易只读 / 连山单写者
 
-周易执行期间只读归藏。连山压缩算子 设计为唯一的写者（单线程后台任务），避免读写竞争。**当前 连山压缩算子 代码已实现但未激活（参见 §8.12）**——日常 周易运行中归藏为完全只读模式。激活后，周易 PASS → enqueue 连山 → 单写者更新归藏资产（**按模型分区写入**，一个任务只触碰其路由模型的分区），下轮 元 (MetaPhase) 加载时自动获取最新认知基础。
+周易执行期间只读归藏。连山压缩算子 设计为唯一的写者（单线程后台任务），避免读写竞争。**当前 连山压缩算子 代码已实现但未激活（参见 §8.12）**——日常 周易运行中归藏为完全只读模式。激活后，周易 PASS → enqueue 连山 → 单写者更新归藏资产（**根级写入**，统计按任务路由模型键区分），下轮 元 (MetaPhase) 加载时自动获取最新认知基础。
 
-**分区一致性**：一个任务内所有 Agent（Meta/Fitting/Causal）必须使用同一分区（按路由模型的 model_key）——MetaContext.model 是唯一载体（与 mode 同机制传播），防止跨分区资产混编。
+**资产共享**：任务内所有 Agent（Meta/Fitting/Causal）共享同一根级资产树（V44）——模型维度仅影响路由选择 `MetaContext.model` 与统计回传键，不产生资产副本。
 
 
 ### 8.8 元 (MetaPhase) 纯符号化（V43）— 归藏本体论函数复合
@@ -1705,7 +1705,7 @@ MetaPhase = compose_context ∘ select_best ∘ rank_assets ∘ list_assets ∘ 
 
 ```rust
 // f: Task × Guizang → Partition
-// 集合论映射：任务标签 → 目标分区
+// 集合论映射：任务标签 → 统计检索
 fn resolve_partition(task: &Task, guizang: &Guizang, model_stats: &ModelStats) -> Partition {
     let model_key = route_model(model_stats, &task.tags);
     guizang.for_model(model_key)
@@ -1859,10 +1859,10 @@ fn compose_context(
 
 模型路由分三级，各级独立决策、低级继承高级默认。当前 元 (MetaPhase) 去 LLM 化后，路由全部由符号层 bandit 驱动：
 
-- **任务级**：`route_model(model_stats, task.tags)` → `MetaContext.model`，全任务默认同分区（§10.1）
+- **任务级**：`route_model(model_stats, task.tags)` → `MetaContext.model`，全任务共享根级资产树（§10.1）
 - **相位级（异源裁判）**：`MetaContext.verify_model` 经 `ModelRouter.route_verifier` 决策（候选 <2 → None 继承）；异源裁判开关 `runtime.model_routing.heterogeneous_verifier`（默认 false）
 - **子任务级**：`SubtaskSpec.model`（serde default，None = 继承父）——父 LLM 拆解时可按难度分配模型；`RecursiveDecomposeTool` 经 `apply_subtask_model` 覆盖子 `MetaContext.model`
-- 分区跟随路由：每个相位/子任务按其模型用对应分区检索资产
+- 资产共享：所有相位/子任务使用同一根级资产树（模型维度仅影响统计键）
 
 #### 降级路径
 
@@ -1898,7 +1898,7 @@ MetaPhase 不调 LLM。LLM 用于**丰富归藏**（FittingAgent 执行 → 连�
 **激活条件（V32 修订）：** 归藏各层有足够资产（每层至少 5 个） + 累积 50+ 周易执行轨迹；统计选择启用门槛 `n ≥ min_samples`（3）。激活方式：`taiji run` 命令行增加 `--with-dmn` flag。**主动学习**需 pending 空 + 预算内（`runtime.dmn.active_learning`：每窗口限量 + token 成本上限）才在空闲窗口发起。
 
 
-### 8.21 连山-MCTS 认知树：归藏按模型分区的蒙特卡洛学习
+### 8.21 连山-MCTS 认知树：归藏单一资产树的蒙特卡洛学习
 
 **设计原则（与生成式模型一体两面）**：LLM 只能接龙（预测下一项），其能力上限由预训练地形决定且无法后训练。taiji 不改变模型，而是**配合模型的生成范式**——把任务组织成模型训练过的任务形式（完形填空/接龙），并用**系统结构**（验证/回退/拆解/沉淀）补偿模型的结构性缺陷。连山-MCTS 就是这套结构的训练侧：**周易是执行的马尔可夫链（每次执行 = 一次 rollout），连山是蒙特卡洛探索 fork 树（持久累积认知）**，共用同一棵资产树——训练与生成一体两面（回报函数 / UCB 选择 / 四算子定义见 §6.2 / §6.2）。
 
@@ -1923,9 +1923,9 @@ MetaPhase 不调 LLM。LLM 用于**丰富归藏**（FittingAgent 执行 → 连�
 
 **元权重 = 模式路由 + 模型路由 + 资产选择**（V43 纯符号化——全部 UCB bandit，零 LLM）：
 
-三个相互独立的 bandit 决策器共用同一统计管道（连山 backprop → model_stats / mode_stats / AssetStats）：① `route_model` → 执行模型；② `route_mode` → 编排 vs 执行；③ `rank_assets` → 选最佳匹配 system prompt。冷启动全部 n=0 → 最大探索分轮流尝试 → 先验偏置保守默认（Execution + 默认模型）。多级路由（任务级 / 相位级异源裁判 / 子任务级）保持，参见 §8.8。核心不变：模型路由不进探索任务实验对象（防自指循环）；「一个模型 + 它的约束系统 = 一个领域学习单元」是分区的完整语义（§10.1）。
+三个相互独立的 bandit 决策器共用同一统计管道（连山 backprop → model_stats / mode_stats / AssetStats）：① `route_model` → 执行模型；② `route_mode` → 编排 vs 执行；③ `rank_assets` → 选最佳匹配 system prompt。冷启动全部 n=0 → 最大探索分轮流尝试 → 先验偏置保守默认（Execution + 默认模型）。多级路由（任务级 / 相位级异源裁判 / 子任务级）保持，参见 §8.8。核心不变：模型路由不进探索任务实验对象（防自指循环）；「一个模型 + 它的约束系统 = 一个领域学习单元」是统计层隔离的完整语义（§10.1）。
 
-**数据流断点修复**：`MetaContext.assets_used`（serde default）记录本次编排选用的资产引用列表（含分区）→ enqueue pending 时携带 → TraceRewardExtractor 据此回传——**这是 连山回传的唯一依据，缺失则无法学习**。token 成本（trace usage）与质量信号（VerificationReport 派生）已在既有数据中。
+**数据流断点修复**：`MetaContext.assets_used`（serde default）记录本次编排选用的资产引用列表 → enqueue pending 时携带 → TraceRewardExtractor 据此回传——**这是 连山回传的唯一依据，缺失则无法学习**。token 成本（trace usage）与质量信号（VerificationReport 派生）已在既有数据中。
 
 **V35/MVP-6 定稿：assets_used 接线 + prompts 对称演化**：
 - **接线**：MetaPhase 编排时将选中资产（prompts + verifications，UCB 序消费的引用）写入 `MetaContext.assets_used`（`Vec<AssetRef>`：type/id/partition 三元组）→ enqueue_dmn_pending 携带 → backprop 按 assets_used 分发：verifications 走检查项级（既有 `backprop_checks` 按 check_id 匹配），prompts 走**任务级信号**（任务 PASS → 引用 prompts 各记 success；FAIL/BACK_TO_META → 记 fail）——同一 pending 负载、两套信号源（§6.2 实现层定稿）。
@@ -2014,7 +2014,7 @@ MetaPhase 不调 LLM。LLM 用于**丰富归藏**（FittingAgent 执行 → 连�
 | `agents.yaml` | AGENTS.md 规则结构化版本（约束清单/必检项/禁止模式） | 人类 AGENTS.md |
 | `topology.yaml` | 流型拓扑图（模块依赖/数据流/调用关系） | 代码结构 |
 | `contracts.yaml` | 接口契约定义表（所有 §3 接口签名/错误类型） | BCP §3 |
-| `env.yaml` | 环境信息（模型版本/配置参数/分区键/运行时约束） | 运行时环境 |
+| `env.yaml` | 环境信息（模型版本/配置参数/运行时约束） | 运行时环境 |
 
 **标准化 Skills（skills/）**——从 manifold/ 经周易执行压缩而来的可复用程序：
 
@@ -2025,54 +2025,50 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 
 不是离线编译——BCP→Skills 的每一次压缩就是一次周易任务执行，产生的 skills 是 deliverable，统计信号回传更新 models/。
 
-### 10.1 按模型分区的资产树模型
+### 10.1 单一资产树模型（V44 去分区化定稿）
 
-> **状态：**（V32 蓝图承诺，V33-35 未兑现，V36 实现）。V42 目录结构重新设计（阴阳对偶 + manifold + skills）——**本次为蓝图定稿，代码尚未迁移**。落地要点：① `LiluoClient` 支持 `root_dir`（knowledge 根）+ `data_dir`（活动目录）双路径——根 client 的 `for_model(key)` 派生分区 client（`data_dir = root/{model_key}`），`model_stats.yaml` 恒在根级；② 迁移函数 `migrate_to_partitioned(root, default_key)`（幂等：旧根资产目录 → 默认模型分区）；③ 检索/写回均走分区 client——MetaPhase 按路由结果分区检索（§8.8），连山按 pending 的 `model_key` 分区回传（§6.2）；④ `MetaContext.model` 是分区唯一载体（§8.3 分区一致性）。
+> **状态：**（V32 蓝图承诺分区，V36 实现，V44 取消分区——资产树单一共享，模型维度仅在统计层区分）。落地要点：① `GuizangClient` 单 `data_dir`（knowledge 根），删除 `for_model`/分区派生；② 迁移函数 `migrate_from_partitioned(root)`（幂等：既有 `{model_key}/` 分区资产合并回根）；③ 检索/写回均走根级 client——MetaPhase 根级检索（§8.8），连山按 pending 的 `model_key` 更新根级统计（§6.2）；④ `MetaContext.model` 仍是模型选择载体——路由按模型区分，资产不按模型复制。
 
-**归藏按模型分区（阴阳嵌套树）**：每个模型拥有独立的资产树。与周易任务树同构——yang=生成/执行/分叉（decompose），yin=验证/裁决/收敛（converge）。Skills 嵌套在 yang/ 与 yin/ 之下，类别由阴阳归属 + 子目录共同定义：
+**归藏单一资产树（阴阳嵌套树）**：与周易任务树同构——yang=生成/执行/分叉（decompose），yin=验证/裁决/收敛（converge）。Skills 嵌套在 yang/ 与 yin/ 之下，类别由阴阳归属 + 子目录共同定义：
 
 ```
 .taiji/knowledge/
-├── {model_key}/
-│   │
-│   ├── yang/                         ← 阳轨：生成/发散/执行
-│   │   ├── prompts/                   ← 阳系统提示词
-│   │   │   ├── orch-fitting.yaml      ← 编排·阳：拆解+综合
-│   │   │   └── exec-fitting.yaml      ← 执行·阳：直接产出
-│   │   └── skills/                    ← 阳 Skill（生成/执行能力）
-│   │       ├── orch/                  ← 编排 Skill
-│   │       │   └── recursive-decompose.yaml
-│   │       └── exec/                  ← 执行 Skill
-│   │           ├── write.yaml
-│   │           ├── bash.yaml
-│   │           ├── search.yaml
-│   │           ├── webfetch.yaml
-│   │           └── read.yaml
-│   │
-│   ├── yin/                          ← 阴轨：验证/收敛/裁决
-│   │   ├── prompts/                   ← 阴系统提示词
-│   │   │   ├── exec-verify.yaml       ← 验证·阴：直接产出核验
-│   │   │   └── orch-converge.yaml     ← 收敛·阴：子结果聚合判决
-│   │   └── skills/                    ← 阴 Skill（验证/收敛能力）
-│   │       ├── verify/                ← 验证 Skill（exec 的阴面对偶）
-│   │       │   ├── file-exists.yaml           # dual: write
-│   │       │   ├── command-succeeds.yaml      # dual: bash
-│   │       │   ├── reference-resolves.yaml    # dual: search
-│   │       │   ├── trace-consistency.yaml     # dual: webfetch
-│   │       │   └── schema-valid.yaml          # dual: write
-│   │       └── converge/              ← 收敛 Skill（orch 的阴面对偶）
-│   │           ├── mece-check.yaml            # dual: recursive-decompose
-│   │           ├── cross-consistency.yaml     # dual: recursive-decompose
-│   │           └── granularity-check.yaml     # dual: recursive-decompose
-│   │
-│   ├── models/                       ← 贝叶斯后验（跨阴阳，按 skill id 关联）
-│   └── manifold/                     ← 流型拓扑（后置）
+├── yang/                         ← 阳轨：生成/发散/执行
+│   ├── prompts/                   ← 阳系统提示词
+│   │   ├── orch-fitting.yaml      ← 编排·阳：拆解+综合
+│   │   └── exec-fitting.yaml      ← 执行·阳：直接产出
+│   └── skills/                    ← 阳 Skill（生成/执行能力）
+│       ├── orch/                  ← 编排 Skill
+│       │   └── recursive-decompose.yaml
+│       └── exec/                  ← 执行 Skill
+│           ├── write.yaml
+│           ├── bash.yaml
+│           ├── search.yaml
+│           ├── webfetch.yaml
+│           └── read.yaml
 │
-├── model_stats.yaml                  ← (model_key × tag) → 统计，恒在 knowledge 根
-└── (根级无资产层目录)
+├── yin/                          ← 阴轨：验证/收敛/裁决
+│   ├── prompts/                   ← 阴系统提示词
+│   │   ├── exec-verify.yaml       ← 验证·阴：直接产出核验
+│   │   └── orch-converge.yaml     ← 收敛·阴：子结果聚合判决
+│   └── skills/                    ← 阴 Skill（验证/收敛能力）
+│       ├── verify/                ← 验证 Skill（exec 的阴面对偶）
+│       │   ├── file-exists.yaml           # dual: write
+│       │   ├── command-succeeds.yaml      # dual: bash
+│       │   ├── reference-resolves.yaml    # dual: search
+│       │   ├── trace-consistency.yaml     # dual: webfetch
+│       │   └── schema-valid.yaml          # dual: write
+│       └── converge/              ← 收敛 Skill（orch 的阴面对偶）
+│           ├── mece-check.yaml            # dual: recursive-decompose
+│           ├── cross-consistency.yaml     # dual: recursive-decompose
+│           └── granularity-check.yaml     # dual: recursive-decompose
+│
+├── models/                       ← 贝叶斯后验（跨阴阳，按 skill id 关联）
+├── manifold/                     ← 流型拓扑（后置）
+└── model_stats.yaml              ← (model_key × tag) → 统计，按模型区分（路由依据）
 ```
 
-**分区运行时行为：**
+**根级资产树运行时行为：**
 
 | 层 | 资产类型 | 舒张期（浅层） | 收缩期（深层 Flow） | 压缩态 |
 |:---:|------|------|------|------|
@@ -2084,16 +2080,15 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 | `yin/skills/converge/` | 收敛 Skill | SkillEngine 机械执行 → LLM 裁决 | 持续：全程有效 | 判据→判定 |
 | `models/` | 贝叶斯后验（α/β） | UCB 排序权重 | 持续：后验持续影响路由与选择 | 迹→信念 |
 | `manifold/` | 流型拓扑 | 元宏观调控 / 模型路由 / 演化策略 | 持续：根任务级认知基线 | 设计→拓扑 |
-| `manifold/` | 流型拓扑 | 元 (MetaPhase) 宏观调控 / 模型路由 / 演化策略决策 | 持续：作为根任务级认知基线 | 设计→拓扑 |
 | `programs/` | 标准化程序（manifold→TPN 压缩产物） | SkillRegistry → Agent 工具注册 | 沉淀：反作用单节点执行效率 | 拓扑→程序 |
 
-**模型-领域学习单元**：分区不只是资产隔离，而是**学习单元**——每个分区是 (模型 × 约束系统) 的绑定主体：**模型提供概率地形**（猜想源：LLM 生成候选），**约束系统**（prompts + skills）**提供机械判据**（反驳源：SkillEngine 验证候选），**分区统计**（stats / models/ 贝叶斯后验）**提供累积**（选择源：连山回传与演化），三者绑定为一个**独立演化的领域学习单元**——模型不变，学习发生在围绕它的符号结构。推论：**Skill 粒度自适应**——各分区统计独立 → 弱模型分区通过率低 → fork 更小粒度的原子 Skill；强模型分区通过率高 → fork 更大的组合 Skill（Skill（orch 类））；同一语义 Skill 在不同分区按各自统计独立演化（粒度 = f(模型能力)），**变体树不跨分区**（fork/merge/prune 只作用于本分区资产）。
+**模型-领域学习单元（统计层隔离）**：资产树单一共享，领域学习单元在**统计层**区分——**模型提供概率地形**（猜想源：LLM 生成候选），**约束系统**（prompts + skills）**提供机械判据**（反驳源：SkillEngine 验证候选），**统计**（model_stats 按 model_key 索引 + models/ 贝叶斯后验）**提供累积**（选择源：连山回传与演化）。推论：**Skill 粒度自适应**——统计按模型区分 → 弱模型通过率低 → fork 更小粒度的原子 Skill；强模型通过率高 → fork 更大的组合 Skill；同一语义 Skill 的不同模型变体按各自统计独立演化（粒度 = f(模型能力)），**变体树共享资产树、统计独立**（fork/merge/prune 不复制资产，仅更新统计与选择）。
 
-周易执行期间只读，连山单写者更新（**分区维度：任务级路由下任务内所有 Agent 使用同一分区**——按路由模型的 model_key，MetaContext.model 是唯一载体；相位级路由激活后各相位按其路由模型用对应分区，§8.8）。
+周易执行期间只读，连山单写者更新（任务内所有 Agent 共享同一根级资产树——模型维度仅影响路由选择 `MetaContext.model` 与统计回传键，不产生资产副本，§8.8）。
 
 **Skills 与归藏的关系：** 4 类 Skill（orch/exec/verify/converge）是归藏的核心可演化资产。当前 5 个内置 Skill（read/write/bash/search/webfetch）作为 exec 类种子资产硬编码在 Rust 中。未来 SkillCompiler 激活后，skills/ 下的所有类别通过连山 DMN 四算子统一演化——fork（低通过率 Skill 变体）、merge（相似 Skill 合并）、prune（低效淘汰），4 类 Skill 共享同一演化框架与回报函数。
 
-**种子复制（`taiji seed <target_key> [--from <source_key>]`）**：把源分区的活跃种子资产（`prompts/` + `skills/` 中 status != pruned）文件级复制到目标分区。**不复制 `models/`**（贝叶斯后验 = 该模型的累积，新单元从零开始）。幂等：目标已存在同名资产 → 跳过不覆盖。源分区缺失 → 上抛（无降级原则）。
+**种子复制（`taiji seed [--from <source_root>]`）**：把源知识库根级活跃种子资产（`prompts/` + `skills/` 中 status != pruned）文件级复制到本知识库根。**不复制 `models/`**（贝叶斯后验 = 累积，新单元从零开始）。幂等：目标已存在同名资产 → 跳过不覆盖。
 
 
 ### 10.2 资产字段契约

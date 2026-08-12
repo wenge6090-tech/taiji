@@ -281,14 +281,14 @@ async fn run_experiment_queue(
                     let report = SkillEngine::run_checks(&[asset], &task_dir).await;
                     let checks = report.results;
                     // CheckResult 入队 pending（幂等覆盖写；同任务重复探索覆盖不重复学习）。
-                    // V36：携带分区键（liluo.partition_key）——回传落到变体所在分区。
+                    // V44 去分区化：回传统一落根（model_key 由 pending 内字段承载）。
                     if let Err(e) = crate::orchestration::tpn_cycle::enqueue_dmn_pending(
                         data_root,
                         &result.task_id,
                         &checks,
                         &[],
                         true,
-                        liluo.partition_key(),
+                        None,
                     )
                     .await
                     {

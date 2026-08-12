@@ -12,3 +12,4 @@
 /.taiji/knowledge/**/models/
 # 冒烟测试/任务运行产物
 /deliverables/
+/.taiji/pending/

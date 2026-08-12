@@ -25,15 +25,12 @@ enum Command {
     },
     /// Initialize workspace (.taiji/ + 理络 knowledge store)
     Init,
-    /// Seed a new model partition with the default partition's active seed
-    /// assets (prompts/ + verifications/). Stats/models NOT copied — each
-    /// partition is an independent learning unit (BCP §6.1).
+    /// Restore seed assets from an existing model partition directory
+    /// (prompts/ + verifications/) into the knowledge root (V44 去分区化恢复工具)。
+    /// Stats/models NOT copied — learning units accumulate from zero.
     Seed {
-        /// Target model key (`{provider}-{model}` slug) for the new partition
+        /// Source partition key (`{provider}-{model}` slug) to restore from
         model_key: String,
-        /// Source partition key (default: configured default model partition)
-        #[arg(long)]
-        from: Option<String>,
     },
     /// Show task trace
     Trace {
@@ -79,7 +76,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             with_dmn,
         } => cmd_run(description, resume, with_dmn).await?,
         Command::Init => cmd_init().await?,
-        Command::Seed { model_key, from } => cmd_seed(&model_key, from.as_deref()).await?,
+        Command::Seed { model_key } => cmd_seed(&model_key).await?,
         Command::Trace {
             task_id,
             tree,
@@ -120,19 +117,6 @@ async fn cmd_run(
         tokio_util::sync::CancellationToken,
     )> = None;
     if with_dmn {
-        // V36：默认模型分区键（与 build_engine 迁移目标一致）。
-        let default_key = taiji::types::agent::ModelKey::from_parts(
-            if config.llm.default_provider.is_empty() {
-                "deepseek"
-            } else {
-                &config.llm.default_provider
-            },
-            if config.llm.default_model.is_empty() {
-                "deepseek-chat"
-            } else {
-                &config.llm.default_model
-            },
-        );
         let evolver = Arc::new(
             taiji::orchestration::cognition_evolver::CognitionEvolver::new(
                 factory.guizang.clone(),
@@ -147,14 +131,13 @@ async fn cmd_run(
             dmn_config.clone(),
         );
         // V33/MVP-3 主动学习执行器（默认关闭；开启时消费 experiments/ 队列）
-        // V36：探索目标从默认模型分区加载（变体资产已随迁移落位分区）。
-        let al_guizang = Arc::new(factory.guizang.for_model(default_key.key()).await?);
+        // V44：探索目标直接使用根级资产树。
         let al_handle = taiji::orchestration::active_learning::spawn_runner(
             factory.clone(),
             config.clone(),
             &data_root,
             cancel.clone(),
-            al_guizang,
+            factory.guizang.clone(),
         );
         dmn_handle = Some((consumer.spawn(), al_handle.unwrap_or_else(|| tokio::task::spawn(async {})), cancel));
         tracing::info!(
@@ -225,27 +208,11 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
     let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
     match taiji::infra::knowledge::GuizangClient::new(&knowledge_dir).await {
         Ok(_) => {
-            // V36：旧根资产迁移到默认模型分区（幂等；init 是人工可重跑步骤，
+            // V44：旧 `{model_key}/` 分区资产合并回根（幂等；init 是人工可重跑步骤，
             // 失败仅提示不中断——build_engine 运行时迁移失败才上抛）。
-            let default_key = taiji::types::agent::ModelKey::from_parts(
-                if config.llm.default_provider.is_empty() {
-                    "deepseek"
-                } else {
-                    &config.llm.default_provider
-                },
-                if config.llm.default_model.is_empty() {
-                    "deepseek-chat"
-                } else {
-                    &config.llm.default_model
-                },
-            );
-            if let Err(e) = taiji::infra::knowledge::migrate_to_partitioned(
-                &knowledge_dir,
-                default_key.key(),
-            )
-            .await
+            if let Err(e) = taiji::infra::knowledge::migrate_from_partitioned(&knowledge_dir).await
             {
-                println!("⚠ legacy knowledge migration to default partition failed: {e}");
+                println!("⚠ legacy partition merge to knowledge root failed: {e}");
             }
             // V42：yang/yin 对偶目录迁移（幂等，BCP §10.1）
             if let Err(e) = taiji::infra::knowledge::migrate_to_yang_yin(&knowledge_dir).await {
@@ -271,37 +238,21 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
 /// （每个分区是独立学习单元，新模型从零积累——BCP §6.1）。
 async fn cmd_seed(
     model_key: &str,
-    from: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config()?;
     let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
 
-    let default_key = taiji::types::agent::ModelKey::from_parts(
-        if config.llm.default_provider.is_empty() {
-            "deepseek"
-        } else {
-            &config.llm.default_provider
-        },
-        if config.llm.default_model.is_empty() {
-            "deepseek-chat"
-        } else {
-            &config.llm.default_model
-        },
-    );
-    let source_key = from.unwrap_or(default_key.key());
-
     let report =
-        taiji::infra::knowledge::seed_partition(&knowledge_dir, source_key, model_key).await?;
+        taiji::infra::knowledge::seed_partition(&knowledge_dir, model_key).await?;
 
     println!(
-        "✓ seeded {} active assets ({}) → partition '{}' ({} skipped existing, {} pruned excluded)",
+        "✓ restored {} active seed assets from partition '{}' ({} skipped existing, {} pruned excluded)",
         report.copied,
-        source_key,
         model_key,
         report.skipped,
         report.pruned_skipped
     );
-    println!("  models/ 统计与贝叶斯后验未复制——新分区从零积累（学习单元语义，BCP §6.1）");
+    println!("  models/ 统计与贝叶斯后验未复制——学习单元从零积累（BCP §10.1）");
     Ok(())
 }
 
@@ -479,27 +430,13 @@ async fn build_engine(
         }
     };
 
-    // V36 分区落地：旧根资产迁移到默认模型分区（幂等——目标存在即跳过）。
+    // V44 去分区化：旧 `{model_key}/` 分区资产合并回根（幂等——目标存在即跳过）。
     // 无降级原则（AGENTS.md §23）：迁移是数据完整性操作，失败上抛（部分迁移
     // 会导致根/分区资产不一致，检索结果不可信）。
-    let default_key = taiji::types::agent::ModelKey::from_parts(
-        if config.llm.default_provider.is_empty() {
-            "deepseek"
-        } else {
-            &config.llm.default_provider
-        },
-        if config.llm.default_model.is_empty() {
-            "deepseek-chat"
-        } else {
-            &config.llm.default_model
-        },
-    );
-    if let Err(e) =
-        taiji::infra::knowledge::migrate_to_partitioned(&knowledge_dir, default_key.key()).await
-    {
+    if let Err(e) = taiji::infra::knowledge::migrate_from_partitioned(&knowledge_dir).await {
         tracing::error!(
             error = %e,
-            "legacy knowledge migration to default partition failed"
+            "legacy partition merge to knowledge root failed"
         );
         return Err(Box::new(e));
     }

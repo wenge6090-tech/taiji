@@ -218,9 +218,8 @@ impl MetaAgentBuilder {
             None
         };
 
-        // ── 1. Query 理絡 for prompt assets（按路由模型分区）──
-        let partition = self.guizang.for_model(model_key.key()).await?;
-        let prompt_assets = partition.search_prompts(task_type_tags).await?;
+        // ── 1. Query 理絡 for prompt assets（V44：根级资产树共享）──
+        let prompt_assets = self.guizang.search_prompts(task_type_tags).await?;
 
         // ── 2. Confidence filter ──
         const CONFIDENCE_THRESHOLD: f64 = 0.3;
@@ -247,7 +246,7 @@ impl MetaAgentBuilder {
         // ── 2.5 UCB 排序（V35/MVP-5 检索数学化，§6.3 实现层定稿）──
         // 后验均值 μ + 探索项 C·√(ln N_total/(n+1))；n=0 冷启动退化为先验 μ 降序。
         // prior_strength 取 DmnConfig 默认（MetaAgentBuilder 无 config——与 §6.4.1 默认一致）。
-        let models = partition.load_all_models().await?;
+        let models = self.guizang.load_all_models().await?;
         let ranked = crate::infra::knowledge::rank_prompts_by_ucb(
             &matched,
             &models,

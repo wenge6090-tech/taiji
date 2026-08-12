@@ -1,8 +1,21 @@
 # taiji 周易层 BCP 对齐 — 交接文件
 
-> 日期：2026-08-12  
+> 日期：2026-08-12（V44 更新：2026-08-13 去分区化）  
 > 范围：提示词重设计 + 归藏目录重构 + BCP 蓝图更新  
 > 基线：`cargo test --lib` = 277 passed / 0 failed / 9 ignored
+
+---
+
+## 〇、V44 去分区化（2026-08-13）
+
+**决策**：取消围绕模型的分区资产树，改为**单一根级资产树**（BCP §10.1 已重写）。
+
+- `GuizangClient` 删除 `for_model`/`partition`/`root_dir` 双路径 → 单 `data_dir`
+- `migrate_to_partitioned` → `migrate_from_partitioned`（旧 `{model_key}/` 资产幂等合并回根）
+- MetaAgent/CausalAgent 检索直连根级；连山回传统一落根（model_key 仅作统计键）
+- `taiji seed <key>` 语义改为：从旧分区目录恢复种子到根
+- 模型维度仅在统计层区分（model_stats.yaml 按 model_key 索引，UCB 路由不变）
+- 磁盘已迁移：`.taiji/knowledge/yang|yin|models/` 根级，`deepseek-deepseek-v4-flash/` 已删
 
 ---
 
@@ -28,12 +41,12 @@
 - `AgentFactory` 字段：`liluo` → `guizang`
 - 全仓 ~124 处引用已更新，277 测试全通过
 
-### 3. 归藏目录结构：阴阳嵌套树
+### 3. 归藏目录结构：阴阳嵌套树（V44：根级单一资产树，无 {model_key}/ 层）
 
 与 BCP §1.1 异层同构原则一致——归藏树与周易任务树同构（yang=decompose，yin=converge）：
 
 ```
-{model_key}/
+.taiji/knowledge/
 ├── yang/                          ← 阳轨：生成/发散/执行
 │   ├── prompts/                   ← 2 份教学提示词
 │   └── skills/
@@ -45,7 +58,8 @@
 │       ├── verify/                ← 验证 Skill（exec 的阴面对偶）
 │       └── converge/              ← 收敛 Skill（orch 的阴面对偶）
 ├── models/                        ← 贝叶斯后验（跨阴阳）
-└── manifold/                      ← 流型拓扑（后置）
+├── manifold/                      ← 流型拓扑（后置）
+└── model_stats.yaml               ← (model_key × tag) 统计（按模型区分，路由依据）
 ```
 
 ### 4. Skill 资产统一字段契约
