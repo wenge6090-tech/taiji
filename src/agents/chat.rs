@@ -16,10 +16,12 @@ use rig::client::CompletionClient;
 use rig::completion::Message;
 use rig::streaming::{StreamedAssistantContent, StreamingChat};
 
+use crate::agents::tools::guizang_query::GuizangQueryTool;
 use crate::agents::tools::skills::SkillRegistry;
 use crate::hooks::safety::SafetyHook;
 use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
+use crate::infra::knowledge::GuizangClient;
 use crate::infra::provider::{ChatProvider, ProviderRegistry};
 use crate::infra::trace::save_json_atomic;
 
@@ -34,12 +36,15 @@ const DEFAULT_MAX_TURNS: usize = 20;
 pub struct ChatAgentBuilder {
     session_id: String,
     context_task_id: Option<String>,
-    providers: Arc<ProviderRegistry>,
     safety_hook: Arc<SafetyHook>,
+    guizang: Arc<GuizangClient>,
     config: TaijiConfig,
     data_root: PathBuf,
     model: String,
-    provider_name: String,
+    /// Session 级工具注册表（5 个 L1 builtin），new 时构建一次，chat 每轮复用。
+    skill_registry: SkillRegistry,
+    /// Session 级已解析的 provider client，new 时 resolve 一次，chat 每轮复用。
+    chat_provider: ChatProvider,
 }
 
 impl ChatAgentBuilder {
@@ -50,20 +55,26 @@ impl ChatAgentBuilder {
         context_task_id: Option<String>,
         providers: Arc<ProviderRegistry>,
         safety_hook: Arc<SafetyHook>,
+        guizang: Arc<GuizangClient>,
         config: TaijiConfig,
         data_root: PathBuf,
         model: &str,
         provider_name: &str,
     ) -> Self {
+        // Session 级预构建：工具注册表 + 已解析 provider（chat 每轮复用，不再重建）。
+        // chat 不涉及任务封地，write 相对路径按进程 cwd 解析（task_dir = "."）。
+        let skill_registry = SkillRegistry::new(std::path::Path::new("."));
+        let chat_provider = providers.resolve_chat_provider(provider_name);
         Self {
             session_id,
             context_task_id,
-            providers,
             safety_hook,
+            guizang,
             config,
             data_root,
             model: model.to_string(),
-            provider_name: provider_name.to_string(),
+            skill_registry,
+            chat_provider,
         }
     }
 
@@ -117,14 +128,16 @@ impl ChatAgentBuilder {
             .and_then(|o| o.max_turns)
             .unwrap_or(DEFAULT_MAX_TURNS as u32) as usize;
         let safety_hook = self.safety_hook.as_ref().clone();
-        let skill_registry = SkillRegistry::new(std::path::Path::new("."));
-        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = skill_registry
+        let mut skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = self
+            .skill_registry
             .tools()
             .iter()
             .map(|t| Box::new(t.clone()) as Box<dyn rig::tool::ToolDyn>)
             .collect();
+        // 归藏只读检索工具（chat 第 6 个工具，零 LLM）：LLM 自主决定何时查认知资产。
+        skill_tools.push(Box::new(GuizangQueryTool::new(self.guizang.clone())));
 
-        let final_text = match self.providers.resolve_chat_provider(&self.provider_name) {
+        let final_text = match &self.chat_provider {
             ChatProvider::Deepseek(client) => {
                 let agent = client
                     .agent(&self.model)
@@ -328,6 +341,7 @@ mod tests {
             context_task_id,
             factory.providers.clone(),
             factory.safety_hook.clone(),
+            factory.guizang.clone(),
             factory.config.clone(),
             tmp_dir.clone(),
             "deepseek-chat",

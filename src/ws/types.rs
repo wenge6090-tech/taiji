@@ -105,6 +105,12 @@ pub enum ClientMessage {
         request_id: String,
         task_id: String,
     },
+    /// Pre-execution planning (MetaAgent + LLM plan composition, no Zhouyi
+    /// loop). Mirrors the `taiji_plan` MCP tool.
+    PlanMessage {
+        request_id: String,
+        description: String,
+    },
     /// Chat with the long-lived ChatAgent (streaming).
     ///
     /// When `session_id` is absent the server creates a new session and

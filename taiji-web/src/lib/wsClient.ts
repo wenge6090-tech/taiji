@@ -9,6 +9,7 @@ export type ClientMessageType =
   | "ListTasks"
   | "GetTaskTree"
   | "GetZhouyiState"
+  | "PlanMessage"
   | "ChatMessage";
 
 interface PendingRequest {

@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { wsClient } from "../lib/wsClient";
 import { CHAT_TIMEOUT_MS } from "../lib/wsClient";
 import type { WsStatus } from "../lib/wsClient";
+import type { PlanSummary } from "../types";
 
 interface ChatMessage {
   id: number;
@@ -20,6 +21,35 @@ const WS_LABEL: Record<WsStatus, string> = {
   open: "已连接",
   closed: "已断开",
 };
+
+/** 将 PlanSummary 格式化为聊天面板的可读文本。 */
+function formatPlanSummary(p: PlanSummary): string {
+  const lines: string[] = [];
+  lines.push(`📋 ${p.taskAnalysis}`);
+  lines.push(`复杂度:${p.estimatedComplexity}`);
+  if (p.recommendedSkills?.length) {
+    lines.push(`推荐技能:${p.recommendedSkills.join(", ")}`);
+  }
+  if (p.expectedDeliverables?.length) {
+    lines.push("预期产物:");
+    p.expectedDeliverables.forEach((d) => lines.push(`  • ${d}`));
+  }
+  if (p.estimatedSubtasks?.length) {
+    lines.push("预计子任务:");
+    p.estimatedSubtasks.forEach((s, i) => {
+      lines.push(`  ${i + 1}. ${s.description}`);
+      if (s.verificationApproach) lines.push(`     验证:${s.verificationApproach}`);
+    });
+  }
+  if (p.relevantConstraints?.length) {
+    lines.push("相关约束:");
+    p.relevantConstraints.forEach((c) => lines.push(`  • ${c}`));
+  }
+  if (p.matchedPromptsSummary) {
+    lines.push(`归藏匹配:${p.matchedPromptsSummary}`);
+  }
+  return lines.join("\n");
+}
 
 export default function ChatPanel({
   onRunTask,
@@ -103,7 +133,29 @@ export default function ChatPanel({
     }
 
     if (text.startsWith("/plan")) {
-      typewriter("规划模式即将上线,当前可直接发送 /run 描述 执行任务", 400);
+      const desc = text.slice(5).trim();
+      if (!desc) {
+        typewriter("用法:/plan <任务描述> — 预演执行计划(不进 Zhouyi 循环)", 400);
+        return;
+      }
+      setSending(true);
+      const msgId = nextId.current++;
+      setMessages((prev) => [...prev, { id: msgId, role: "ai", content: "" }]);
+      try {
+        const resp = await wsClient.send("PlanMessage", { description: desc });
+        const plan = resp.data as PlanSummary;
+        setMessages((prev) =>
+          prev.map((m) => (m.id === msgId ? { ...m, content: formatPlanSummary(plan) } : m))
+        );
+      } catch (e) {
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === msgId ? { ...m, content: `规划失败:${String(e)}` } : m
+          )
+        );
+      } finally {
+        setSending(false);
+      }
       return;
     }
 

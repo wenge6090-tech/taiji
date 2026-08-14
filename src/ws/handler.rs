@@ -14,6 +14,7 @@ use crate::infra::error::TaijiError;
 use crate::orchestration::runner::RecursiveRunner;
 use crate::orchestration::task_tree_builder::build_task_tree;
 use crate::types::frontend::{TaskTreeSnapshot, ZhouyiPhaseState, YinIntervention};
+use crate::types::plan::PlanSummary;
 use crate::types::task::Task;
 
 /// Shared engine snapshot injected into WS request handling.
@@ -203,6 +204,23 @@ pub fn handle_get_zhouyi_state(
         deliverables,
         trace_preview,
     })
+}
+
+/// Pre-execution planning (the chat panel's `/plan` command).
+///
+/// Runs the PlanBuilder (MetaAgent + LLM plan composition) without entering
+/// the Zhouyi loop, returning a speculative [`PlanSummary`]. Uses the same
+/// readable task-id scheme as the `taiji_plan` MCP tool (not persisted as a
+/// task dir).
+pub async fn handle_plan_message(
+    description: &str,
+    state: &ServeState,
+) -> Result<PlanSummary, TaijiError> {
+    let task_id = crate::infra::task_id::generate_task_id(description);
+    let plan_agent = state.factory.create_plan_agent(&task_id)?;
+    let tags = crate::agents::meta::classify_task_tags(description);
+    let tag_refs: Vec<&str> = tags.iter().map(String::as_str).collect();
+    plan_agent.plan(description, &tag_refs).await
 }
 
 /// Stream a chat message to the long-lived ChatAgent (the chat panel's

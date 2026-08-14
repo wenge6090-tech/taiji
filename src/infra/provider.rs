@@ -13,6 +13,7 @@ use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
 
 /// A resolved chat provider client, used by the ChatAgent to build agents.
+#[derive(Clone)]
 pub enum ChatProvider {
     Deepseek(Arc<deepseek::Client>),
     OpenAI(Arc<openai::Client>),

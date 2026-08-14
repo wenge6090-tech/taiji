@@ -123,3 +123,21 @@ export type TaskEvent =
   | { type: "DeliverableCreated"; data: { taskId: string; path: string; sizeBytes: number } }
   | { type: "LianshanEvolution"; data: { evolutions: EvolutionSummary[] } }
   | { type: "TaskTreeHeartbeat"; data: { activeTasks: number; timestamp: string } };
+
+/** 预执行计划子任务(后端 SubtaskPlan)。 */
+export interface SubtaskPlan {
+  description: string;
+  verificationApproach: string;
+  requiredSkills: string[];
+}
+
+/** 预执行计划摘要(后端 PlanSummary, taiji_plan / /plan 命令)。 */
+export interface PlanSummary {
+  taskAnalysis: string;
+  estimatedSubtasks: SubtaskPlan[];
+  recommendedSkills: string[];
+  expectedDeliverables: string[];
+  estimatedComplexity: string;
+  matchedPromptsSummary: string;
+  relevantConstraints: string[];
+}

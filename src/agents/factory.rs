@@ -362,6 +362,7 @@ impl AgentFactory {
             context_task_id,
             self.providers.clone(),
             self.safety_hook.clone(),
+            self.guizang.clone(),
             self.config.clone(),
             self.data_root.clone(),
             &model,

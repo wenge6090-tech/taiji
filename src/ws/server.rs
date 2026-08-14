@@ -33,26 +33,19 @@ use crate::ws::types::{ClientMessage, ServerResponse, TaskEvent, WsServerMessage
 /// into long-lived tasks. `broadcast()` is non-blocking.
 #[derive(Clone)]
 pub struct WsServer {
-    tx: tokio::sync::broadcast::Sender<TaskEvent>,
     addr: SocketAddr,
     clients: Arc<Mutex<HashMap<u64, mpsc::UnboundedSender<WsServerMessage>>>>,
     state: Arc<Mutex<Option<Arc<ServeState>>>>,
     next_client_id: Arc<AtomicU64>,
 }
 
-/// Default per-connection outbound queue capacity (unbounded — events are
-/// cheap and must never block the engine).
-const CHANNEL_CAPACITY: usize = 512;
-
 impl WsServer {
     /// Create a new server bound to `127.0.0.1:<port>`.
     ///
     /// The listener is not started until [`start`](Self::start) is called.
     pub fn new(port: u16) -> Self {
-        let (_tx, _rx) = tokio::sync::broadcast::channel(CHANNEL_CAPACITY);
         let addr = SocketAddr::from(([127, 0, 0, 1], port));
         Self {
-            tx: _tx,
             addr,
             clients: Arc::new(Mutex::new(HashMap::new())),
             state: Arc::new(Mutex::new(None)),
@@ -203,6 +196,10 @@ impl WsServer {
                     let r = crate::ws::handler::handle_get_zhouyi_state(&task_id, &st);
                     to_response(&request_id, r)
                 }
+                ClientMessage::PlanMessage { description, .. } => {
+                    let r = crate::ws::handler::handle_plan_message(&description, &st).await;
+                    to_response(&request_id, r)
+                }
                 ClientMessage::ChatMessage {
                     message,
                     session_id,
@@ -264,6 +261,7 @@ fn request_id_of(msg: &ClientMessage) -> &str {
         | ClientMessage::ListTasks { request_id, .. }
         | ClientMessage::GetTaskTree { request_id, .. }
         | ClientMessage::GetZhouyiState { request_id, .. }
+        | ClientMessage::PlanMessage { request_id, .. }
         | ClientMessage::ChatMessage { request_id, .. } => request_id,
     }
 }
@@ -367,4 +365,108 @@ async fn handle_connection(
 
     ws.unregister_client(client_id);
     debug!(peer = %peer, "WebSocket client disconnected");
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::types::frontend::NodeStatus;
+    use crate::ws::types::TaskEvent;
+
+    #[test]
+    fn register_and_unregister_tracks_clients() {
+        let ws = WsServer::new(17891);
+        assert_eq!(ws.subscriber_count(), 0);
+
+        let (id1, _rx1) = ws.register_client();
+        let (id2, _rx2) = ws.register_client();
+        assert_eq!(ws.subscriber_count(), 2);
+        assert_ne!(id1, id2);
+
+        ws.unregister_client(id1);
+        assert_eq!(ws.subscriber_count(), 1);
+        ws.unregister_client(id2);
+        assert_eq!(ws.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn broadcast_delivers_to_all_clients() {
+        let ws = WsServer::new(17892);
+        let (id1, mut rx1) = ws.register_client();
+        let (id2, mut rx2) = ws.register_client();
+
+        let event = TaskEvent::TaskStatusChanged {
+            task_id: "t1".into(),
+            old_status: NodeStatus::Running,
+            new_status: NodeStatus::Converged,
+        };
+        ws.broadcast(event);
+
+        let got1 = rx1.try_recv().expect("client 1 should receive event");
+        let got2 = rx2.try_recv().expect("client 2 should receive event");
+        assert!(matches!(got1, WsServerMessage::Event(_)));
+        assert!(matches!(got2, WsServerMessage::Event(_)));
+
+        ws.unregister_client(id1);
+        ws.unregister_client(id2);
+    }
+
+    #[test]
+    fn send_to_delivers_only_to_target_client() {
+        let ws = WsServer::new(17893);
+        let (id1, mut rx1) = ws.register_client();
+        let (id2, mut rx2) = ws.register_client();
+
+        let resp = ServerResponse::ok("req-1", serde_json::json!({"a": 1}));
+        ws.send_to(id1, resp);
+
+        assert!(rx1.try_recv().is_ok(), "target client should receive");
+        assert!(rx2.try_recv().is_err(), "other client should not receive");
+
+        ws.unregister_client(id1);
+        ws.unregister_client(id2);
+    }
+
+    #[test]
+    fn broadcast_drops_silently_when_no_clients() {
+        let ws = WsServer::new(17894);
+        // No clients registered: broadcast must not panic, just no-op.
+        ws.broadcast(TaskEvent::TaskTreeHeartbeat {
+            active_tasks: 0,
+            timestamp: "2025-01-01T00:00:00Z".into(),
+        });
+        assert_eq!(ws.subscriber_count(), 0);
+    }
+
+    #[test]
+    fn request_id_of_extracts_every_variant() {
+        use crate::ws::types::ClientMessage;
+
+        let msgs = [
+            ClientMessage::ExecuteTask { request_id: "a".into(), description: "d".into(), max_depth: None },
+            ClientMessage::SubmitReview { request_id: "b".into(), intervention: crate::types::frontend::YinIntervention { task_id: "t".into(), action: crate::types::frontend::InterventionAction::Approve, suggestion: String::new() } },
+            ClientMessage::ListTasks { request_id: "c".into() },
+            ClientMessage::GetTaskTree { request_id: "d".into(), root_task_id: "r".into() },
+            ClientMessage::GetZhouyiState { request_id: "e".into(), task_id: "t".into() },
+            ClientMessage::PlanMessage { request_id: "f".into(), description: "p".into() },
+            ClientMessage::ChatMessage { request_id: "g".into(), message: "m".into(), session_id: None, context_task_id: None },
+        ];
+        let ids: Vec<&str> = msgs.iter().map(request_id_of).collect();
+        assert_eq!(ids, vec!["a", "b", "c", "d", "e", "f", "g"]);
+    }
+
+    #[test]
+    fn to_response_wraps_ok_and_err() {
+        let ok = to_response::<u32>("r1", Ok(42));
+        assert!(ok.ok);
+        assert_eq!(ok.data, Some(serde_json::json!(42)));
+
+        let err = to_response::<u32>("r2", Err(TaijiError::Other("boom".into())));
+        assert!(!err.ok);
+        assert_eq!(err.error.as_deref(), Some("boom"));
+    }
 }

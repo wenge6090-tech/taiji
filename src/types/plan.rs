@@ -13,6 +13,7 @@ use serde::{Deserialize, Serialize};
 /// subtasks, recommended skills, expected deliverables and complexity estimate.
 /// This is a **speculative** output — actual execution may differ.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PlanSummary {
     /// Brief (1-2 sentence) analysis of what the task entails.
     pub task_analysis: String,
@@ -37,6 +38,7 @@ pub struct PlanSummary {
 
 /// A single estimated subtask within a [`PlanSummary`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SubtaskPlan {
     /// What this subtask should accomplish.
     pub description: String,
