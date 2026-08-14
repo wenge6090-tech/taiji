@@ -18,7 +18,7 @@
 //! invocations subject to [`SafetyHook`] checks (see AGENTS.md §3).
 
 use rmcp::{
-    model::{CallToolRequestParam, CallToolResult},
+    model::{CallToolRequestParams, CallToolResult},
     service::{RoleClient, RunningService, ServiceExt},
     transport::TokioChildProcess,
 };
@@ -178,10 +178,9 @@ impl McpClientConnection {
         let args_obj = arguments.as_object().cloned().unwrap_or_default();
 
         service
-            .call_tool(CallToolRequestParam {
-                name: tool_name.to_string().into(),
-                arguments: Some(args_obj),
-            })
+            .call_tool(
+                CallToolRequestParams::new(tool_name.to_string()).with_arguments(args_obj),
+            )
             .await
             .map_err(|e| {
                 TaijiError::Other(format!(

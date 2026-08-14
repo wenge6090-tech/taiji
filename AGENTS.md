@@ -35,9 +35,9 @@
 | L2 Hook | `src/hooks/` | safety(ToolSafetyGuard) / trace(TraceHook) / context_limiter / chat_history_snapshot / yang_hook_set(YangHookSet) / yin_hook_set(YinHookSet) |
 | L3 Agent | `src/agents/` | factory(中枢) / meta(元) / yang(阳) / yin(阴) / chat(前端对话) / plan(PlanBuilder) / tools/(recursive_decompose, yin_verify, text_call, skills/) |
 | L4 编排 | `src/orchestration/` | zhouyi(三相循环) / runner / constraint_engine / skill_engine / trigger_engine / worker_pool / lianshan(压缩算子) / manifold(迹拓扑压缩) / cognition_evolver / model_router / active_learning / task_tree_builder |
-| L5 MCP | `src/mcp/` | server(暴露 taiji 工具) / client(消费外部 MCP) |
+| L5 MCP | `src/mcp/` | server(暴露 taiji 工具, rmcp 3.x stdio) / client(消费外部 MCP) |
 | L6 WS+HTTP | `src/ws/` + `src/main.rs serve` | WebSocket 事件推送 + 请求响应 + axum 静态托管 |
-| L7 前端 | `taiji-web/` | React 纯浏览器 UI（纺锤树 / Zhouyi 弹窗 / 聊天面板） |
+| L7 前端 | `taiji-web/` | React 纯浏览器 UI（纺锤树 / Zhouyi 弹窗 / 聊天面板）；外部前端 Agent 对接见 `taiji-web/MCP_INTEGRATION.md` |
 
 ## 关键类型路径索引
 

@@ -37,7 +37,7 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4", "serde"] }
 
 # MCP protocol
-rmcp = { version = "0.8", features = ["server", "client", "transport-child-process"] }
+rmcp = { version = "3.1", features = ["server", "client", "transport-child-process", "transport-io"] }
 
 # Rate limiting
 tokio-util = "0.7"

@@ -18,8 +18,9 @@ use std::sync::Arc;
 use rmcp::{
     ErrorData as McpError,
     model::{
-        CallToolRequestParam, CallToolResult, Content, Implementation, ListToolsResult,
-        PaginatedRequestParam, ServerInfo, Tool,
+        CallToolRequestParams, CallToolResponse, CallToolResult, ContentBlock, Implementation,
+        ListToolsResult, PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerInfo,
+        Tool,
     },
     service::{RequestContext, RoleServer, serve_server},
     ServerHandler,
@@ -97,7 +98,7 @@ impl TaijiMcpServer {
 }
 
 // ---------------------------------------------------------------------------
-// ServerHandler implementation  (rmcp 0.8 trait, no macros)
+// ServerHandler implementation  (rmcp 3.x trait, no macros)
 // ---------------------------------------------------------------------------
 
 /// Dispatches incoming MCP requests.  Only `call_tool` and `list_tools` are
@@ -105,22 +106,23 @@ impl TaijiMcpServer {
 #[allow(unused_variables)]
 impl ServerHandler for TaijiMcpServer {
     fn get_info(&self) -> ServerInfo {
-        ServerInfo {
-            protocol_version: Default::default(),
-            capabilities: Default::default(),
-            server_info: Implementation {
-                name: "taiji-mcp".into(),
-                version: env!("CARGO_PKG_VERSION").into(),
-                ..Default::default()
-            },
-            instructions: None,
-        }
+        ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_protocol_version(ProtocolVersion::LATEST)
+            .with_server_info(Implementation::new(
+                "taiji-mcp",
+                env!("CARGO_PKG_VERSION"),
+            ))
+            .with_instructions(
+                "taiji cognitive engine MCP server (Zhouyi-Lianshan). Exposes \
+                 taiji_plan / taiji_run / taiji_explain / taiji_trace / taiji_list / \
+                 taiji_status.",
+            )
     }
 
     /// Advertise the six taiji tools.
     async fn list_tools(
         &self,
-        request: Option<PaginatedRequestParam>,
+        request: Option<PaginatedRequestParams>,
         context: RequestContext<RoleServer>,
     ) -> Result<ListToolsResult, McpError> {
         let tools = vec![
@@ -228,19 +230,19 @@ impl ServerHandler for TaijiMcpServer {
     /// Route tool invocations to the appropriate handler.
     async fn call_tool(
         &self,
-        request: CallToolRequestParam,
+        request: CallToolRequestParams,
         context: RequestContext<RoleServer>,
-    ) -> Result<CallToolResult, McpError> {
+    ) -> Result<CallToolResponse, McpError> {
         let name = request.name.as_ref();
         let args = request.arguments.unwrap_or_default();
 
         match name {
-            "taiji_plan" => self.handle_plan(args).await,
-            "taiji_run" => self.handle_run(args).await,
-            "taiji_explain" => self.handle_explain(args).await,
-            "taiji_trace" => self.handle_trace(args).await,
-            "taiji_list" => self.handle_list().await,
-            "taiji_status" => self.handle_status().await,
+            "taiji_plan" => self.handle_plan(args).await.map(CallToolResponse::Complete),
+            "taiji_run" => self.handle_run(args).await.map(CallToolResponse::Complete),
+            "taiji_explain" => self.handle_explain(args).await.map(CallToolResponse::Complete),
+            "taiji_trace" => self.handle_trace(args).await.map(CallToolResponse::Complete),
+            "taiji_list" => self.handle_list().await.map(CallToolResponse::Complete),
+            "taiji_status" => self.handle_status().await.map(CallToolResponse::Complete),
             other => {
                 warn!(tool = %other, "Unknown tool requested");
                 Err(McpError::method_not_found::<rmcp::model::CallToolRequestMethod>())
@@ -262,7 +264,7 @@ impl TaijiMcpServer {
         let description = match args.get("description").and_then(|v| v.as_str()) {
             Some(d) => d.to_owned(),
             None => {
-                return Ok(CallToolResult::error(vec![Content::text(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
                     "Missing required argument: description",
                 )]));
             }
@@ -276,7 +278,7 @@ impl TaijiMcpServer {
             Ok(agent) => agent,
             Err(e) => {
                 error!(error = %e, "taiji_plan: failed to create PlanBuilder");
-                return Ok(CallToolResult::error(vec![Content::text(format!(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Failed to create plan agent: {e}"
                 ))]));
             }
@@ -291,7 +293,7 @@ impl TaijiMcpServer {
             }
             Err(e) => {
                 error!(error = %e, "taiji_plan failed");
-                Ok(CallToolResult::error(vec![Content::text(format!(
+                Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Planning failed: {e}"
                 ))]))
             }
@@ -306,7 +308,7 @@ impl TaijiMcpServer {
         let description = match args.get("description").and_then(|v| v.as_str()) {
             Some(d) => d.to_owned(),
             None => {
-                return Ok(CallToolResult::error(vec![Content::text(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
                     "Missing required argument: description",
                 )]));
             }
@@ -365,7 +367,7 @@ impl TaijiMcpServer {
             }
             Err(e) => {
                 error!(error = %e, "taiji_run failed");
-                Ok(CallToolResult::error(vec![Content::text(format!(
+                Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Task execution failed: {e}"
                 ))]))
             }
@@ -380,7 +382,7 @@ impl TaijiMcpServer {
         let task_id = match args.get("task_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_owned(),
             None => {
-                return Ok(CallToolResult::error(vec![Content::text(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
                     "Missing required argument: task_id",
                 )]));
             }
@@ -394,7 +396,7 @@ impl TaijiMcpServer {
         let task_dir = self.factory.task_dir(&task_id);
 
         if !task_dir.exists() {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Task not found: {task_id}"
             ))]));
         }
@@ -424,7 +426,7 @@ impl TaijiMcpServer {
             }
             Err(e) => {
                 error!(error = %e, "taiji_trace read failed");
-                Ok(CallToolResult::error(vec![Content::text(format!(
+                Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                     "Failed to read trace: {e}"
                 ))]))
             }
@@ -509,7 +511,7 @@ impl TaijiMcpServer {
         let task_id = match args.get("task_id").and_then(|v| v.as_str()) {
             Some(id) => id.to_owned(),
             None => {
-                return Ok(CallToolResult::error(vec![Content::text(
+                return Ok(CallToolResult::error(vec![ContentBlock::text(
                     "Missing required argument: task_id",
                 )]));
             }
@@ -519,7 +521,7 @@ impl TaijiMcpServer {
 
         let task_dir = self.factory.task_dir(&task_id);
         if !task_dir.exists() {
-            return Ok(CallToolResult::error(vec![Content::text(format!(
+            return Ok(CallToolResult::error(vec![ContentBlock::text(format!(
                 "Task not found: {task_id}"
             ))]));
         }
