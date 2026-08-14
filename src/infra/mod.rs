@@ -1,9 +1,11 @@
 pub mod config;
 pub mod error;
+pub mod git_backend;
 pub mod handoff;
 pub mod json_util;
 pub mod knowledge;
 pub mod meta_skills;
+pub mod migrate;
 pub mod provider;
 pub mod skill_catalog;
 pub mod task_id;

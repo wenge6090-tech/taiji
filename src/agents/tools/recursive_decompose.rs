@@ -1,11 +1,11 @@
-//! recursive_decompose — Core recursion tool for FittingAgent (概率拟合·阳).
+//! recursive_decompose — Core recursion tool for YangAgent (概率拟合·阳).
 //!
-//! Spawns child TPN cycles per subtask, collects `TPNResult`s, calls
-//! `CausalAgent.converge()` to produce a `ConvergenceDecision`, and returns
+//! Spawns child Zhouyi cycles per subtask, collects `ZhouyiResult`s, calls
+//! `YinAgent.converge()` to produce a `ConvergenceDecision`, and returns
 //! a `DecomposeResult` to the parent LLM.
 //!
-//! Each child executes a **full TPN cycle** (元·阳·阴 → loop) via
-//! [`TpnCycle`], matching the isomorphic recursion principle (BCP §1.1).
+//! Each child executes a **full Zhouyi cycle** (元·阳·阴 → loop) via
+//! [`ZhouyiCycle`], matching the isomorphic recursion principle (BCP §1.1).
 //! The parent's [`MetaContext`] is passed as the initial reasoning bias so
 //! that children inherit the same reasoning paths and constraints (BCP §8.2).
 //!
@@ -26,11 +26,11 @@ use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
 use crate::infra::trace::load_json_optional;
 use crate::orchestration::event_bus;
-use crate::orchestration::tpn_cycle::{write_task_status, TpnCycle};
+use crate::orchestration::zhouyi::{write_task_status, ZhouyiCycle};
 use crate::types::agent::{AgentMode, MetaContext};
 use crate::types::execution::EngineContext;
 use crate::types::frontend::NodeStatus;
-use crate::types::task::{ChildResultSummary, DecomposeResult, SubtaskSpec, Task, TaskStatus, TPNResult};
+use crate::types::task::{ChildResultSummary, DecomposeResult, SubtaskSpec, Task, TaskStatus, ZhouyiResult};
 use crate::types::verification::ConvergenceStatus;
 use crate::ws::types::TaskEvent;
 
@@ -43,9 +43,9 @@ pub struct RecursiveDecomposeArgs {
 
 /// Tool that recursively decomposes a parent task into subtasks.
 ///
-/// Each subtask is executed by a fresh [`TpnCycle`] (full MetaAgent →
-/// FittingAgent → CausalAgent loop).  Once all children complete, a
-/// CausalAgent (converge mode) merges the partial results into a single
+/// Each subtask is executed by a fresh [`ZhouyiCycle`] (full MetaAgent →
+/// YangAgent → YinAgent loop).  Once all children complete, a
+/// YinAgent (converge mode) merges the partial results into a single
 /// `ConvergenceDecision`.
 pub struct RecursiveDecomposeTool {
     factory: Arc<AgentFactory>,
@@ -55,10 +55,10 @@ pub struct RecursiveDecomposeTool {
     /// 内部 mode guard 兑底（Execution 模式调用直接拒绝）。
     mode: AgentMode,
     /// Cancellation token propagated to all subtasks.
-    /// See AGENTS.md §1 (TPN loop rules) and §9 (concurrency rules).
+    /// See AGENTS.md §1 (Zhouyi loop rules) and §9 (concurrency rules).
     cancel: CancellationToken,
     /// Reasoning bias inherited from the parent's MetaAgent run.
-    /// Passed to child TPN cycles as `initial_meta_ctx` (BCP §8.2).
+    /// Passed to child Zhouyi cycles as `initial_meta_ctx` (BCP §8.2).
     parent_meta_ctx: MetaContext,
 }
 
@@ -104,9 +104,9 @@ impl RecursiveDecomposeTool {
     ///    工具入口 acquire，join 完成后释放；子任务运行不持 permit，任意深度
     ///    decompose 在各自入口 acquire，无嵌套持有 → 无死锁)。
     /// 2. Validates `depth` against `max_depth` from config.
-    /// 3. Spawns one child `TpnCycle` per subtask (parallel, full TPN).
-    /// 4. Collects all `TPNResult`s.
-    /// 5. Converges via `CausalAgent.converge()`.
+    /// 3. Spawns one child `ZhouyiCycle` per subtask (parallel, full Zhouyi).
+    /// 4. Collects all `ZhouyiResult`s.
+    /// 5. Converges via `YinAgent.converge()`.
     /// 6. Returns a `DecomposeResult`.
     pub async fn execute(&self, subtasks: Vec<SubtaskSpec>) -> Result<DecomposeResult, TaijiError> {
         // ── Mode guard (V27 配对模式兑底) ──
@@ -179,16 +179,16 @@ impl RecursiveDecomposeTool {
                         if let Ok(idx) = idx_str.parse::<usize>() {
                             max_existing_index = max_existing_index.max(idx);
                             let result_path = entry.path().join("decompose_result.json");
-                            // Try DecomposeResult first (new format), then TPNResult (legacy).
+                            // Try DecomposeResult first (new format), then ZhouyiResult (legacy).
                             if let Ok(Some(result)) =
                                 load_json_optional::<DecomposeResult>(&result_path)
                             {
                                 prior_results.insert(idx, result);
-                            } else if let Ok(Some(tpn)) =
-                                load_json_optional::<TPNResult>(&result_path)
+                            } else if let Ok(Some(zhouyi)) =
+                                load_json_optional::<ZhouyiResult>(&result_path)
                             {
-                                // Legacy format: map TPNResult → DecomposeResult.
-                                prior_results.insert(idx, map_tpn_to_decompose(&tpn));
+                                // Legacy format: map ZhouyiResult → DecomposeResult.
+                                prior_results.insert(idx, map_zhouyi_to_decompose(&zhouyi));
                             }
                         }
                     }
@@ -258,7 +258,7 @@ impl RecursiveDecomposeTool {
                             .flatten()
                     };
 
-                    // Delete old checkpoint to prevent TpnCycle from mis-reading it.
+                    // Delete old checkpoint to prevent ZhouyiCycle from mis-reading it.
                     let checkpoint_path = dir.join("checkpoint.json");
                     let _ = std::fs::remove_file(&checkpoint_path);
 
@@ -305,7 +305,7 @@ impl RecursiveDecomposeTool {
             });
         }
 
-        // --- Spawn child TPN cycles (V26: 子任务运行不持 permit — permit 已由
+        // --- Spawn child Zhouyi cycles (V26: 子任务运行不持 permit — permit 已由
         // 本工具入口 acquire，见 execute() 开头) ----
         let mut join_set = tokio::task::JoinSet::new();
 
@@ -378,7 +378,7 @@ impl RecursiveDecomposeTool {
                 // 子任务执行中可经 read 工具随时发现陆续陈列的兄弟贡品。
                 child_meta_ctx.yang_prompt.sibling_deliverables = sibling_deliverables;
                 // ── Inject child 配对模式 (V27)：SubtaskSpec.mode（父 LLM 难度
-                //    判断）或深度规则兑底后的 Execution。子 TpnCycle 的阳 Agent
+                //    判断）或深度规则兑底后的 Execution。子 ZhouyiCycle 的阳 Agent
                 //    据此选模板与工具注册面 ──
                 child_meta_ctx.mode = child_mode;
                 // ── V37 子任务级路由（BCP §8.8）：SubtaskSpec.model 覆盖子模型
@@ -390,12 +390,12 @@ impl RecursiveDecomposeTool {
                 // ── Create CancellationToken child linked to parent ──
                 let child_cancel = cancel.child_token();
 
-                // Create a TpnCycle for the child subtask and execute
-                // the full TPN cycle with the parent's MetaContext.
-                let tpn_cycle =
-                    TpnCycle::new(factory.clone(), factory.config.clone(), child_cancel);
+                // Create a ZhouyiCycle for the child subtask and execute
+                // the full Zhouyi cycle with the parent's MetaContext.
+                let zhouyi =
+                    ZhouyiCycle::new(factory.clone(), factory.config.clone(), child_cancel);
 
-                let result = tpn_cycle
+                let result = zhouyi
                     .execute(
                         &child_description,
                         Some(child_meta_ctx),
@@ -409,7 +409,7 @@ impl RecursiveDecomposeTool {
         }
 
         // --- Collect results (streaming — fastest-first, short-circuit on error) ---
-        let mut result_map: BTreeMap<usize, TPNResult> = BTreeMap::new();
+        let mut result_map: BTreeMap<usize, ZhouyiResult> = BTreeMap::new();
         // V31 失败汇报：失败子任务索引 → failure_kind 分类（child_results 映射用）。
         let mut failure_kinds: BTreeMap<usize, String> = BTreeMap::new();
         let mut success_count = 0usize;
@@ -417,15 +417,15 @@ impl RecursiveDecomposeTool {
 
         while let Some(join_result) = join_set.join_next().await {
             match join_result {
-                Ok((idx, Ok(tpn_result))) => {
+                Ok((idx, Ok(zhouyi_result))) => {
                     // Broadcast child completion to frontend.
                     event_bus::emit_event(TaskEvent::ChildCompleted {
-                        child_task_id: tpn_result.task_id.clone(),
+                        child_task_id: zhouyi_result.task_id.clone(),
                         status: NodeStatus::Converged,
-                        deliverables: tpn_result.deliverables.clone(),
-                        rounds: tpn_result.rounds,
+                        deliverables: zhouyi_result.deliverables.clone(),
+                        rounds: zhouyi_result.rounds,
                     });
-                    result_map.insert(idx, tpn_result);
+                    result_map.insert(idx, zhouyi_result);
                     success_count += 1;
                 }
                 Ok((idx, Err(e))) => {
@@ -456,14 +456,14 @@ impl RecursiveDecomposeTool {
         // For re-run tasks, replace the old result with the new one.
         // For new tasks, insert the new result.
         for (idx, result) in result_map {
-            prior_results.insert(idx, map_tpn_to_decompose(&result));
+            prior_results.insert(idx, map_zhouyi_to_decompose(&result));
         }
 
-        // ── Converge via CausalAgent (with ALL results, old + new) ──────
+        // ── Converge via YinAgent (with ALL results, old + new) ──────
         // V44：converge 在根级资产树执行（parent_meta_ctx.model 仅作路由）。
         let converge_agent =
             self.factory
-                .create_causal_converge_agent(&self.engine_ctx, &self.parent_meta_ctx)?;
+                .create_yin_converge_agent(&self.engine_ctx, &self.parent_meta_ctx)?;
         let all_decompose_results: Vec<DecomposeResult> =
             prior_results.values().cloned().collect();
         let decision = converge_agent
@@ -693,7 +693,7 @@ pub(crate) fn mark_aborted_children_failed(children_root: &Path) {
     }
 }
 
-/// Map a TPNResult into a DecomposeResult for convergence analysis.
+/// Map a ZhouyiResult into a DecomposeResult for convergence analysis.
 /// V37 子任务级路由（BCP §8.8）：应用 `SubtaskSpec.model` 覆盖到子 MetaContext。
 /// None = 继承父模型（不变）；Some = 覆盖（父 LLM 按难度/领域分配）。
 /// 纯函数——可单测，spawn 闭包内调用。
@@ -703,7 +703,7 @@ fn apply_subtask_model(child: &mut MetaContext, model: Option<&crate::types::age
     }
 }
 
-fn map_tpn_to_decompose(result: &TPNResult) -> DecomposeResult {
+fn map_zhouyi_to_decompose(result: &ZhouyiResult) -> DecomposeResult {
     DecomposeResult {
         task_id: result.task_id.clone(),
         summary: result.content.clone(),
@@ -719,7 +719,7 @@ fn map_tpn_to_decompose(result: &TPNResult) -> DecomposeResult {
 /// Assemble a child task description that includes the parent LLM's
 /// verification specification and per-subtask context.
 ///
-/// This keeps the TpnCycle signature unchanged while giving child agents
+/// This keeps the ZhouyiCycle signature unchanged while giving child agents
 /// full visibility into what the parent expected.
 fn assemble_child_description(
     description: &str,
@@ -754,7 +754,7 @@ impl Tool for RecursiveDecomposeTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Recursively decompose a task into subtasks. Each subtask runs a full TPN cycle (MetaAgent → FittingAgent → CausalAgent). Returns a JSON-serialized DecomposeResult.".to_string(),
+            description: "Recursively decompose a task into subtasks. Each subtask runs a full Zhouyi cycle (MetaAgent → YangAgent → YinAgent). Returns a JSON-serialized DecomposeResult.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {

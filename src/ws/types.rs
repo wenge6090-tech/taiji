@@ -12,7 +12,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::types::frontend::{EvolutionSummary, NodeStatus, TpnPhase};
+use crate::types::frontend::{EvolutionSummary, NodeStatus, ZhouyiPhase};
 
 /// Event pushed from the engine to all connected WebSocket clients.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,27 +31,27 @@ pub enum TaskEvent {
         old_status: NodeStatus,
         new_status: NodeStatus,
     },
-    /// A task node entered a new TPN phase (Meta/Fitting/Causal).
+    /// A task node entered a new Zhouyi phase (Meta/Yang/Yin).
     PhaseChanged {
         task_id: String,
-        phase: TpnPhase,
+        phase: ZhouyiPhase,
     },
-    /// The parent FittingAgent spawned a child subtask.
+    /// The parent YangAgent spawned a child subtask.
     ChildSpawned {
         parent_task_id: String,
         child_task_id: String,
         description: String,
         depth: u32,
     },
-    /// A child subtask finished its TPN cycle.
+    /// A child subtask finished its Zhouyi cycle.
     ChildCompleted {
         child_task_id: String,
         status: NodeStatus,
         deliverables: Vec<String>,
         rounds: u32,
     },
-    /// CausalAgent issued a route decision for a node.
-    TpnRouteDecision {
+    /// YinAgent issued a route decision for a node.
+    ZhouyiRouteDecision {
         task_id: String,
         route: String,
         cycle: u32,
@@ -64,8 +64,8 @@ pub enum TaskEvent {
         path: String,
         size_bytes: u64,
     },
-    /// The DMN consumer performed δ₀-δ₃ cognition evolutions.
-    DmnEvolution { evolutions: Vec<EvolutionSummary> },
+    /// The Lianshan consumer performed δ₀-δ₃ cognition evolutions.
+    LianshanEvolution { evolutions: Vec<EvolutionSummary> },
     /// Periodic heartbeat for connection liveness & task counts.
     TaskTreeHeartbeat {
         active_tasks: u32,
@@ -100,8 +100,8 @@ pub enum ClientMessage {
         request_id: String,
         root_task_id: String,
     },
-    /// Fetch the TPN phase detail of one node.
-    GetTpnState {
+    /// Fetch the Zhouyi phase detail of one node.
+    GetZhouyiState {
         request_id: String,
         task_id: String,
     },

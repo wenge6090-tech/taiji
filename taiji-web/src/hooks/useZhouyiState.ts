@@ -1,15 +1,15 @@
 import { useCallback, useState } from "react";
-import type { SpindleNode, TpnPhaseState } from "../types";
+import type { SpindleNode, ZhouyiPhaseState } from "../types";
 import { wsClient } from "../lib/wsClient";
 
 /**
- * TPN 弹窗状态管理:
+ * Zhouyi 弹窗状态管理:
  * - 选中的节点(点开节点弹窗)
  * - 弹窗内当前相位详情(实时从磁盘构建)
  */
-export function useTpnState() {
+export function useZhouyiState() {
   const [selectedNode, setSelectedNode] = useState<SpindleNode | null>(null);
-  const [phaseState, setPhaseState] = useState<TpnPhaseState | null>(null);
+  const [phaseState, setPhaseState] = useState<ZhouyiPhaseState | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
 
@@ -19,8 +19,8 @@ export function useTpnState() {
     setDetailLoading(true);
     setDetailError(null);
     try {
-      const resp = await wsClient.send("GetTpnState", { taskId: node.taskId });
-      setPhaseState(resp.data as TpnPhaseState);
+      const resp = await wsClient.send("GetZhouyiState", { taskId: node.taskId });
+      setPhaseState(resp.data as ZhouyiPhaseState);
     } catch (e) {
       setDetailError(String(e));
       setPhaseState(null);

@@ -24,7 +24,7 @@ pub struct EngineContext {
     ///   `{context_dir}/files/` — one file per ExternalFile
     ///   `{context_dir}/meta.json` — ExternalContext (session_summary, tool_results)
     ///
-    /// When `Some`, FittingAgent's system prompt references this directory so
+    /// When `Some`, YangAgent's system prompt references this directory so
     /// the LLM can use the `read` tool to inspect pre-collected context.
     /// Children inherit this reference as read-only; they do not overwrite it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -65,7 +65,7 @@ pub struct ExplainReport {
     /// Chronologically sorted phase records.
     #[serde(default)]
     pub timeline: Vec<PhaseSummary>,
-    /// TPN route decisions extracted from verification phases.
+    /// Zhouyi route decisions extracted from verification phases.
     #[serde(default)]
     pub decisions: Vec<DecisionSummary>,
     /// Final deliverable absolute paths.
@@ -91,12 +91,12 @@ pub struct PhaseSummary {
     pub key_output: String,
 }
 
-/// A TPN route decision recorded during execution.
+/// A Zhouyi route decision recorded during execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionSummary {
     pub cycle: u32,
     pub round: u32,
-    /// Verdict: "PASS" | "BACK_TO_TPN" | "BACK_TO_META"
+    /// Verdict: "PASS" | "BACK_TO_ZHOUYI" | "BACK_TO_META"
     pub verdict: String,
     /// Human-readable reason for the decision.
     #[serde(default)]

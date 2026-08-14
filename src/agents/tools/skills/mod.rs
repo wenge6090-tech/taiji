@@ -15,6 +15,7 @@ pub mod search;
 pub mod webfetch;
 pub mod write;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -40,7 +41,10 @@ pub trait BuiltinSkill: Send + Sync {
     fn name(&self) -> &str;
 
     /// Execute the skill with the given JSON arguments.
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError>;
+    ///
+    /// `task_dir` — 本任务封地目录（BCP §8.20）。write 相对路径按 task_dir
+    /// 解析；read/bash/search 操作项目源码，按进程 cwd 解析，忽略此参数。
+    async fn call(&self, task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -57,8 +61,8 @@ impl BuiltinSkill for ReadTool {
         "read"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        read::ReadTool.call(args).await
+    async fn call(&self, task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+        read::ReadTool.call(task_dir, args).await
     }
 }
 
@@ -72,8 +76,8 @@ impl BuiltinSkill for WriteTool {
         "write"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        write::WriteTool.call(args).await
+    async fn call(&self, task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+        write::WriteTool.call(task_dir, args).await
     }
 }
 
@@ -87,8 +91,8 @@ impl BuiltinSkill for BashTool {
         "bash"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        bash::BashTool.call(args).await
+    async fn call(&self, task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+        bash::BashTool.call(task_dir, args).await
     }
 }
 
@@ -102,8 +106,8 @@ impl BuiltinSkill for SearchTool {
         "search"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        search::SearchTool.call(args).await
+    async fn call(&self, task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+        search::SearchTool.call(task_dir, args).await
     }
 }
 
@@ -117,8 +121,8 @@ impl BuiltinSkill for WebfetchTool {
         "webfetch"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
-        webfetch::WebfetchTool.call(args).await
+    async fn call(&self, task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+        webfetch::WebfetchTool.call(task_dir, args).await
     }
 }
 
@@ -136,6 +140,8 @@ pub struct SkillTool {
     pub skill: SkillRef,
     /// Optional built-in runner for this skill.
     runner: Option<Arc<dyn BuiltinSkill>>,
+    /// 本任务封地目录（V47 P0）：write 相对路径按此解析。
+    task_dir: PathBuf,
 }
 
 impl std::fmt::Debug for SkillTool {
@@ -152,6 +158,7 @@ impl Clone for SkillTool {
         Self {
             skill: self.skill.clone(),
             runner: self.runner.clone(),
+            task_dir: self.task_dir.clone(),
         }
     }
 }
@@ -161,9 +168,13 @@ impl SkillTool {
     ///
     /// The constructor checks the skill name against known built-ins so that
     /// the LLM can exercise common operations immediately.
-    pub fn new(skill: SkillRef) -> Self {
+    pub fn new(skill: SkillRef, task_dir: &Path) -> Self {
         let runner = Self::lookup_builtin(&skill.name);
-        Self { skill, runner }
+        Self {
+            skill,
+            runner,
+            task_dir: task_dir.to_path_buf(),
+        }
     }
 
     /// Execute the skill with the given JSON arguments.
@@ -173,7 +184,7 @@ impl SkillTool {
     /// unblocked.
     pub async fn execute(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         match &self.runner {
-            Some(runner) => runner.call(args).await,
+            Some(runner) => runner.call(&self.task_dir, args).await,
             None => Ok(serde_json::json!({
                 "tool": self.skill.tool_name,
                 "status": "placeholder",
@@ -232,15 +243,18 @@ impl Tool for SkillTool {
         // V45 双通道协议（§8.14）：按 skill **name** 生成 schema（builtin 硬编码分支）。
         // - write → 多参数扁平 schema（顶层 path/content，废除双 JSON 转义）
         // - bash/read/search/webfetch → text 单参 input（纯字符串直传）
-        // 注：SkillRegistry 尚未接 catalog，故不读 SkillAsset.input_modes；
+        // 渐进式披露（BCP §10.2）：层 0 summary 进 tool 描述；空回退 id—name。
+        // 注：SkillRegistry 尚未接 catalog，故 summary 来自 SkillRef（浅接线）；
         // 资产层覆盖 description/examples 进 ToolDefinition 属后续 P2。
         let (params, desc_suffix) = tool_schema(&self.skill.name);
+        let summary = if self.skill.summary.is_empty() {
+            format!("{} — {}", self.skill.id, self.skill.name)
+        } else {
+            self.skill.summary.clone()
+        };
         ToolDefinition {
             name: self.skill.tool_name.clone(),
-            description: format!(
-                "L1 Skill: {} — {}.{}",
-                self.skill.id, self.skill.name, desc_suffix
-            ),
+            description: format!("{summary}.{desc_suffix}"),
             parameters: params,
         }
     }
@@ -362,7 +376,7 @@ fn input_desc(skill_name: &str) -> &'static str {
 // SkillRegistry — manages the full tool set
 // ---------------------------------------------------------------------------
 
-/// Registry of all L1 skill tools available to a FittingAgent.
+/// Registry of all L1 skill tools available to a YangAgent.
 ///
 /// Skills can be loaded from a list of [`SkillRef`]s (produced by the
 /// `SkillTriggerEngine`).  The registry also pre-populates the five built-in
@@ -370,46 +384,72 @@ fn input_desc(skill_name: &str) -> &'static str {
 #[derive(Debug, Clone)]
 pub struct SkillRegistry {
     tools: Vec<SkillTool>,
+    task_dir: PathBuf,
 }
 
 impl SkillRegistry {
-    /// Create an empty registry.
-    pub fn new() -> Self {
+    /// Create a registry pre-populated with the five canonical built-ins.
+    ///
+    /// `task_dir` — 本任务封地目录（V47 P0）：write 相对路径按此解析。
+    pub fn new(task_dir: &Path) -> Self {
         // Pre-populate the five canonical built-in skills.
         let builtins = vec![
-            SkillTool::new(SkillRef {
-                id: "builtin::read".into(),
-                name: "read".into(),
-                tool_name: "read".into(),
-                match_weight: 1.0,
-            }),
-            SkillTool::new(SkillRef {
-                id: "builtin::write".into(),
-                name: "write".into(),
-                tool_name: "write".into(),
-                match_weight: 1.0,
-            }),
-            SkillTool::new(SkillRef {
-                id: "builtin::bash".into(),
-                name: "bash".into(),
-                tool_name: "bash".into(),
-                match_weight: 1.0,
-            }),
-            SkillTool::new(SkillRef {
-                id: "builtin::search".into(),
-                name: "search".into(),
-                tool_name: "search".into(),
-                match_weight: 1.0,
-            }),
-            SkillTool::new(SkillRef {
-                id: "builtin::webfetch".into(),
-                name: "webfetch".into(),
-                tool_name: "webfetch".into(),
-                match_weight: 1.0,
-            }),
+            SkillTool::new(
+                SkillRef {
+                    id: "builtin::read".into(),
+                    name: "read".into(),
+                    tool_name: "read".into(),
+                    match_weight: 1.0,
+                    summary: String::new(),
+                },
+                task_dir,
+            ),
+            SkillTool::new(
+                SkillRef {
+                    id: "builtin::write".into(),
+                    name: "write".into(),
+                    tool_name: "write".into(),
+                    match_weight: 1.0,
+                    summary: String::new(),
+                },
+                task_dir,
+            ),
+            SkillTool::new(
+                SkillRef {
+                    id: "builtin::bash".into(),
+                    name: "bash".into(),
+                    tool_name: "bash".into(),
+                    match_weight: 1.0,
+                    summary: String::new(),
+                },
+                task_dir,
+            ),
+            SkillTool::new(
+                SkillRef {
+                    id: "builtin::search".into(),
+                    name: "search".into(),
+                    tool_name: "search".into(),
+                    match_weight: 1.0,
+                    summary: String::new(),
+                },
+                task_dir,
+            ),
+            SkillTool::new(
+                SkillRef {
+                    id: "builtin::webfetch".into(),
+                    name: "webfetch".into(),
+                    tool_name: "webfetch".into(),
+                    match_weight: 1.0,
+                    summary: String::new(),
+                },
+                task_dir,
+            ),
         ];
 
-        Self { tools: builtins }
+        Self {
+            tools: builtins,
+            task_dir: task_dir.to_path_buf(),
+        }
     }
 
     /// Replace the current tool set with skills parsed from the given
@@ -423,7 +463,7 @@ impl SkillRegistry {
         self.tools.retain(|t| !builtin_names.contains(t.name()));
 
         for skill_ref in skills {
-            self.tools.push(SkillTool::new(skill_ref));
+            self.tools.push(SkillTool::new(skill_ref, &self.task_dir));
         }
     }
 
@@ -446,7 +486,7 @@ impl SkillRegistry {
 
 impl Default for SkillRegistry {
     fn default() -> Self {
-        Self::new()
+        Self::new(std::path::Path::new("."))
     }
 }
 
@@ -466,7 +506,8 @@ mod tests {
             name: "read".into(),
             tool_name: "read".into(),
             match_weight: 1.0,
-        });
+summary: String::new(),
+        }, std::path::Path::new("."));
         let args = serde_json::json!({"path": "Cargo.toml"});
         let result = tool.execute(&args).await.unwrap();
         assert_eq!(result["tool"], "read");
@@ -482,7 +523,8 @@ mod tests {
             name: "foo".into(),
             tool_name: "foo".into(),
             match_weight: 0.5,
-        });
+summary: String::new(),
+        }, std::path::Path::new("."));
         let args = serde_json::json!({"input": "bar"});
         let result = tool.execute(&args).await.unwrap();
         assert_eq!(result["status"], "placeholder");
@@ -490,7 +532,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_skill_registry_has_builtins() {
-        let reg = SkillRegistry::new();
+        let reg = SkillRegistry::new(std::path::Path::new("."));
         let names = reg.get_tool_names();
         assert!(names.contains(&"read".into()));
         assert!(names.contains(&"write".into()));
@@ -501,12 +543,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_load_from_skills_replaces_builtins() {
-        let mut reg = SkillRegistry::new();
+        let mut reg = SkillRegistry::new(std::path::Path::new("."));
         let custom = vec![SkillRef {
             id: "custom::read".into(),
             name: "read".into(),
             tool_name: "my_read".into(),
             match_weight: 0.9,
+summary: String::new(),
         }];
         reg.load_from_skills(custom);
 
@@ -520,7 +563,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_builtin_skills_all_executable() {
-        let reg = SkillRegistry::new();
+        let reg = SkillRegistry::new(std::path::Path::new("."));
         // Provide valid args for each known built-in skill.
         // webfetch is excluded — it requires network; see SSRF tests in webfetch module.
         for tool in reg.tools() {
@@ -544,7 +587,8 @@ mod tests {
             name: "bash".into(),
             tool_name: "bash".into(),
             match_weight: 1.0,
-        })
+summary: String::new(),
+        }, std::path::Path::new("."))
     }
 
     #[tokio::test]
@@ -580,7 +624,8 @@ mod tests {
             name: "write".into(),
             tool_name: "write".into(),
             match_weight: 1.0,
-        });
+summary: String::new(),
+        }, std::path::Path::new("."));
         let tmp = std::env::current_dir().unwrap().join("deliverables").join(format!("taiji_v45_write_{}.md", std::process::id()));
         if let Some(p) = tmp.parent() { std::fs::create_dir_all(p).ok(); }
         // 旧双转义形态：{"input": "{\"path\": ..., \"content\": ...}"}
@@ -607,7 +652,8 @@ mod tests {
                 name: name.into(),
                 tool_name: name.into(),
                 match_weight: 1.0,
-            });
+summary: String::new(),
+            }, std::path::Path::new("."));
             let def = tool.definition("".into()).await;
             let desc = def.parameters["properties"]["input"]["description"]
                 .as_str()
@@ -629,7 +675,8 @@ mod tests {
             name: "write".into(),
             tool_name: "write".into(),
             match_weight: 1.0,
-        });
+summary: String::new(),
+        }, std::path::Path::new("."));
         let def = tool.definition("".into()).await;
         let props = &def.parameters["properties"];
         assert!(props.get("path").is_some(), "write 必须暴露 path 属性");

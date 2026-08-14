@@ -1,6 +1,6 @@
 //! MetaAgent builder (权重更新·元) — "weight update, the meta phase".
 //!
-//! The MetaAgent is the **first** agent in the TPN cycle.  It queries the
+//! The MetaAgent is the **first** agent in the Zhouyi cycle.  It queries the
 //! 归藏 (cognitive warehouse) via Rig's `dynamic_context` mechanism to extract
 //! matched prompt assets that serve as cognitive bias for downstream agents.
 //!
@@ -10,14 +10,14 @@
 //!   context, parent deliverables and web facts before composing weights.
 //! - System prompt starts with Chinese identifier "你是权重更新专家".
 //! - Output is parsed into [`MetaContext`] which is injected into the
-//!   FittingAgent (概率拟合·阳).
+//!   YangAgent (概率拟合·阳).
 //!
 //! # Lifecycle
 //! 1. [`AgentFactory::create_meta_agent`] resolves LLM config and creates
 //!    this builder.
 //! 2. [`MetaAgentBuilder::run`] constructs a transient Rig agent, executes it,
 //!    and returns a [`MetaContext`].
-//! 3. The caller feeds the [`MetaContext`] into `create_fitting_agent`.
+//! 3. The caller feeds the [`MetaContext`] into `create_yang_agent`.
 
 use std::sync::Arc;
 
@@ -31,8 +31,10 @@ use crate::infra::error::TaijiError;
 use crate::infra::json_util::parse_llm_json;
 use crate::infra::knowledge::GuizangClient;
 use crate::infra::provider::ProviderRegistry;
-use crate::types::agent::{AgentMode, MetaContext, PromptAsset, YangPrompt};
+use crate::types::agent::{AgentMode, MetaContext, MetaOutcome, PromptAsset, YangPrompt};
+use crate::types::ontology::{OntologyEdge, OntologyRule, TaskOntologyView};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// V32：MetaAgent LLM 编排的**输出契约**——只含 LLM 能决定的字段。
 /// 内部类型（constraints / matched_skills / yang_prompt 嵌套结构）由系统
@@ -41,9 +43,11 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct MetaComposeResult {
     /// 阴阳配对模式（LLM 按深度规则 + 难度决策）。
+    /// V46：answer 短路场景可不给 mode，serde default = Orchestration。
+    #[serde(default)]
     pub mode: AgentMode,
     #[serde(default)]
-    pub fitting_system_prompt: Option<String>,
+    pub yang_system_prompt: Option<String>,
     #[serde(default)]
     pub verify_system_prompt: Option<String>,
     #[serde(default)]
@@ -57,6 +61,103 @@ struct MetaComposeResult {
     /// 约束摘要（文本列表，供 prompt 注入——不是 TruthConstraint 结构）。
     #[serde(default)]
     pub constraint_summaries: Vec<String>,
+    /// V46 短路：应答类任务（产出不改变世界）直接回答；非空即短路（跳过阳阴）。
+    #[serde(default)]
+    pub answer: Option<String>,
+    /// V50 §6.6 实体链接输出：任务语义视图（domain/action/objects/env）。
+    /// None = 未识别（回退纯 UCB，状态分支非错误）。
+    #[serde(default)]
+    pub ontology: Option<TaskOntologyView>,
+}
+
+/// V50 §6.6 类型级软查询（纯符号，零 LLM）：任务 objects 命中 relations 的
+/// type→type 边 → 注入对侧类型的资产（硬依赖候选，进候选池仍走 UCB）。
+/// MVP-1：资产只含 prompt（`asset_type_map` 现只映射 prompts）。
+fn ontology_expand(
+    view: &TaskOntologyView,
+    relations: &[OntologyEdge],
+    asset_types: &HashMap<String, String>,
+) -> Vec<crate::types::agent::AssetRef> {
+    use crate::types::agent::AssetRef;
+    let mut refs = Vec::new();
+    for obj in &view.objects {
+        for e in relations {
+            let target = if e.from == *obj {
+                Some(&e.to)
+            } else if e.to == *obj {
+                Some(&e.from)
+            } else {
+                None
+            };
+            if let Some(t) = target {
+                for (aid, tid) in asset_types {
+                    if tid == t {
+                        refs.push(AssetRef::new("prompt", aid));
+                    }
+                }
+            }
+        }
+    }
+    refs
+}
+
+/// V50 §6.6 约束校验（纯符号）：返回匹配任务语义视图的规则（阴 checklist 硬约束）。
+fn ontology_validate(view: &TaskOntologyView, rules: &[OntologyRule]) -> Vec<OntologyRule> {
+    rules.iter().filter(|r| rule_matches(r, view)).cloned().collect()
+}
+
+fn rule_matches(r: &OntologyRule, view: &TaskOntologyView) -> bool {
+    let dom = r
+        .when
+        .domain
+        .as_deref()
+        .map(|d| d == view.domain)
+        .unwrap_or(true);
+    let env = r
+        .when
+        .env
+        .as_deref()
+        .map(|e| view.env.as_deref() == Some(e))
+        .unwrap_or(true);
+    let act = r
+        .when
+        .action
+        .as_deref()
+        .map(|a| a == view.action)
+        .unwrap_or(true);
+    dom && env && act
+}
+
+/// V50 §6.6 本体消费（零 LLM）：expand 硬依赖注入 + validate 规则注入。
+/// 失败上抛（调用方 warn；ontology 缺失 = 状态分支回退纯 UCB，§6.6 无降级）。
+async fn apply_ontology(
+    guizang: &GuizangClient,
+    view: &TaskOntologyView,
+    ctx: &mut MetaContext,
+) -> Result<(), TaijiError> {
+    let relations = guizang.load_relations().await?;
+    let rules = guizang.load_rules().await?;
+    let asset_types = guizang.asset_type_map().await?;
+
+    // expand：硬依赖候选注入 assets_used（去重；进候选池仍 UCB 排）
+    for r in ontology_expand(view, &relations, &asset_types) {
+        if !ctx.assets_used.iter().any(|a| a.id == r.id) {
+            ctx.assets_used.push(r);
+        }
+    }
+
+    // validate：匹配规则 → constraint_summaries（阴 checklist 硬约束）
+    for rule in ontology_validate(view, &rules) {
+        let mut summary = format!("[ontology] {}", rule.id);
+        if !rule.require.is_empty() {
+            summary.push_str(&format!(" 必须含类型: {}", rule.require.join(",")));
+        }
+        if !rule.forbid.is_empty() {
+            summary.push_str(&format!(" 禁止类型: {}", rule.forbid.join(",")));
+        }
+        ctx.yang_prompt.constraint_summaries.push(summary);
+    }
+    Ok(())
 }
 
 /// Builder for the MetaAgent (权重更新·元).
@@ -88,7 +189,7 @@ pub struct MetaAgentBuilder {
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
     /// V37：异源裁判开关（BCP §8.8 相位级）——true 且路由候选 ≥2 时决策
-    /// `MetaContext.verify_model`（Causal 专用验证模型）。
+    /// `MetaContext.verify_model`（Yin 专用验证模型）。
     heterogeneous_verifier: bool,
 }
 
@@ -117,7 +218,7 @@ impl MetaAgentBuilder {
     }
 
     /// V37：异源裁判开关（BCP §8.8 相位级）——true 且路由候选 ≥2 时，
-    /// Causal 验证相位使用与执行相位不同的模型（裁判 ≠ 运动员）。
+    /// Yin 验证相位使用与执行相位不同的模型（裁判 ≠ 运动员）。
     /// 默认 false（行为与 V36 一致）。由工厂从
     /// `runtime.model_routing.heterogeneous_verifier` 传入。
     pub fn heterogeneous_verifier(mut self, enabled: bool) -> Self {
@@ -164,7 +265,7 @@ impl MetaAgentBuilder {
     ///
     /// # Parameters
     /// - `task_description` — the task the downstream agents will execute.
-    /// - `task_type_tags` — tags for 理络 prompt search.  Empty tags produce no
+    /// - `task_type_tags` — tags for 归藏 prompt search.  Empty tags produce no
     ///   matches, triggering the fallback path.
     /// - `handoff` — V28 前一瞬态产出（交接文件内容，§8.18）：BACK_TO_META 重跑时
     ///   注入作产出校准（基于失败产物调整权重与资产）；首次运行传 None。
@@ -173,7 +274,7 @@ impl MetaAgentBuilder {
         task_description: &str,
         task_type_tags: &[&str],
         handoff: Option<&str>,
-    ) -> Result<MetaContext, TaijiError> {
+    ) -> Result<MetaOutcome, TaijiError> {
         // ── 0. 模型路由（V36，BCP §8.8 第 1 步——纯符号层）──
         // 读根级 model_stats 元权重表 → UCB 决策 model_key（全部无统计 → 默认）；
         // 模型键只影响路由与统计回传（V44 去分区化，§10.1——资产树共享）。
@@ -189,7 +290,7 @@ impl MetaAgentBuilder {
             "MetaAgent: model routed"
         );
         // V37 异源裁判（BCP §8.8 相位级）：开关开启时从非主候选按 UCB 同公式
-        // 选 Causal 专用验证模型（裁判 ≠ 运动员，§1.3 偏置对抗）；候选 <2 →
+        // 选 Yin 专用验证模型（裁判 ≠ 运动员，§1.3 偏置对抗）；候选 <2 →
         // None（继承主模型，warn 提示）。
         let verify_model = if self.heterogeneous_verifier {
             let stats = self.guizang.load_model_stats().await?;
@@ -236,22 +337,25 @@ impl MetaAgentBuilder {
                 "No high-confidence prompt assets — returning empty MetaContext (fallback)"
             );
             let mut empty = MetaContext::empty();
-            // V44：资产缺失 ≠ 路由失败——模型选择保持（Fitting/Causal 按路由模型执行）。
+            // V44：资产缺失 ≠ 路由失败——模型选择保持（Yang/Yin 按路由模型执行）。
             empty.model = Some(model_key.clone());
             // V37：降级路径同样保持异源裁判决策（模型选择与资产编排解耦）。
             empty.verify_model = verify_model.clone();
-            return Ok(empty);
+            return Ok(MetaOutcome::Context(empty));
         }
 
         // ── 2.5 UCB 排序（V35/MVP-5 检索数学化，§6.3 实现层定稿）──
         // 后验均值 μ + 探索项 C·√(ln N_total/(n+1))；n=0 冷启动退化为先验 μ 降序。
-        // prior_strength 取 DmnConfig 默认（MetaAgentBuilder 无 config——与 §6.4.1 默认一致）。
+        // prior_strength 取 LianshanConfig 默认（MetaAgentBuilder 无 config——与 §6.4.1 默认一致）。
         let models = self.guizang.load_all_models().await?;
         let ranked = crate::infra::knowledge::rank_prompts_by_ucb(
             &matched,
             &models,
             crate::orchestration::active_learning::UCB_C,
             10.0,
+            // V50 环境维度轴（§6.3.1）：current_env_tags 源 = 路由模型类
+            //（flash/strong）——同维度变体优先，异维度变体 ×0.5 降权。
+            &[crate::agents::factory::model_class(&model_key).to_string()],
         );
         let matched: Vec<PromptAsset> = ranked.into_iter().map(|i| matched[i].clone()).collect();
         let matched_refs: Vec<&PromptAsset> = matched.iter().collect();
@@ -267,7 +371,7 @@ impl MetaAgentBuilder {
             depth = self.depth,
             max_depth = self.max_depth,
             matched_count = matched.len(),
-            "Calling LLM to compose MetaContext from 理络 prompt assets"
+            "Calling LLM to compose MetaContext from 归藏 prompt assets"
         );
 
         let llm_prompt = build_llm_input(
@@ -294,7 +398,7 @@ impl MetaAgentBuilder {
         // ── 收集工具（只读）：read / search / webfetch — 供 LLM 收集任务上下文、
         //    父层 deliverables 与网络信息后更新权重（V25 权限分工：收集工具三相共有）。
         //    带工具必有安全钩子（§8.5 硬约束，类型级保证）：无条件挂载 SafetyHook ──
-        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new()
+        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new(std::path::Path::new("."))
             .tools()
             .iter()
             .filter(|t| matches!(t.name(), "read" | "search" | "webfetch"))
@@ -324,7 +428,7 @@ impl MetaAgentBuilder {
                     "{llm_prompt}\n\n## 上次输出解析失败（第 {attempt} 次重试）\n\
                      必须只输出一个完整的 JSON 对象，不能包含任何解释文本或代码围栏。\
                      必须包含字段：mode (\"Orchestration\" | \"Execution\"), \
-                     fitting_system_prompt, verify_system_prompt, converge_system_prompt, \
+                     yang_system_prompt, verify_system_prompt, converge_system_prompt, \
                      constraint_summaries, task_description"
                 )
             };
@@ -357,13 +461,22 @@ impl MetaAgentBuilder {
             }
         }
 
-        let ctx = match composed {
+        match composed {
             Some(result) => {
+                // V46 短路（BCP §8.8）：answer 非空 → 应答类任务直接产出，跳过阳阴。
+                if let Some(answer) = result.answer.filter(|a| !a.trim().is_empty()) {
+                    tracing::info!(
+                        task_id = %self.task_id,
+                        "MetaAgent: answer short-circuit (应答类任务，跳过阳阴)"
+                    );
+                    return Ok(MetaOutcome::Answer(answer));
+                }
+
                 // V32：LLM 只输出它能决定的字段（mode + 三份提示词 + 摘要），
                 // 内部类型（constraints / matched_skills / yang_prompt 结构）由
                 // 系统组装——不再要求 LLM 输出 SkillRef/TruthConstraint 结构
                 // （实测：LLM 把 matched_skills 输出为字符串数组导致 parse 必败）。
-                let ctx = MetaContext {
+                let mut ctx = MetaContext {
                     constraints: vec![],
                     matched_skills: vec![],
                     yang_prompt: YangPrompt {
@@ -379,27 +492,46 @@ impl MetaAgentBuilder {
                     degraded: None,
                     assets_used,
                     // V36：模型路由结果（BCP §8.8 第 7 步——降级路径也保持路由
-                    // 结果：模型选择与资产编排解耦，Fitting/Causal 仍按路由模型
+                    // 结果：模型选择与资产编排解耦，Yang/Yin 仍按路由模型
                     // 执行；仅路由异常时 None = 配置默认）。
                     model: Some(model_key.clone()),
-                    // V37：异源裁判（BCP §8.8 相位级）——Causal 专用验证模型；
+                    // V37：异源裁判（BCP §8.8 相位级）——Yin 专用验证模型；
                     // 开关关闭 / 候选不足时 None = 继承主模型。
                     verify_model,
-                    fitting_system_prompt: result.fitting_system_prompt,
+                    yang_system_prompt: result.yang_system_prompt,
                     verify_system_prompt: result.verify_system_prompt,
                     converge_system_prompt: result.converge_system_prompt,
                 };
+
+                // V50 §6.6 本体消费：实体链接 → 类型级软查询（expand）+ 约束校验
+                // （validate）。失败仅 warn（增强层）；ontology None/空 domain =
+                // 状态分支回退纯 UCB（§6.6 无降级）。
+                if let Some(view) = result.ontology.filter(|v| !v.domain.is_empty()) {
+                    if let Err(e) = apply_ontology(self.guizang.as_ref(), &view, &mut ctx).await {
+                        tracing::warn!(
+                            task_id = %self.task_id,
+                            error = %e,
+                            "[meta] ontology apply failed — continuing"
+                        );
+                    }
+                }
+
+                // guard_pairing（§5.3 逻辑层公理）：mode 与 prompt 配对校验——
+                // 不配对 → degraded 标记（不中断，下游有 Base 模板降级兑底）。
+                if let Some(reason) = guard_pairing(ctx.mode, &ctx) {
+                    ctx.degraded = Some(format!("guard_pairing: {reason}"));
+                }
                 // V30 会盟字段（parent_deliverables / sibling_deliverables）由
                 // 分封时（RecursiveDecomposeTool）注入，此处保持空。
                 tracing::info!(
                     task_id = %self.task_id,
                     mode = ?ctx.mode,
-                    has_fitting = ctx.fitting_system_prompt.is_some(),
+                    has_yang = ctx.yang_system_prompt.is_some(),
                     has_verify = ctx.verify_system_prompt.is_some(),
                     has_converge = ctx.converge_system_prompt.is_some(),
                     "MetaAgent: composed MetaContext"
                 );
-                ctx
+                Ok(MetaOutcome::Context(ctx))
             }
             None => {
                 let reason = last_error
@@ -417,11 +549,9 @@ impl MetaAgentBuilder {
                 empty.model = Some(model_key.clone());
                 // V37：降级路径保持异源裁判决策。
                 empty.verify_model = verify_model.clone();
-                empty
+                Ok(MetaOutcome::Context(empty))
             }
-        };
-
-        Ok(ctx)
+        }
     }
 }
 
@@ -429,19 +559,19 @@ impl MetaAgentBuilder {
 ///
 /// Instructs the LLM to decide the node's 阴阳配对模式 (Orchestration |
 /// Execution) from recursion depth rules + task difficulty, then compose
-/// mode-paired system prompts for downstream agents from 理络 prompt assets
+/// mode-paired system prompts for downstream agents from 归藏 prompt assets
 /// (V27).  The Chinese prefix anchors the agent's role per project
 /// convention (see AGENTS.md §2).
 const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Update · Meta Agent)。
 
-你的职责是根据任务描述、递归层数规则与认知仓库（理络）中的提示词资产，
-先决策当前节点的**阴阳配对模式**，再编排下游 Agent（FittingAgent 概率拟合·阳
-和 CausalAgent 因果验证·阴）与该模式**配对**的系统提示词。
+你的职责是根据任务描述、递归层数规则与认知仓库（归藏）中的提示词资产，
+先决策当前节点的**阴阳配对模式**，再编排下游 Agent（YangAgent 概率拟合·阳
+和 YinAgent 因果验证·阴）与该模式**配对**的系统提示词。
 
 ## 输入
 - task_description：当前任务的完整描述
 - depth / max_depth：当前递归层数与最大递归深度
-- prompt_assets：理络中匹配的提示词资产列表（按置信度降序排列）
+- prompt_assets：归藏中匹配的提示词资产列表（按置信度降序排列）
   每项包含：id, name, content, agent_target, tags, confidence
 
 ## 模式决策（依据两条规则）
@@ -450,6 +580,11 @@ const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Upd
 2. **任务难易程度**：分析任务描述——复杂/多步骤/跨多个独立维度/需要多 Agent
    协作 → "Orchestration"（编排拆解 + 综合）；原子/单步/可直接用 L1 工具
    完成 → "Execution"（直接执行）。
+3. **上下文超限强制编排（V47）**：若前一瞬态产出（handoff）表明上一轮因
+   context_overflow（上下文超限）失败，且 depth+1 < max_depth（当前节点还能拆），
+   必须选 "Orchestration"——上下文超限 = 任务粒度错误 = 上一轮把该拆的任务
+   判成了执行，须编排拆解为多个小上下文子任务。仅当 depth+1 >= max_depth
+   （叶节点无法再拆）时才允许维持 Execution。
 
 ## 阴阳配对
 - "Orchestration"：阳 Agent 用**编排**提示词（recursive_decompose 拆解 + 综合），
@@ -464,15 +599,36 @@ const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Upd
 3. 将其 content 字段组合为与该模式配对的三份完整系统提示词（配对外的
    提示词可设为 null，下游不会使用）
 
+## 短路判断（先于模式决策）
+先判断任务是否**应答类**（产出不改变世界状态）：纯信息查询、知识问答、
+分析、讨论、解释（如"什么是 X""库里有没有 Y""分析这段代码""解释 Z 的原理"）。
+- 若任务为应答类：直接给出完整回答，填入 answer 字段；其余字段（mode、
+  system_prompt 等）可全部省略（系统会短路跳过执行与验证相）。
+- 若任务需要产生文件/执行命令/改变世界（写代码、跑脚本、生成文档到文件）：
+  answer 置 null，按上述模式决策走完整流程。
+
+## 实体链接（V50 §6.6，先于模式决策）
+将任务映射到语义本体结构（供系统按**类型**查依赖边与约束规则，非路由标签）：
+- domain：领域分类（Security | Infra | Data | Finance | General）
+- action：动作类型（Create | Read | Update | Delete | Debug | Fix）
+- objects：涉及实体/资产类型（尽量对齐本体词汇表，如 security-check /
+  deploy-action / data-mutation；无法对齐则输出自然实体名）
+- env：运行环境（Production | Staging | Dev；无则 null）
+- is_critical：是否安全/关键敏感任务（true/false）
+
+填入 ontology 字段；若无法识别领域，ontology 置 null（系统回退纯 UCB，不报错）。
+
 ## 输出格式（严格 JSON，无额外注释）
 
 {
   "mode": "Orchestration",
-  "fitting_system_prompt": "完整的 FittingAgent 系统提示词，与所选模式配对（编排或执行）",
+  "yang_system_prompt": "完整的 YangAgent 系统提示词，与所选模式配对（编排或执行）",
   "verify_system_prompt": "Execution 模式：完整的 verify 系统提示词，以'你是因果验证器'开头；Orchestration 模式可设为 null",
   "converge_system_prompt": "Orchestration 模式：完整的 converge 系统提示词，以'你是收敛判决器'开头；Execution 模式可设为 null",
   "constraint_summaries": [],
-  "task_description": "（保持原始 task_description，可原样复制）"
+  "task_description": "（保持原始 task_description，可原样复制）",
+  "answer": null,
+  "ontology": {"domain": "Security", "action": "Fix", "objects": ["security-check"], "env": null, "is_critical": false}
 }
 
 ## 降级规则
@@ -481,6 +637,25 @@ const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Upd
 
 注意：strict JSON，不要包含 markdown 代码块标记或额外解释。
 "#;
+
+/// guard_pairing（§5.3 逻辑层公理）：mode 与 prompt 配对校验。
+///
+/// - Orchestration ⇒ converge_system_prompt 非空；
+/// - Execution ⇒ verify_system_prompt 非空。
+///
+/// 返回 `Some(reason)` = 不配对（下游有 Base 模板降级兑底，不中断）；
+/// `None` = 配对 OK。半 LLM 半符号的符号层公理——不调 LLM，纯字符串判定。
+fn guard_pairing(mode: AgentMode, ctx: &MetaContext) -> Option<String> {
+    match mode {
+        AgentMode::Orchestration if ctx.converge_system_prompt.is_none() => {
+            Some("Orchestration mode missing converge_system_prompt".to_string())
+        }
+        AgentMode::Execution if ctx.verify_system_prompt.is_none() => {
+            Some("Execution mode missing verify_system_prompt".to_string())
+        }
+        _ => None,
+    }
+}
 
 /// Build the user message for MetaAgent's LLM composition call.
 ///
@@ -623,18 +798,25 @@ mod tests {
         );
 
         let builder = MetaAgentBuilder::new("test-task", guizang, provider, "deepseek-chat");
-        // Empty tags → fallback path → empty MetaContext.
-        let ctx = builder
+        // Empty tags → fallback path → empty MetaContext（Context 分支，非短路）。
+        let outcome = builder
             .run("test task description", &[], None)
             .await
             .expect("MetaAgent run");
+
+        let ctx = match outcome {
+            crate::types::agent::MetaOutcome::Context(ctx) => ctx,
+            crate::types::agent::MetaOutcome::Answer(a) => {
+                panic!("empty tags must not short-circuit; got answer: {a}")
+            }
+        };
 
         assert!(ctx.constraints.is_empty());
         assert!(ctx.matched_skills.is_empty());
         assert!(ctx.yang_prompt.task_description.is_empty());
         // V27: 降级路径 mode 默认 Orchestration（安全默认）。
         assert_eq!(ctx.mode, crate::types::agent::AgentMode::Orchestration);
-        assert!(ctx.fitting_system_prompt.is_none());
+        assert!(ctx.yang_system_prompt.is_none());
         assert!(ctx.verify_system_prompt.is_none());
         assert!(ctx.converge_system_prompt.is_none());
 
@@ -645,7 +827,7 @@ mod tests {
     fn test_meta_compose_system_prompt_is_valid() {
         // Verify the prompt compiles and contains the required Chinese header.
         assert!(META_COMPOSE_SYSTEM_PROMPT.starts_with("你是权重更新专家"));
-        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("fitting_system_prompt"));
+        assert!(META_COMPOSE_SYSTEM_PROMPT.contains("yang_system_prompt"));
         assert!(META_COMPOSE_SYSTEM_PROMPT.contains("verify_system_prompt"));
         assert!(META_COMPOSE_SYSTEM_PROMPT.contains("converge_system_prompt"));
         assert!(META_COMPOSE_SYSTEM_PROMPT.contains("你是权重更新专家"));
@@ -657,6 +839,31 @@ mod tests {
     }
 
     #[test]
+    fn test_guard_pairing_axioms() {
+        // §5.3 逻辑层公理：Orchestration 缺 converge → Some；Execution 缺 verify → Some。
+        let mut orch = MetaContext::empty();
+        orch.mode = AgentMode::Orchestration;
+        orch.verify_system_prompt = Some("v".into());
+        assert!(guard_pairing(orch.mode, &orch).is_some());
+
+        let mut exec = MetaContext::empty();
+        exec.mode = AgentMode::Execution;
+        exec.converge_system_prompt = Some("c".into());
+        assert!(guard_pairing(exec.mode, &exec).is_some());
+
+        // 配对 OK → None。
+        let mut orch_ok = MetaContext::empty();
+        orch_ok.mode = AgentMode::Orchestration;
+        orch_ok.converge_system_prompt = Some("c".into());
+        assert!(guard_pairing(orch_ok.mode, &orch_ok).is_none());
+
+        let mut exec_ok = MetaContext::empty();
+        exec_ok.mode = AgentMode::Execution;
+        exec_ok.verify_system_prompt = Some("v".into());
+        assert!(guard_pairing(exec_ok.mode, &exec_ok).is_none());
+    }
+
+    #[test]
     fn test_build_llm_input_includes_task_description() {
         let assets = vec![
             PromptAsset::new(
@@ -664,7 +871,7 @@ mod tests {
                 "Test",
                 "",
                 "You are a test agent",
-                "FittingAgent",
+                "YangAgent",
                 vec![],
             ),
         ];
@@ -722,5 +929,99 @@ mod tests {
         assert_eq!(builder.max_depth, 3);
 
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    }
+
+    #[test]
+    fn meta_compose_result_answer_serde_default() {
+        // V46 短路：answer 字段 serde default 零迁移；缺 mode 也能 parse（default Orchestration）。
+        let legacy = r#"{"mode":"Execution","answer":null}"#;
+        let r: MetaComposeResult =
+            serde_json::from_str(legacy).expect("legacy parse");
+        assert!(r.answer.is_none());
+        assert_eq!(r.mode, AgentMode::Execution);
+
+        // 短路 JSON：只给 answer，不给 mode → mode default Orchestration。
+        let short = r#"{"answer":"这是答案"}"#;
+        let r2: MetaComposeResult =
+            serde_json::from_str(short).expect("short-circuit parse");
+        assert_eq!(r2.answer.as_deref(), Some("这是答案"));
+        assert_eq!(r2.mode, AgentMode::Orchestration);
+    }
+
+    #[test]
+    fn meta_outcome_serde_roundtrip() {
+        // V46：MetaOutcome 两个出口的 serde 往返。
+        let ctx = MetaOutcome::Context(MetaContext::empty());
+        let j = serde_json::to_string(&ctx).expect("serialize context");
+        let back: MetaOutcome = serde_json::from_str(&j).expect("deserialize context");
+        assert!(matches!(back, MetaOutcome::Context(_)));
+
+        let ans = MetaOutcome::Answer("答案".to_string());
+        let j2 = serde_json::to_string(&ans).expect("serialize answer");
+        let back2: MetaOutcome = serde_json::from_str(&j2).expect("deserialize answer");
+        assert!(matches!(back2, MetaOutcome::Answer(ref s) if s == "答案"));
+    }
+
+    // ── V50 §6.6 本体消费（纯符号）──
+
+    #[test]
+    fn ontology_expand_injects_opposite_type_assets() {
+        use crate::types::ontology::{OntologyEdge, OntologyEdgeKind, TaskOntologyView};
+        let view = TaskOntologyView {
+            domain: "Security".into(),
+            action: "Fix".into(),
+            objects: vec!["deploy-action".into()],
+            env: None,
+            is_critical: false,
+        };
+        let relations = vec![OntologyEdge {
+            from: "deploy-action".into(),
+            to: "security-check".into(),
+            kind: OntologyEdgeKind::WeakDependency,
+            strength: 0.9,
+            samples: 60,
+            evidence: vec![],
+        }];
+        let mut asset_types = HashMap::new();
+        asset_types.insert("prompt-a".to_string(), "security-check".to_string());
+        asset_types.insert("prompt-b".to_string(), "deploy-action".to_string());
+        let refs = ontology_expand(&view, &relations, &asset_types);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].id, "prompt-a", "对侧类型资产被注入");
+    }
+
+    #[test]
+    fn ontology_validate_matches_rule_conditions() {
+        use crate::types::ontology::{OntologyRule, RuleCondition};
+        use crate::types::verification::CheckSeverity;
+        let view = TaskOntologyView {
+            domain: "Infra".into(),
+            action: "Delete".into(),
+            objects: vec![],
+            env: Some("Production".into()),
+            is_critical: true,
+        };
+        let rules = vec![OntologyRule {
+            id: "guard-prod".into(),
+            when: RuleCondition { domain: None, env: Some("Production".into()), action: None },
+            require: vec!["check:approval".into()],
+            forbid: vec![],
+            severity: CheckSeverity::Hard,
+        }];
+        let matched = ontology_validate(&view, &rules);
+        assert_eq!(matched.len(), 1);
+        assert_eq!(matched[0].id, "guard-prod");
+    }
+
+    #[test]
+    fn meta_compose_result_ontology_serde_default() {
+        // V50 §6.6：ontology 字段 serde default 零迁移；旧 JSON 无 ontology 也能 parse。
+        let legacy = r#"{"mode":"Execution","answer":null}"#;
+        let r: MetaComposeResult = serde_json::from_str(legacy).expect("legacy parse");
+        assert!(r.ontology.is_none());
+
+        let with_onto = r#"{"mode":"Execution","ontology":{"domain":"Security","action":"Fix","objects":["security-check"]}}"#;
+        let r2: MetaComposeResult = serde_json::from_str(with_onto).expect("ontology parse");
+        assert_eq!(r2.ontology.as_ref().map(|v| v.domain.as_str()), Some("Security"));
     }
 }

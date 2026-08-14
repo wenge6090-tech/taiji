@@ -1,10 +1,10 @@
-//! causal_verify — Verification tool for FittingAgent (概率拟合·阳).
+//! yin_verify — Verification tool for YangAgent (概率拟合·阳).
 //!
-//! Delegates to `CausalAgent.verify()` (因果验证·阴) and returns the
+//! Delegates to `YinAgent.verify()` (因果验证·阴) and returns the
 //! `VerificationReport` to the calling LLM.  The report drives routing:
 //!
-//! - [`VerificationRoute::Pass`] → DMN reflection.
-//! - [`VerificationRoute::BackToTpn`] → retry FittingAgent.
+//! - [`VerificationRoute::Pass`] → Lianshan reflection.
+//! - [`VerificationRoute::BackToZhouyi`] → retry YangAgent.
 //! - [`VerificationRoute::BackToMeta`] → retry MetaAgent.
 
 use std::sync::Arc;
@@ -18,28 +18,28 @@ use crate::infra::error::TaijiError;
 use crate::types::agent::MetaContext;
 use crate::types::execution::EngineContext;
 
-/// Arguments for the causal_verify tool.
+/// Arguments for the yin_verify tool.
 #[derive(Debug, Deserialize)]
-pub struct CausalVerifyArgs {
-    /// The task output text produced by the FittingAgent.
+pub struct YinVerifyArgs {
+    /// The task output text produced by the YangAgent.
     pub task_output: String,
     /// Raw result strings from any L1 skill tools that were called.
     #[serde(default)]
     pub tool_results: Vec<String>,
 }
 
-/// Tool that invokes CausalAgent verification on a task output.
-pub struct CausalVerifyTool {
+/// Tool that invokes YinAgent verification on a task output.
+pub struct YinVerifyTool {
     factory: Arc<AgentFactory>,
     engine_ctx: EngineContext,
     /// Reasoning bias from MetaAgent, used for prompt selection.
     meta_ctx: MetaContext,
 }
 
-impl CausalVerifyTool {
-    /// Create a new `CausalVerifyTool`.
+impl YinVerifyTool {
+    /// Create a new `YinVerifyTool`.
     ///
-    /// - `factory` — shared `AgentFactory` used to create the CausalAgent builder.
+    /// - `factory` — shared `AgentFactory` used to create the YinAgent builder.
     /// - `engine_ctx` — execution context for traceability.
     /// - `meta_ctx` — reasoning bias from MetaAgent, for prompt selection.
     pub fn new(
@@ -54,9 +54,9 @@ impl CausalVerifyTool {
         }
     }
 
-    /// Run causal verification.
+    /// Run yin verification.
     ///
-    /// 1. Creates a `CausalVerifyAgentBuilder` via the factory.
+    /// 1. Creates a `YinVerifyAgentBuilder` via the factory.
     /// 2. Calls `builder.verify(task_output, tool_results, meta_ctx)`.
     /// 3. Returns the resulting `VerificationReport`.
     pub async fn execute(
@@ -64,7 +64,7 @@ impl CausalVerifyTool {
         task_output: &str,
         tool_results: &[String],
     ) -> Result<String, TaijiError> {
-        let builder = self.factory.create_causal_verify_agent(&self.engine_ctx, &self.meta_ctx)?;
+        let builder = self.factory.create_yin_verify_agent(&self.engine_ctx, &self.meta_ctx)?;
         let report = builder.verify(task_output, tool_results, &self.meta_ctx).await?;
         serde_json::to_string(&report).map_err(TaijiError::Serde)
     }
@@ -72,11 +72,11 @@ impl CausalVerifyTool {
 
 // ── Rig Tool implementation ─────────────────────────────────────────────
 
-impl Tool for CausalVerifyTool {
-    const NAME: &'static str = "causal_verify";
+impl Tool for YinVerifyTool {
+    const NAME: &'static str = "yin_verify";
 
     type Error = TaijiError;
-    type Args = CausalVerifyArgs;
+    type Args = YinVerifyArgs;
     type Output = String;
 
     async fn definition(&self, _prompt: String) -> ToolDefinition {
@@ -88,7 +88,7 @@ impl Tool for CausalVerifyTool {
                 "properties": {
                     "task_output": {
                         "type": "string",
-                        "description": "The text output produced by the FittingAgent"
+                        "description": "The text output produced by the YangAgent"
                     },
                     "tool_results": {
                         "type": "array",

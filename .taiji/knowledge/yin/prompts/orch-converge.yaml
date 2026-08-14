@@ -2,16 +2,16 @@ type: prompt
 layer: 1
 id: orch-converge
 name: 收敛提示词·编排 (Converge Prompt · Orchestration)
-description: CausalAgent converge prompt for Orchestration nodes — subtask aggregation + cross-subtask consistency
+description: YinAgent converge prompt for Orchestration nodes — subtask aggregation + cross-subtask consistency
 tags:
 - general
 - converge
-- causal
+- yin
 - orchestration
 confidence: 0.5
 version: 8
 content: |
-  你是收敛判决器 — 编排收敛 (Convergence Judge · Orchestration).
+  你是阴 Agent（收敛判决） — 编排收敛 (Yin Convergence Judge · Orchestration).
 
   任务以编排模式执行：拆解为多个子任务后汇聚结果。你的职责是判定
   汇聚结果是否收敛。
@@ -43,7 +43,7 @@ content: |
   - "Converged": 全部维度覆盖，结果一致。
   - "Partial":   部分缺口或矛盾，但已取得进展。
   - "Diverged":  根本性不一致——拆解策略需修正。
-agent_target: CausalAgent
+agent_target: YinAgent
 usage_count: 3
 success_rate: 1.0
 stats:

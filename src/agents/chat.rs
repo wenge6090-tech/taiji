@@ -4,7 +4,7 @@
 //! Skills (read/write/bash/search/webfetch) + SafetyHook + multi-turn
 //! streaming output + session history persistence.
 //!
-//! Lifecycle: session-scoped (24h), never enters the TPN cycle. History is
+//! Lifecycle: session-scoped (24h), never enters the Zhouyi cycle. History is
 //! stored at `{data_root}/chat/{session_id}.json` (atomic writes).
 
 use std::path::PathBuf;
@@ -117,7 +117,7 @@ impl ChatAgentBuilder {
             .and_then(|o| o.max_turns)
             .unwrap_or(DEFAULT_MAX_TURNS as u32) as usize;
         let safety_hook = self.safety_hook.as_ref().clone();
-        let skill_registry = SkillRegistry::new();
+        let skill_registry = SkillRegistry::new(std::path::Path::new("."));
         let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = skill_registry
             .tools()
             .iter()
@@ -208,7 +208,7 @@ impl ChatAgentBuilder {
     /// Build the ChatAgent system prompt.
     ///
     /// V40：提示词简单化——不注入归藏资产（归藏 prompts/verifications 是
-    /// 任务执行链 Meta/Fitting/Causal 的编排模板，对对话角色语义错配）；
+    /// 任务执行链 Meta/Yang/Yin 的编排模板，对对话角色语义错配）；
     /// 仅保留任务感知（context_task_id → meta.json 的 description/status/depth）
     /// 与会话历史（.taiji/chat/{session_id}.json，stream_chat history 回填）。
     fn build_system_prompt(&self) -> String {

@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::path::Path;
 
 use super::common::{self, enforce_cwd_scope, WRITE_TOOL_MAX_BYTES};
 use super::BuiltinSkill;
@@ -19,7 +20,7 @@ impl BuiltinSkill for WriteTool {
         "write"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+    async fn call(&self, task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let path_str = args
             .get("path")
             .and_then(|v| v.as_str())
@@ -42,11 +43,16 @@ impl BuiltinSkill for WriteTool {
             )));
         }
 
-        let path = common::expand_tilde(path_str);
-        let cwd = std::env::current_dir().map_err(|e| {
-            TaijiError::Other(format!("write: cannot get current directory: {e}"))
-        })?;
-        let canonical = enforce_cwd_scope(&path, &cwd, "write to")?;
+        // V47 P0：相对路径按 task_dir 解析（封地基准，BCP §8.20），非进程 cwd。
+        // 此前用 std::env::current_dir()（项目根）解析，导致 "deliverables/x.md"
+        // 被写到项目根而非任务目录，父层 converge 扫 task_dir 收不到产出物。
+        let raw = common::expand_tilde(path_str);
+        let resolved = if raw.is_absolute() {
+            raw
+        } else {
+            task_dir.join(raw)
+        };
+        let canonical = enforce_cwd_scope(&resolved, task_dir, "write to")?;
 
         // Create parent directories
         if let Some(parent) = canonical.parent() {
@@ -93,15 +99,49 @@ mod tests {
     async fn test_write_tool_missing_path() {
         let tool = WriteTool;
         let args = serde_json::json!({"content": "hello"});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_write_relative_path_resolves_to_task_dir() {
+        // V47 P0 回归：相对路径必须按 task_dir 解析（封地基准，BCP §8.20），
+        // 而非进程 cwd（项目根）——否则父层 converge 扫 task_dir 收不到产出物。
+        let task_dir = std::env::temp_dir().join(format!(
+            "taiji_write_p0_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&task_dir);
+        std::fs::create_dir_all(&task_dir).unwrap();
+
+        let tool = WriteTool;
+        let args = serde_json::json!({
+            "path": "deliverables/p0_test.md",
+            "content": "p0"
+        });
+        let result = tool.call(&task_dir, &args).await;
+        assert!(result.is_ok(), "write failed: {:?}", result.err());
+
+        // 产出物必须在 task_dir 下，而非进程 cwd（项目根）。
+        let expected = task_dir.join("deliverables/p0_test.md");
+        assert!(
+            expected.exists(),
+            "产出物应写于 task_dir: {}",
+            expected.display()
+        );
+
+        let _ = std::fs::remove_dir_all(&task_dir);
     }
 
     #[tokio::test]
     async fn test_write_tool_missing_content() {
         let tool = WriteTool;
         let args = serde_json::json!({"path": "/tmp/test.txt"});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
     }
 
@@ -117,7 +157,7 @@ mod tests {
             "path": test_path.to_string_lossy(),
             "content": "hello world"
         });
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_ok());
 
         let val = result.unwrap();

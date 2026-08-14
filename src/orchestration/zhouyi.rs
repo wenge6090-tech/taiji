@@ -1,7 +1,7 @@
-//! TpnCycle — Reusable TPN three-phase cycle (元·阳·阴 → loop).
+//! ZhouyiCycle — Reusable Zhouyi three-phase cycle (元·阳·阴 → loop).
 //!
 //! Extracted from [`RecursiveRunner`] so that both root tasks and recursive
-//! child tasks share the same TPN execution logic, satisfying the **isomorphic
+//! child tasks share the same Zhouyi execution logic, satisfying the **isomorphic
 //! recursion** principle (§1.1 of BCP).
 //!
 //! # Architecture (BCP §5)
@@ -9,11 +9,11 @@
 //! ```text
 //! MetaAgent (权重更新·元)   ─── once at entrance (or from parent MetaContext)
 //!     ↓
-//! TPN loop (max_cycles × max_rounds):
-//!     FittingAgent (概率拟合·阳)   →  LLM exploration + tools + recursion
-//!     CausalAgent  (因果验证·阴)   →  constraint check + LLM verdict
-//!     ├─ PASS        → return TPNResult
-//!     ├─ BACK_TO_TPN → round++ (retry FittingAgent only)
+//! Zhouyi loop (max_cycles × max_rounds):
+//!     YangAgent (概率拟合·阳)   →  LLM exploration + tools + recursion
+//!     YinAgent  (因果验证·阴)   →  constraint check + LLM verdict
+//!     ├─ PASS        → return ZhouyiResult
+//!     ├─ BACK_TO_ZHOUYI → round++ (retry YangAgent only)
 //!     └─ BACK_TO_META → cycle++, round=0 (re-run MetaAgent)
 //! ```
 //!
@@ -35,16 +35,16 @@ use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::trace::{load_json_optional, save_json_atomic};
 use crate::orchestration::event_bus;
-use crate::types::agent::{AssetRef, MetaContext};
+use crate::types::agent::{AssetRef, MetaContext, MetaOutcome};
 use crate::types::execution::EngineContext;
-use crate::types::frontend::{TpnPhase, YinIntervention};
-use crate::types::task::{Checkpoint, CyclePhase, DecomposeResult, Task, TaskStatus, TPNResult};
+use crate::types::frontend::{ZhouyiPhase, YinIntervention};
+use crate::types::task::{Checkpoint, CyclePhase, DecomposeResult, Task, TaskStatus, ZhouyiResult};
 use crate::types::verification::{
     CheckResult, ConvergenceStatus, VerificationReport, VerificationRoute,
 };
 use crate::ws::types::TaskEvent;
 
-/// Reusable TPN cycle that executes the three-phase loop for a task at any
+/// Reusable Zhouyi cycle that executes the three-phase loop for a task at any
 /// recursion depth.
 ///
 /// # Usage
@@ -58,8 +58,8 @@ use crate::ws::types::TaskEvent;
 ///
 /// - **Child task (re-run)**: execute with `resume_history = Some(history)`.
 ///   The cycle skips MetaAgent entirely, ignores checkpoint, and feeds the
-///   provided history directly to FittingAgent for context-continuity.
-pub struct TpnCycle {
+///   provided history directly to YangAgent for context-continuity.
+pub struct ZhouyiCycle {
     factory: Arc<AgentFactory>,
     config: TaijiConfig,
     /// Cancellation token propagated to all sub-agents.
@@ -68,8 +68,8 @@ pub struct TpnCycle {
     cancel: CancellationToken,
 }
 
-impl TpnCycle {
-    /// Create a new `TpnCycle` with a cancellation token.
+impl ZhouyiCycle {
+    /// Create a new `ZhouyiCycle` with a cancellation token.
     pub fn new(
         factory: Arc<AgentFactory>,
         config: TaijiConfig,
@@ -78,11 +78,11 @@ impl TpnCycle {
         Self { factory, config, cancel }
     }
 
-    /// Execute the full TPN cycle.
+    /// Execute the full Zhouyi cycle.
     ///
     /// # Parameters
     ///
-    /// - `description` — task description passed to FittingAgent.
+    /// - `description` — task description passed to YangAgent.
     /// - `initial_meta_ctx` — if `Some`, skip the initial MetaAgent run.
     /// - `engine_ctx` — mutable engine context; `round`/`cycle` counters are
     ///   updated in-place for retry tracking.
@@ -98,7 +98,7 @@ impl TpnCycle {
     ///
     /// # Returns
     ///
-    /// `Ok(TPNResult)` on PASS, else `Err(TaijiError)` on exhaustion or
+    /// `Ok(ZhouyiResult)` on PASS, else `Err(TaijiError)` on exhaustion or
     /// unrecoverable failure.
     #[allow(clippy::too_many_arguments)]
     pub async fn execute(
@@ -107,7 +107,7 @@ impl TpnCycle {
         initial_meta_ctx: Option<MetaContext>,
         engine_ctx: &mut EngineContext,
         resume_history: Option<Vec<Message>>,
-    ) -> Result<TPNResult, TaijiError> {
+    ) -> Result<ZhouyiResult, TaijiError> {
         let result = self
             .execute_inner(description, initial_meta_ctx, engine_ctx, resume_history)
             .await;
@@ -147,14 +147,14 @@ impl TpnCycle {
         result
     }
 
-    /// Internal implementation of the TPN loop (see [`execute`]).
+    /// Internal implementation of the Zhouyi loop (see [`execute`]).
     async fn execute_inner(
         &self,
         description: &str,
         initial_meta_ctx: Option<MetaContext>,
         engine_ctx: &mut EngineContext,
         resume_history: Option<Vec<Message>>,
-    ) -> Result<TPNResult, TaijiError> {
+    ) -> Result<ZhouyiResult, TaijiError> {
         let checkpoint_path = engine_ctx.task_dir.join("checkpoint.json");
         let decompose_result_path = engine_ctx.task_dir.join("decompose_result.json");
 
@@ -205,13 +205,13 @@ impl TpnCycle {
             (None, false)
         } else if let Ok(Some(checkpoint)) = load_json_optional::<Checkpoint>(&checkpoint_path) {
             // Check if decompose_result.json exists → task already completed.
-            if let Ok(Some(_)) = load_json_optional::<TPNResult>(&decompose_result_path) {
+            if let Ok(Some(_)) = load_json_optional::<ZhouyiResult>(&decompose_result_path) {
                 tracing::info!(
                     task_id = %engine_ctx.task_id,
                     phase = ?checkpoint.phase,
                     "Task already completed (decompose_result.json exists) — returning cached"
                 );
-                return load_json_optional::<TPNResult>(&decompose_result_path)
+                return load_json_optional::<ZhouyiResult>(&decompose_result_path)
                     .ok()
                     .flatten()
                     .ok_or_else(|| TaijiError::Other(
@@ -274,7 +274,7 @@ impl TpnCycle {
         //
         // Run MetaAgent when ALL of these are true:
         //   1. Not a parent-initiated re-run
-        //   2. Not crash recovery from FittingDone or VerifyDone
+        //   2. Not crash recovery from YangDone or YinDone
         //   3. initial_meta_ctx is None (no parent context provided)
         let needs_meta = resume_phase.is_none()
             && !is_crash_recovery
@@ -288,22 +288,50 @@ impl TpnCycle {
             );
             event_bus::emit_event(TaskEvent::PhaseChanged {
                 task_id: engine_ctx.task_id.clone(),
-                phase: TpnPhase::Meta,
+                phase: ZhouyiPhase::Meta,
             });
             let meta_agent = self
                 .factory
                 .create_meta_agent(&engine_ctx.task_id, engine_ctx.depth, self.config.runtime.max_depth)?;
             // 首次运行无前一瞬态产出（handoff=None）。
-            meta_ctx = meta_agent.run(description, &["general"], None).await?;
+            match meta_agent.run(description, &["general"], None).await? {
+                // V46 短路（BCP §8.8）：应答类任务直接产出，跳过阳阴。
+                MetaOutcome::Answer(answer) => {
+                    let answer_path =
+                        write_short_circuit_answer(&engine_ctx.task_dir, &answer).await?;
+                    tracing::info!(
+                        task_id = %engine_ctx.task_id,
+                        "MetaAgent answer short-circuit → PASS (跳过阳阴)"
+                    );
+                    write_task_status(
+                        &engine_ctx.task_dir,
+                        &engine_ctx.task_id,
+                        description,
+                        engine_ctx.depth,
+                        TaskStatus::Completed,
+                    )?;
+                    return Ok(ZhouyiResult {
+                        task_id: engine_ctx.task_id.clone(),
+                        content: answer,
+                        tools_used: vec![],
+                        deliverables: vec![answer_path],
+                        depth: engine_ctx.depth,
+                        rounds: 0,
+                    });
+                }
+                MetaOutcome::Context(ctx) => {
+                    meta_ctx = ctx;
 
-            // V27 深度规则兑底：叶节点（depth+1 >= max_depth）强制 Execution。
-            apply_leaf_depth_rule(&mut meta_ctx, engine_ctx.depth, self.config.runtime.max_depth);
+                    // V27 深度规则兑底：叶节点（depth+1 >= max_depth）强制 Execution。
+                    apply_leaf_depth_rule(&mut meta_ctx, engine_ctx.depth, self.config.runtime.max_depth);
 
-            // Persist MetaContext for crash recovery.
-            persist_meta_ctx(&meta_ctx, &engine_ctx.task_dir);
+                    // Persist MetaContext for crash recovery.
+                    persist_meta_ctx(&meta_ctx, &engine_ctx.task_dir);
 
-            // Write checkpoint after MetaAgent.
-            write_checkpoint(&checkpoint_path, CyclePhase::MetaDone, engine_ctx, &self.cancel);
+                    // Write checkpoint after MetaAgent.
+                    write_checkpoint(&checkpoint_path, CyclePhase::MetaDone, engine_ctx, &self.cancel);
+                }
+            }
         } else if !resume_history_is_some && !is_crash_recovery {
             // Use parent-provided MetaContext.
             if let Some(ctx) = initial_meta_ctx {
@@ -315,37 +343,37 @@ impl TpnCycle {
             }
         }
 
-        // ── Phases 2-4: TPN loop ──────────────────────────────────────
+        // ── Phases 2-4: Zhouyi loop ──────────────────────────────────────
         loop {
             // Check cancellation before each iteration.
             if self.cancel.is_cancelled() {
                 return Err(TaijiError::Cancelled {
-                    context: format!("TPN cycle cancelled for task {}", engine_ctx.task_id),
+                    context: format!("Zhouyi cycle cancelled for task {}", engine_ctx.task_id),
                 });
             }
 
-            // ── Phase 2: FittingAgent (概率拟合·阳) ──
+            // ── Phase 2: YangAgent (概率拟合·阳) ──
             //
-            // Skip if crash recovery from FittingDone or VerifyDone.
+            // Skip if crash recovery from YangDone or YinDone.
             event_bus::emit_event(TaskEvent::PhaseChanged {
                 task_id: engine_ctx.task_id.clone(),
-                phase: TpnPhase::Fitting,
+                phase: ZhouyiPhase::Yang,
             });
-            let fitting_result = if resume_phase == Some(CyclePhase::FittingDone)
-                || resume_phase == Some(CyclePhase::VerifyDone)
+            let yang_result = if resume_phase == Some(CyclePhase::YangDone)
+                || resume_phase == Some(CyclePhase::YinDone)
             {
-                // Crash recovery: FittingAgent already ran, reconstruct its
+                // Crash recovery: YangAgent already ran, reconstruct its
                 // result from persisted state. V28 产出继承优先（handoff /
                 // deliverables），chat_history 仅本节点兜底（§1.4 / §8.18）。
                 // If we can't reconstruct, re-run.
-                match construct_tpn_result_from_state(&engine_ctx) {
+                match construct_zhouyi_result_from_state(&engine_ctx) {
                     Ok(Some(result)) => result,
                     _ => {
                         tracing::warn!(
                             task_id = %engine_ctx.task_id,
-                            "Could not reconstruct FittingAgent result from state — re-running"
+                            "Could not reconstruct YangAgent result from state — re-running"
                         );
-                        match run_fitting_with_v28_routing(
+                        match run_yang_with_v28_routing(
                             &self.factory,
                             engine_ctx,
                             &meta_ctx,
@@ -356,13 +384,31 @@ impl TpnCycle {
                         )
                         .await?
                         {
-                            Some(result) => result,
-                            None => continue,
+                            YangOutcome::Success(result) => result,
+                            YangOutcome::BackToZhouyi => continue,
+                            YangOutcome::BackToMeta => {
+                                match rerun_meta(
+                                    &self.factory,
+                                    engine_ctx,
+                                    &mut meta_ctx,
+                                    &self.cancel,
+                                    &mut chat_history,
+                                    &mut current_description,
+                                    description,
+                                    &checkpoint_path,
+                                    "上下文超限（执行模式）→ 元重判编排".to_string(),
+                                )
+                                .await?
+                                {
+                                    Some(result) => return Ok(result),
+                                    None => continue,
+                                }
+                            }
                         }
                     }
                 }
             } else {
-                match run_fitting_with_v28_routing(
+                match run_yang_with_v28_routing(
                     &self.factory,
                     engine_ctx,
                     &meta_ctx,
@@ -373,28 +419,46 @@ impl TpnCycle {
                 )
                 .await?
                 {
-                    Some(result) => {
-                        // Write checkpoint after FittingAgent (chat_history already saved internally).
+                    YangOutcome::Success(result) => {
+                        // Write checkpoint after YangAgent (chat_history already saved internally).
                         write_checkpoint(
                             &checkpoint_path,
-                            CyclePhase::FittingDone,
+                            CyclePhase::YangDone,
                             engine_ctx,
                             &self.cancel,
                         );
                         result
                     }
-                    None => continue,
+                    YangOutcome::BackToZhouyi => continue,
+                    YangOutcome::BackToMeta => {
+                        match rerun_meta(
+                            &self.factory,
+                            engine_ctx,
+                            &mut meta_ctx,
+                            &self.cancel,
+                            &mut chat_history,
+                            &mut current_description,
+                            description,
+                            &checkpoint_path,
+                            "上下文超限（执行模式）→ 元重判编排".to_string(),
+                        )
+                        .await?
+                        {
+                            Some(result) => return Ok(result),
+                            None => continue,
+                        }
+                    }
                 }
             };
 
-            // ── Phase 3: CausalVerify (因果验证·阴) ──
+            // ── Phase 3: YinVerify (因果验证·阴) ──
             //
-            // Skip verify if crash recovery from VerifyDone.
+            // Skip verify if crash recovery from YinDone.
             event_bus::emit_event(TaskEvent::PhaseChanged {
                 task_id: engine_ctx.task_id.clone(),
-                phase: TpnPhase::Causal,
+                phase: ZhouyiPhase::Yin,
             });
-            let report = if resume_phase == Some(CyclePhase::VerifyDone) {
+            let report = if resume_phase == Some(CyclePhase::YinDone) {
                 // Load verify_state.json and use cached report.
                 match load_verify_report(&engine_ctx.task_dir) {
                     Some(r) => r,
@@ -404,22 +468,22 @@ impl TpnCycle {
                             "verify_state.json not found — re-running verify"
                         );
                         let verify_agent =
-                            self.factory.create_causal_verify_agent(engine_ctx, &meta_ctx)?;
+                            self.factory.create_yin_verify_agent(engine_ctx, &meta_ctx)?;
                         let tool_results = collect_tool_results(&engine_ctx.task_dir);
                         verify_agent
-                            .verify(&fitting_result.content, &tool_results, &meta_ctx)
+                            .verify(&yang_result.content, &tool_results, &meta_ctx)
                             .await?
                     }
                 }
             } else {
-                let verify_agent = self.factory.create_causal_verify_agent(engine_ctx, &meta_ctx)?;
+                let verify_agent = self.factory.create_yin_verify_agent(engine_ctx, &meta_ctx)?;
                 let tool_results = collect_tool_results(&engine_ctx.task_dir);
                 let report = verify_agent
-                    .verify(&fitting_result.content, &tool_results, &meta_ctx)
+                    .verify(&yang_result.content, &tool_results, &meta_ctx)
                     .await?;
 
                 // Write checkpoint after Verify.
-                write_checkpoint(&checkpoint_path, CyclePhase::VerifyDone, engine_ctx, &self.cancel);
+                write_checkpoint(&checkpoint_path, CyclePhase::YinDone, engine_ctx, &self.cancel);
 
                 report
             };
@@ -434,11 +498,11 @@ impl TpnCycle {
                         task_id = %engine_ctx.task_id,
                         round = engine_ctx.round,
                         cycle = engine_ctx.cycle,
-                        "TPN cycle — PASS"
+                        "Zhouyi cycle — PASS"
                     );
 
                     // Broadcast route decision + consume pending review.
-                    event_bus::emit_event(TaskEvent::TpnRouteDecision {
+                    event_bus::emit_event(TaskEvent::ZhouyiRouteDecision {
                         task_id: engine_ctx.task_id.clone(),
                         route: "PASS".into(),
                         cycle: engine_ctx.cycle,
@@ -449,13 +513,13 @@ impl TpnCycle {
 
                     // Construct DecomposeResult (matching what recursive_decompose expects).
                     let decompose_result = DecomposeResult {
-                        task_id: fitting_result.task_id.clone(),
-                        summary: fitting_result.content.clone(),
+                        task_id: yang_result.task_id.clone(),
+                        summary: yang_result.content.clone(),
                         status: ConvergenceStatus::Converged,
                         subtask_count: 0,
-                        deliverables: fitting_result.deliverables.clone(),
-                        rounds: fitting_result.rounds,
-                        tools_used: fitting_result.tools_used.clone(),
+                        deliverables: yang_result.deliverables.clone(),
+                        rounds: yang_result.rounds,
+                        tools_used: yang_result.tools_used.clone(),
                         child_results: vec![],
                     };
 
@@ -471,10 +535,10 @@ impl TpnCycle {
                     // Clean up checkpoint (task is done).
                     let _ = std::fs::remove_file(&checkpoint_path);
 
-                    // ── V33/MVP-2: enqueue DMN pending（被动学习 — BCP §6.4/§8.23）──
-                    // 读 verify_state.json 的 checks（CausalAgent 已写，MVP-1）→
-                    // 原子写 pending/{task_id}.json。TPN 只读归藏（§8.3 硬约束）：
-                    // 入队只写 pending/，归藏 YAML 由 DMN Consumer 单写。
+                    // ── V33/MVP-2: enqueue Lianshan pending（被动学习 — BCP §6.4/§8.23）──
+                    // 读 verify_state.json 的 checks（YinAgent 已写，MVP-1）→
+                    // 原子写 pending/{task_id}.json。Zhouyi 只读归藏（§8.3 硬约束）：
+                    // 入队只写 pending/，归藏 YAML 由 Lianshan Consumer 单写。
                     // I/O 失败仅 warn —— 学习是增强层，不阻断 PASS。
                     let data_root = engine_ctx
                         .task_dir
@@ -483,7 +547,7 @@ impl TpnCycle {
                     if let Some(data_root) = data_root {
                         // ── V33/MVP-3: 四维信号摊派（BCP §6.4）──
                         // cost = trace usage.input_tokens 求和；rounds = verify_state.round；
-                        // quality = route 映射（Pass=1.0/BackToTpn=0.4/BackToMeta=0.2）× confidence——
+                        // quality = route 映射（Pass=1.0/BackToZhouyi=0.4/BackToMeta=0.2）× confidence——
                         // 全部既有数据，零新增持久化文件。任务级信号摊派给同任务所有检查项。
                         let checks: Vec<CheckResult> =
                             match load_json_optional::<serde_json::Value>(
@@ -505,7 +569,7 @@ impl TpnCycle {
                                         .and_then(|v| v.as_str())
                                     {
                                         Some("BackToMeta") => 0.2,
-                                        Some("BackToTpn") => 0.4,
+                                        Some("BackToZhouyi") => 0.4,
                                         _ => 1.0, // Pass
                                     };
                                     let quality = route_mult * confidence;
@@ -523,8 +587,9 @@ impl TpnCycle {
                                 }
                                 _ => vec![],
                             };
-                        if let Err(e) = enqueue_dmn_pending(
+                        if let Err(e) = enqueue_lianshan_pending(
                             &data_root,
+                            &engine_ctx.task_dir,
                             &engine_ctx.task_id,
                             &checks,
                             &meta_ctx.assets_used,
@@ -536,19 +601,19 @@ impl TpnCycle {
                             tracing::warn!(
                                 task_id = %engine_ctx.task_id,
                                 error = %e,
-                                "Failed to enqueue DMN pending — learning skipped (non-blocking)"
+                                "Failed to enqueue Lianshan pending — learning skipped (non-blocking)"
                             );
                         }
                     } else {
                         tracing::warn!(
                             task_dir = %engine_ctx.task_dir.display(),
-                            "Cannot derive data_root from task_dir — DMN pending enqueue skipped"
+                            "Cannot derive data_root from task_dir — Lianshan pending enqueue skipped"
                         );
                     }
 
-                    return Ok(fitting_result);
+                    return Ok(yang_result);
                 }
-                VerificationRoute::BackToTpn => {
+                VerificationRoute::BackToZhouyi => {
                     engine_ctx.round += 1;
                     if engine_ctx.round > self.config.runtime.max_rounds {
                         return Err(TaijiError::MaxRoundsExceeded {
@@ -582,13 +647,13 @@ impl TpnCycle {
                     tracing::warn!(
                         round = engine_ctx.round,
                         task_id = %engine_ctx.task_id,
-                        "BACK_TO_TPN — retrying FittingAgent (MetaAgent skipped)"
+                        "BACK_TO_ZHOUYI — retrying YangAgent (MetaAgent skipped)"
                     );
 
                     // Broadcast route decision.
-                    event_bus::emit_event(TaskEvent::TpnRouteDecision {
+                    event_bus::emit_event(TaskEvent::ZhouyiRouteDecision {
                         task_id: engine_ctx.task_id.clone(),
-                        route: "BACK_TO_TPN".into(),
+                        route: "BACK_TO_ZHOUYI".into(),
                         cycle: engine_ctx.cycle,
                         round: engine_ctx.round,
                         verdict: report.summary.clone(),
@@ -604,75 +669,23 @@ impl TpnCycle {
                     continue;
                 }
                 VerificationRoute::BackToMeta => {
-                    engine_ctx.cycle += 1;
-                    engine_ctx.round = 0;
-                    if engine_ctx.cycle > self.config.runtime.max_cycles {
-                        return Err(TaijiError::MaxCyclesExceeded {
-                            max: self.config.runtime.max_cycles,
-                        });
-                    }
-                    current_description = description.to_string();
-                    tracing::warn!(
-                        cycle = engine_ctx.cycle,
-                        task_id = %engine_ctx.task_id,
-                        "BACK_TO_META — re-running MetaAgent for fresh reasoning paths"
-                    );
-
-                    // Broadcast route decision.
-                    event_bus::emit_event(TaskEvent::TpnRouteDecision {
-                        task_id: engine_ctx.task_id.clone(),
-                        route: "BACK_TO_META".into(),
-                        cycle: engine_ctx.cycle,
-                        round: engine_ctx.round,
-                        verdict: report.summary.clone(),
-                    });
-
-                    // Inject human review suggestion into the fresh description.
-                    inject_human_review(&engine_ctx.task_dir, &mut current_description);
-
-                    if self.cancel.is_cancelled() {
-                        return Err(TaijiError::Cancelled {
-                            context: format!(
-                                "TPN cycle cancelled for task {}",
-                                engine_ctx.task_id
-                            ),
-                        });
-                    }
-                    event_bus::emit_event(TaskEvent::PhaseChanged {
-                        task_id: engine_ctx.task_id.clone(),
-                        phase: TpnPhase::Meta,
-                    });
-                    let meta_agent = self
-                        .factory
-                        .create_meta_agent(
-                            &engine_ctx.task_id,
-                            engine_ctx.depth,
-                            self.config.runtime.max_depth,
-                        )?;
-                    // V26.5-P5: same tags as first run — empty tags matched nothing
-                    // in the knowledge store, so BACK_TO_META re-runs never
-                    // injected fresh reasoning bias.
-                    // V28：注入前一瞬态产出（handoff.md）作产出校准（§8.18），
-                    // 不再空手重跑。
-                    let handoff = crate::infra::handoff::read_handoff(&engine_ctx.task_dir);
-                    meta_ctx = meta_agent
-                        .run(description, &["general"], handoff.as_deref())
-                        .await?;
-
-                    // V27 深度规则兑底：BACK_TO_META 重跑后同样适用叶节点强制。
-                    apply_leaf_depth_rule(
+                    let verdict = report.summary.clone();
+                    match rerun_meta(
+                        &self.factory,
+                        engine_ctx,
                         &mut meta_ctx,
-                        engine_ctx.depth,
-                        self.config.runtime.max_depth,
-                    );
-
-                    // Persist MetaContext and checkpoint for crash recovery.
-                    persist_meta_ctx(&meta_ctx, &engine_ctx.task_dir);
-                    write_checkpoint(&checkpoint_path, CyclePhase::MetaDone, engine_ctx, &self.cancel);
-
-                    // Reset chat_history for fresh round.
-                    chat_history = Vec::new();
-                    continue;
+                        &self.cancel,
+                        &mut chat_history,
+                        &mut current_description,
+                        description,
+                        &checkpoint_path,
+                        verdict,
+                    )
+                    .await?
+                    {
+                        Some(result) => return Ok(result),
+                        None => continue,
+                    }
                 }
             }
         }
@@ -777,6 +790,19 @@ pub(crate) fn write_task_status(
     save_json_atomic(&task, &meta_path).map_err(TaijiError::IO)
 }
 
+/// V46 短路（BCP §8.8）：应答类任务把答案写为 `deliverables/answer.md`，
+/// 返回绝对路径。验证规则：符号校验保底（引用真实性）+ 交互判断兜底
+/// （父节点/用户读 answer.md 裁定），阴不做语义验证（同源概率回路 §1.3）。
+async fn write_short_circuit_answer(task_dir: &Path, answer: &str) -> Result<String, TaijiError> {
+    let dir = task_dir.join("deliverables");
+    tokio::fs::create_dir_all(&dir).await.map_err(|e| TaijiError::IO(e))?;
+    let path = dir.join("answer.md");
+    tokio::fs::write(&path, answer)
+        .await
+        .map_err(|e| TaijiError::IO(e))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 /// Load chat_history from disk, returning empty Vec on any error.
 fn load_chat_history_or_empty(task_dir: &Path) -> Vec<Message> {
     let path = task_dir.join("chat_history.json");
@@ -794,20 +820,20 @@ fn load_chat_history_or_empty(task_dir: &Path) -> Vec<Message> {
     }
 }
 
-/// Reconstruct a TPNResult from persisted state after a crash at/after
-/// FittingDone, without re-running the FittingAgent LLM.
+/// Reconstruct a ZhouyiResult from persisted state after a crash at/after
+/// YangDone, without re-running the YangAgent LLM.
 ///
 /// V26.5 (P2): the old trace-based reconstruction matched
 /// `phase == "output" | "result"` records that no code ever writes
 /// (TraceHook only emits `completion_call` / `completion_response` /
-/// `tool_call::*`), so crash recovery always fell back to re-running Fitting
+/// `tool_call::*`), so crash recovery always fell back to re-running Yang
 /// — wasting tokens and potentially changing the result. Sources used here:
 /// 1. `content`      ← last assistant text message in `chat_history.json`
 /// 2. `tools_used`   ← deduped `tool_call::*` phases in `trace.jsonl` (first-call order)
 /// 3. `deliverables` ← files listed under `deliverables/`
-fn construct_tpn_result_from_state(
+fn construct_zhouyi_result_from_state(
     engine_ctx: &EngineContext,
-) -> Result<Option<TPNResult>, TaijiError> {
+) -> Result<Option<ZhouyiResult>, TaijiError> {
     let task_dir = &engine_ctx.task_dir;
 
     // V28 产出继承优先：有交接文件（deliverables/handoff.md）则从产出重建——
@@ -815,9 +841,9 @@ fn construct_tpn_result_from_state(
     if let Some(handoff) = crate::infra::handoff::read_handoff(task_dir) {
         tracing::info!(
             task_id = %engine_ctx.task_id,
-            "Crash recovery — reconstructing FittingAgent result from handoff (V28 产出继承)"
+            "Crash recovery — reconstructing YangAgent result from handoff (V28 产出继承)"
         );
-        return Ok(Some(TPNResult {
+        return Ok(Some(ZhouyiResult {
             task_id: engine_ctx.task_id.clone(),
             content: handoff,
             tools_used: collect_tools_used_from_trace(task_dir),
@@ -833,12 +859,12 @@ fn construct_tpn_result_from_state(
     let Some(content) = content else {
         tracing::warn!(
             task_id = %engine_ctx.task_id,
-            "chat_history has no assistant text — cannot reconstruct FittingAgent result"
+            "chat_history has no assistant text — cannot reconstruct YangAgent result"
         );
         return Ok(None);
     };
 
-    Ok(Some(TPNResult {
+    Ok(Some(ZhouyiResult {
         task_id: engine_ctx.task_id.clone(),
         content,
         tools_used: collect_tools_used_from_trace(task_dir),
@@ -848,14 +874,26 @@ fn construct_tpn_result_from_state(
     }))
 }
 
-/// Run the FittingAgent with V28/V29 error routing (BCP §8.18 / §8.19).
+/// YangAgent 执行结果（含 V47 上下文超限路由分流）。
+enum YangOutcome {
+    /// 成功产出（进入 Yin 验证）。
+    Success(ZhouyiResult),
+    /// context_overflow：编排模式或叶节点 → BACK_TO_ZHOUYI（重跑 Yang）。
+    BackToZhouyi,
+    /// context_overflow：执行模式且可再拆 → BACK_TO_META（元重判编排）。
+    BackToMeta,
+}
+
+/// Run the YangAgent with V28/V29 error routing (BCP §8.18 / §8.19 / V47 §8.14).
 ///
-/// - `Ok(Some(result))` — success.
-/// - `Ok(None)` — `ContextOverflow`（token 预算超限）：已递增 round、安装产出继承
-///   描述（deliverables/ + handoff.md）、emit BACK_TO_TPN；调用方应 `continue`
-///   （阳基于产出递归分解，不再重放 chat_history）。
+/// - `Ok(Success(result))` — success.
+/// - `Ok(BackToZhouyi)` — `ContextOverflow`（编排模式或叶节点）：已递增 round、
+///   安装产出继承描述（deliverables/ + handoff.md）、emit BACK_TO_ZHOUYI；调用方
+///   应 `continue`（阳基于产出递归分解 / 残缺产出兜底，不再重放 chat_history）。
+/// - `Ok(BackToMeta)` — `ContextOverflow`（执行模式且 depth+1 < max_depth）：
+///   粒度错误 = 认知偏差，emit BACK_TO_META；调用方应走元重判编排流程（V47）。
 /// - `Err(e)` — `HardCutoff`（硬截止）及其他错误：传播为 FAIL。
-async fn run_fitting_with_v28_routing(
+async fn run_yang_with_v28_routing(
     factory: &Arc<AgentFactory>,
     engine_ctx: &mut EngineContext,
     meta_ctx: &MetaContext,
@@ -863,28 +901,51 @@ async fn run_fitting_with_v28_routing(
     chat_history: &mut Vec<Message>,
     current_description: &mut String,
     max_rounds: u32,
-) -> Result<Option<TPNResult>, TaijiError> {
-    let fitting_agent =
-        factory.create_fitting_agent(engine_ctx.depth, meta_ctx, engine_ctx, cancel)?;
-    match fitting_agent
+) -> Result<YangOutcome, TaijiError> {
+    let yang_agent =
+        factory.create_yang_agent(engine_ctx.depth, meta_ctx, engine_ctx, cancel)?;
+    match yang_agent
         .run(current_description.as_str(), Some(chat_history.clone()))
         .await
     {
-        Ok(result) => Ok(Some(result)),
+        Ok(result) => Ok(YangOutcome::Success(result)),
         Err(TaijiError::ContextOverflow { threshold }) => {
             engine_ctx.round += 1;
             if engine_ctx.round > max_rounds {
                 return Err(TaijiError::MaxRoundsExceeded { max: max_rounds });
             }
+            // V47 模式分流（BCP §8.18/§8.14）：执行模式 + 可再拆 → 粒度错误 =
+            // 认知偏差 → BACK_TO_META（元重判编排）；编排模式或叶节点 →
+            // BACK_TO_ZHOUYI（阳递归分解 / 残缺产出兜底）。
+            let can_decompose = engine_ctx.depth + 1 < factory.config.runtime.max_depth;
+            if meta_ctx.mode == crate::types::agent::AgentMode::Execution && can_decompose {
+                tracing::warn!(
+                    task_id = %engine_ctx.task_id,
+                    round = engine_ctx.round,
+                    threshold,
+                    "BACK_TO_META — context overflow in Execution mode → meta re-routing (V47)"
+                );
+                event_bus::emit_event(TaskEvent::ZhouyiRouteDecision {
+                    task_id: engine_ctx.task_id.clone(),
+                    route: "BACK_TO_META".into(),
+                    cycle: engine_ctx.cycle,
+                    round: engine_ctx.round,
+                    verdict: format!(
+                        "上下文超限（≥{threshold} tokens）→ 执行模式认知偏差 → 元重判编排"
+                    ),
+                });
+                *chat_history = Vec::new();
+                return Ok(YangOutcome::BackToMeta);
+            }
             tracing::warn!(
                 task_id = %engine_ctx.task_id,
                 round = engine_ctx.round,
                 threshold,
-                "BACK_TO_TPN — context overflow: handoff-based decomposition (V28)"
+                "BACK_TO_ZHOUYI — context overflow: handoff-based decomposition (V28)"
             );
-            event_bus::emit_event(TaskEvent::TpnRouteDecision {
+            event_bus::emit_event(TaskEvent::ZhouyiRouteDecision {
                 task_id: engine_ctx.task_id.clone(),
-                route: "BACK_TO_TPN".into(),
+                route: "BACK_TO_ZHOUYI".into(),
                 cycle: engine_ctx.cycle,
                 round: engine_ctx.round,
                 verdict: format!("上下文超限（≥{threshold} tokens）→ 基于产出递归分解"),
@@ -893,9 +954,100 @@ async fn run_fitting_with_v28_routing(
             *current_description =
                 crate::infra::handoff::build_handoff_description(&engine_ctx.task_dir);
             *chat_history = Vec::new();
-            Ok(None)
+            Ok(YangOutcome::BackToZhouyi)
         }
         Err(e) => Err(e),
+    }
+}
+
+/// V47：执行 BACK_TO_META 流程（cycle++、元基于 handoff 校准重判、叶深度兑底、
+/// 持久化、重置 chat_history）。Phase 2（context_overflow 执行模式分流）与
+/// Phase 4（VerificationRoute::BackToMeta）共用。
+///
+/// 返回 `Some(ZhouyiResult)` = 元短路（Answer → 直接 PASS）；`None` = 元产出
+/// Context（meta_ctx 已更新，调用方应 `continue` 重新进入循环）。
+async fn rerun_meta(
+    factory: &Arc<AgentFactory>,
+    engine_ctx: &mut EngineContext,
+    meta_ctx: &mut MetaContext,
+    cancel: &CancellationToken,
+    chat_history: &mut Vec<Message>,
+    current_description: &mut String,
+    description: &str,
+    checkpoint_path: &Path,
+    verdict: String,
+) -> Result<Option<ZhouyiResult>, TaijiError> {
+    engine_ctx.cycle += 1;
+    engine_ctx.round = 0;
+    if engine_ctx.cycle > factory.config.runtime.max_cycles {
+        return Err(TaijiError::MaxCyclesExceeded {
+            max: factory.config.runtime.max_cycles,
+        });
+    }
+    *current_description = description.to_string();
+    tracing::warn!(
+        cycle = engine_ctx.cycle,
+        task_id = %engine_ctx.task_id,
+        "BACK_TO_META — re-running MetaAgent for fresh reasoning paths"
+    );
+    event_bus::emit_event(TaskEvent::ZhouyiRouteDecision {
+        task_id: engine_ctx.task_id.clone(),
+        route: "BACK_TO_META".into(),
+        cycle: engine_ctx.cycle,
+        round: engine_ctx.round,
+        verdict,
+    });
+    inject_human_review(&engine_ctx.task_dir, current_description);
+    if cancel.is_cancelled() {
+        return Err(TaijiError::Cancelled {
+            context: format!("Zhouyi cycle cancelled for task {}", engine_ctx.task_id),
+        });
+    }
+    event_bus::emit_event(TaskEvent::PhaseChanged {
+        task_id: engine_ctx.task_id.clone(),
+        phase: ZhouyiPhase::Meta,
+    });
+    let meta_agent = factory.create_meta_agent(
+        &engine_ctx.task_id,
+        engine_ctx.depth,
+        factory.config.runtime.max_depth,
+    )?;
+    let handoff = crate::infra::handoff::read_handoff(&engine_ctx.task_dir);
+    match meta_agent
+        .run(description, &["general"], handoff.as_deref())
+        .await?
+    {
+        MetaOutcome::Answer(answer) => {
+            let answer_path =
+                write_short_circuit_answer(&engine_ctx.task_dir, &answer).await?;
+            tracing::info!(
+                task_id = %engine_ctx.task_id,
+                "MetaAgent answer short-circuit (BACK_TO_META) → PASS"
+            );
+            write_task_status(
+                &engine_ctx.task_dir,
+                &engine_ctx.task_id,
+                description,
+                engine_ctx.depth,
+                TaskStatus::Completed,
+            )?;
+            Ok(Some(ZhouyiResult {
+                task_id: engine_ctx.task_id.clone(),
+                content: answer,
+                tools_used: vec![],
+                deliverables: vec![answer_path],
+                depth: engine_ctx.depth,
+                rounds: engine_ctx.round,
+            }))
+        }
+        MetaOutcome::Context(ctx) => {
+            *meta_ctx = ctx;
+            apply_leaf_depth_rule(meta_ctx, engine_ctx.depth, factory.config.runtime.max_depth);
+            persist_meta_ctx(meta_ctx, &engine_ctx.task_dir);
+            write_checkpoint(checkpoint_path, CyclePhase::MetaDone, engine_ctx, cancel);
+            *chat_history = Vec::new();
+            Ok(None)
+        }
     }
 }
 
@@ -993,11 +1145,11 @@ fn load_verify_report(task_dir: &Path) -> Option<VerificationReport> {
 
 /// Read tool result records from the trace file for the current task.
 ///
-/// Extracts tool output strings for use by CausalAgent.verify(), so the
+/// Extracts tool output strings for use by YinAgent.verify(), so the
 /// verify LLM can cross-reference tool outputs against the task output.
 ///
 /// This is a fast synchronous I/O operation (~ms) compared to the LLM
-/// calls in the TPN loop (~seconds).
+/// calls in the Zhouyi loop (~seconds).
 fn collect_tool_results(task_dir: &Path) -> Vec<String> {
     use crate::infra::trace::TraceRecord;
 
@@ -1060,18 +1212,19 @@ fn trunc(s: &str, max_len: usize) -> String {
     }
 }
 
-/// V33/MVP-2：将检查项结果入队 DMN pending（被动学习 — BCP §6.4/§8.23）。
+/// V33/MVP-2：将检查项结果入队 Lianshan pending（被动学习 — BCP §6.4/§8.23）。
 ///
 /// 写 `{data_root}/pending/{task_id}.json`，内容 = `{task_id, source, checks, assets_used, passed, model_key}`。
 /// 同 task_id 覆盖写（幂等——重跑任务不产生重复学习）；原子写（save_json_atomic）。
-/// 调用方为 TPN PASS 分支；I/O 失败由调用方 warn（学习是增强层，不阻断 PASS）。
-/// V35/MVP-6：assets_used（编排所选资产，DMN 回传依据 §8.21）与 passed（任务级
+/// 调用方为 Zhouyi PASS 分支；I/O 失败由调用方 warn（学习是增强层，不阻断 PASS）。
+/// V35/MVP-6：assets_used（编排所选资产，Lianshan 回传依据 §8.21）与 passed（任务级
 /// PASS 信号——prompts 任务级归因；serde default 旧 pending 零迁移）。
-/// V36→V44：model_key 作为统计键随 pending 入队（§10.1 去分区化——DMN 回传
+/// V36→V44：model_key 作为统计键随 pending 入队（§10.1 去分区化——Lianshan 回传
 /// 统一落根级资产树，model_key 仅用于 model_stats 索引；serde default
 /// 旧 pending 零迁移，None = 未指定模型）。
-pub(crate) async fn enqueue_dmn_pending(
+pub(crate) async fn enqueue_lianshan_pending(
     data_root: &Path,
+    task_dir: &Path,
     task_id: &str,
     checks: &[CheckResult],
     assets_used: &[AssetRef],
@@ -1088,7 +1241,8 @@ pub(crate) async fn enqueue_dmn_pending(
 
     let payload = serde_json::json!({
         "task_id": task_id,
-        "source": "tpn",
+        "task_dir": task_dir.display().to_string(),
+        "source": "zhouyi",
         "checks": checks,
         "assets_used": assets_used,
         "passed": passed,
@@ -1133,7 +1287,7 @@ mod tests {
     }
 
     fn tmp_task_dir(tag: &str) -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("taiji_tpn_test_{tag}_{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("taiji_zhouyi_test_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("create tmp task dir");
         dir
@@ -1153,20 +1307,20 @@ mod tests {
     async fn build_factory(config: TaijiConfig) -> Arc<AgentFactory> {
         // Unique dir per invocation: parallel tests each calling build_factory
         // must not share a pid-based dir — concurrent remove_dir_all + rename
-        // during LiluoClient init produced a flaky KnowledgeStoreUnavailable
+        // during GuizangClient init produced a flaky KnowledgeStoreUnavailable
         // (V26.1-3 verification round, plan blocker 1).
         static FACTORY_COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = FACTORY_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let tmp_dir = std::env::temp_dir().join(format!(
-            "taiji_tpn_factory_{}_{}",
+            "taiji_zhouyi_factory_{}_{}",
             std::process::id(),
             n
         ));
         let _ = std::fs::remove_dir_all(&tmp_dir);
         let guizang = Arc::new(
-            crate::infra::knowledge::LiluoClient::new(&tmp_dir)
+            crate::infra::knowledge::GuizangClient::new(&tmp_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let providers = ProviderRegistry::new(&config).expect("ProviderRegistry");
         Arc::new(AgentFactory {
@@ -1216,10 +1370,10 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    // ── TpnCycle status 终态落盘（根/子同构）─────────────────────────
+    // ── ZhouyiCycle status 终态落盘（根/子同构）─────────────────────────
 
     #[tokio::test]
-    async fn test_enqueue_dmn_pending_writes_file_and_idempotent() {
+    async fn test_enqueue_lianshan_pending_writes_file_and_idempotent() {
         let dir = std::env::temp_dir().join(format!(
             "taiji_enqueue_pending_{}_{}",
             std::process::id(),
@@ -1242,7 +1396,7 @@ mod tests {
         }];
 
         // 首次入队：文件结构断言
-        super::enqueue_dmn_pending(&dir, "task-1", &checks, &[], true, Some("deepseek-deepseek-chat"))
+        super::enqueue_lianshan_pending(&dir, &dir, "task-1", &checks, &[], true, Some("deepseek-deepseek-chat"))
             .await
             .unwrap();
         let path = dir.join("pending").join("task-1.json");
@@ -1250,15 +1404,15 @@ mod tests {
         let content: serde_json::Value =
             serde_json::from_str(&tokio::fs::read_to_string(&path).await.unwrap()).unwrap();
         assert_eq!(content["task_id"], "task-1");
-        assert_eq!(content["source"], "tpn");
+        assert_eq!(content["source"], "zhouyi");
         assert_eq!(content["checks"].as_array().unwrap().len(), 1);
         assert_eq!(content["checks"][0]["check_id"], "meta-json-schema");
         assert_eq!(content["checks"][0]["passed"], true);
-        // V36：model_key 随 pending 入队（DMN 分区回传依据）
+        // V36：model_key 随 pending 入队（Lianshan 分区回传依据）
         assert_eq!(content["model_key"], "deepseek-deepseek-chat");
 
         // 幂等：同 task_id 覆盖写（不产生第二文件）
-        super::enqueue_dmn_pending(&dir, "task-1", &[], &[], true, None)
+        super::enqueue_lianshan_pending(&dir, &dir, "task-1", &[], &[], true, None)
             .await
             .unwrap();
         let files: Vec<_> = std::fs::read_dir(dir.join("pending"))
@@ -1320,9 +1474,9 @@ mod tests {
         let cancel = CancellationToken::new();
         cancel.cancel();
 
-        let tpn = TpnCycle::new(factory, config, cancel);
+        let zhouyi = ZhouyiCycle::new(factory, config, cancel);
         let mut ctx = make_engine_ctx(task_id, task_dir.clone());
-        let result = tpn
+        let result = zhouyi
             .execute("desc", Some(MetaContext::empty()), &mut ctx, None)
             .await;
 
@@ -1345,13 +1499,13 @@ mod tests {
         let task_dir = tmp_task_dir(task_id);
 
         let checkpoint = Checkpoint {
-            phase: CyclePhase::VerifyDone,
+            phase: CyclePhase::YinDone,
             round: 0,
             cycle: 0,
         };
         save_json_atomic(&checkpoint, &task_dir.join("checkpoint.json")).expect("checkpoint");
 
-        let cached = TPNResult {
+        let cached = ZhouyiResult {
             task_id: task_id.into(),
             content: "cached output".into(),
             tools_used: vec![],
@@ -1363,9 +1517,9 @@ mod tests {
         write_task_status(&task_dir, task_id, "desc", 0, TaskStatus::Failed).expect("meta");
 
         let cancel = CancellationToken::new();
-        let tpn = TpnCycle::new(factory, config, cancel);
+        let zhouyi = ZhouyiCycle::new(factory, config, cancel);
         let mut ctx = make_engine_ctx(task_id, task_dir.clone());
-        let result = tpn.execute("desc", None, &mut ctx, None).await;
+        let result = zhouyi.execute("desc", None, &mut ctx, None).await;
 
         assert!(result.is_ok());
         assert_eq!(result.unwrap().task_id, task_id);
@@ -1377,7 +1531,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&task_dir);
     }
 
-    // ── V26.5 (P2): crash recovery rebuilds FittingAgent result from
+    // ── V26.5 (P2): crash recovery rebuilds YangAgent result from
     //    persisted state (chat_history + trace + deliverables) instead of
     //    matching `phase == "output"|"result"` records that are never written.
 
@@ -1385,10 +1539,10 @@ mod tests {
         std::sync::atomic::AtomicUsize::new(0);
 
     #[test]
-    fn construct_tpn_result_from_state_reconstructs_from_persisted_files() {
+    fn construct_zhouyi_result_from_state_reconstructs_from_persisted_files() {
         let seq = RECONSTRUCT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "taiji_tpn_reconstruct_{}_{}",
+            "taiji_zhouyi_reconstruct_{}_{}",
             std::process::id(),
             seq
         ));
@@ -1409,7 +1563,7 @@ mod tests {
         let mut lines = String::new();
         for (i, phase) in [
             "tool_call::read",
-            "tool_call::causal_verify",
+            "tool_call::yin_verify",
             "tool_call::read",
             "tool_call::write",
         ]
@@ -1439,14 +1593,14 @@ mod tests {
         std::fs::write(dir.join("deliverables").join("report.md"), "x").unwrap();
 
         let ctx = make_engine_ctx("reconstruct-test", dir.clone());
-        let result = construct_tpn_result_from_state(&ctx)
+        let result = construct_zhouyi_result_from_state(&ctx)
             .expect("no IO error")
             .expect("must reconstruct");
 
         assert_eq!(result.task_id, "reconstruct-test");
         assert_eq!(result.content, "final answer: the report is done");
         // Deduplicated, first-call order — not file order.
-        assert_eq!(result.tools_used, vec!["read", "causal_verify", "write"]);
+        assert_eq!(result.tools_used, vec!["read", "yin_verify", "write"]);
         assert_eq!(result.depth, 0);
         assert_eq!(result.rounds, 1);
         assert!(
@@ -1461,17 +1615,17 @@ mod tests {
     }
 
     #[test]
-    fn construct_tpn_result_from_state_returns_none_without_chat_history() {
+    fn construct_zhouyi_result_from_state_returns_none_without_chat_history() {
         let seq = RECONSTRUCT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "taiji_tpn_reconstruct_none_{}_{}",
+            "taiji_zhouyi_reconstruct_none_{}_{}",
             std::process::id(),
             seq
         ));
         let _ = std::fs::create_dir_all(&dir);
 
         let ctx = make_engine_ctx("reconstruct-none", dir.clone());
-        let result = construct_tpn_result_from_state(&ctx).expect("no IO error");
+        let result = construct_zhouyi_result_from_state(&ctx).expect("no IO error");
         assert!(result.is_none(), "empty chat_history must yield None (fallback to re-run)");
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,5 +1,5 @@
 //! SkillTriggerEngine — L1 skill matching via regex + tags.
-//! Runs before FittingAgent creation to select tools for the agent to use.
+//! Runs before YangAgent creation to select tools for the agent to use.
 //!
 //! Matching strategy:
 //!   1. Regex pass — match `task_description` against registered patterns
@@ -59,6 +59,7 @@ impl SkillTriggerEngine {
                 name: "文件读取".into(),
                 tool_name: "read".into(),
                 match_weight: 0.8,
+summary: String::new(),
             },
             Some("read"),
         );
@@ -70,6 +71,7 @@ impl SkillTriggerEngine {
                 name: "文件写入".into(),
                 tool_name: "write".into(),
                 match_weight: 0.8,
+summary: String::new(),
             },
             Some("write"),
         );
@@ -81,6 +83,7 @@ impl SkillTriggerEngine {
                 name: "命令执行".into(),
                 tool_name: "bash".into(),
                 match_weight: 0.8,
+summary: String::new(),
             },
             Some("code"),
         );
@@ -92,6 +95,7 @@ impl SkillTriggerEngine {
                 name: "网络请求".into(),
                 tool_name: "webfetch".into(),
                 match_weight: 0.7,
+summary: String::new(),
             },
             Some("web"),
         );
@@ -103,6 +107,7 @@ impl SkillTriggerEngine {
                 name: "网络搜索".into(),
                 tool_name: "search".into(),
                 match_weight: 0.7,
+summary: String::new(),
             },
             Some("search"),
         );
@@ -236,6 +241,7 @@ mod tests {
             name: name.into(),
             tool_name: tool.into(),
             match_weight: weight,
+summary: String::new(),
         }
     }
 

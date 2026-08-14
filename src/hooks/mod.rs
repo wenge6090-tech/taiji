@@ -1,6 +1,7 @@
 pub mod chat_history_snapshot;
 pub mod context_limiter;
-pub mod fitting_hook_set;
+pub mod yang_hook_set;
+pub mod yin_hook_set;
 pub mod safety;
 pub mod trace;
 

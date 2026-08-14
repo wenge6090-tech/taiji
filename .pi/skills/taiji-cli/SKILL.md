@@ -1,11 +1,11 @@
 ---
 name: taiji-cli
-description: 通过 CLI 驱动和管理 taiji 认知内核项目（TPN-DMN 递归任务引擎）。覆盖：初始化工作区、执行/恢复任务（taiji run/--resume）、任务列表与状态查看（list/status）、失败任务诊断（trace + 任务目录检查）、产物读取、Web 前端启动。pi 无 MCP 时的官方 CLI 操作手册——当用户提到"跑任务/执行 taiji/看任务状态/诊断任务/恢复任务/taiji 前端"时使用。
+description: 通过 CLI 驱动和管理 taiji 认知内核项目（Zhouyi-Lianshan 递归任务引擎）。覆盖：初始化工作区、执行/恢复任务（taiji run/--resume）、任务列表与状态查看（list/status）、失败任务诊断（trace + 任务目录检查）、产物读取、Web 前端启动。pi 无 MCP 时的官方 CLI 操作手册——当用户提到"跑任务/执行 taiji/看任务状态/诊断任务/恢复任务/taiji 前端"时使用。
 ---
 
 # taiji CLI 操作手册
 
-taiji 是一个 Rust 认知内核：`taiji run <描述>` 把任务交给 TPN 三阶段循环（Meta 权重编排 → Fitting 概率执行 → Causal 因果验证），可递归拆解子任务，产物写入任务目录的 `deliverables/`。本 skill 教你通过 CLI 正确驱动与诊断它。
+taiji 是一个 Rust 认知内核：`taiji run <描述>` 把任务交给 Zhouyi 三阶段循环（Meta 权重编排 → Yang 概率执行 → Yin 因果验证），可递归拆解子任务，产物写入任务目录的 `deliverables/`。本 skill 教你通过 CLI 正确驱动与诊断它。
 
 ## 0. 前置条件（每次先检查）
 
@@ -27,7 +27,7 @@ ls target/debug/taiji >/dev/null 2>&1 && echo "二进制 OK" || cargo build 2>/d
 | `taiji run --resume <task_id>` | 恢复失败/中断任务（复用目录 + 恢复链） | 同上 |
 | `taiji init` | 初始化工作区 + 归藏知识库 | `✓ taiji workspace initialized` |
 | `taiji list` | 任务列表与状态 | `Tasks (N total):` + `<id> [Status]` |
-| `taiji status` | DMN/认知状态摘要 | Workspace/Data root/provider/depth/rounds/计数 |
+| `taiji status` | Lianshan/认知状态摘要 | Workspace/Data root/provider/depth/rounds/计数 |
 | `taiji trace <task_id> [--tree] [--tail N]` | 查看 trace 记录（JSONL 逐条） | 不存在时 stderr 报错 + exit 1 |
 | `taiji serve [--port 1420] [--no-open]` | Web 前端（HTTP 1420 + WS 17890，阻塞） | 需先 `cd taiji-web && npm run build` |
 
@@ -49,7 +49,7 @@ timeout 620 ./target/debug/taiji run "任务描述" 2>&1 | tee /tmp/taiji_run.lo
 - 涉及代码库读取时用相对路径（如 `src/types/task.rs`），agent 的 read 工具按项目根解析。
 
 **超时处置**：bash 超时杀掉进程后，任务可能停在 `Running`（checkpoint 已写）。此时：
-1. `taiji list` 看状态；2. `taiji run --resume <id>` 从失败点增量续跑（Fitting 阶段从 `chat_history.json` 快照继续，不会重跑整个任务）。
+1. `taiji list` 看状态；2. `taiji run --resume <id>` 从失败点增量续跑（Yang 阶段从 `chat_history.json` 快照继续，不会重跑整个任务）。
 
 ## 3. 任务状态语义
 
@@ -77,9 +77,9 @@ for d in .taiji/tasks/$ID/children/*/; do echo "$d: $(python3 -c "import json;pr
 - `children/` 下大量 Running 残留 → 父任务被中止的旧版本行为（V26.3 起已修复为 Failed 落盘），可安全忽略或 `--resume`。
 - trace 记录无密钥明文（脱敏生效）；若见长字符串被整段遮蔽属旧版本行为，V26.3 起仅前缀密钥模式脱敏。
 
-## 5. 任务目录结构（9 项持久化文件清单，BCP §8.1）
+## 5. 任务目录结构（9 项持久化文件清单，写者见 `src/orchestration/zhouyi.rs` + `src/infra/handoff.rs`）
 
-`{data_root}/tasks/{id}/` 下：`meta.json`（元数据+状态）、`checkpoint.json`（循环进度，PASS 后删除）、`meta_ctx.json`（Meta 编排上下文）、`chat_history.json`（Fitting 对话快照）、`verify_state.json`（Causal 验证缓存）、`decompose_result.json`（完成标记+结果缓存）、`deliverables/`（产物）、`children/`（子任务树）、`trace.jsonl`（审计）。**只读诊断，不要手动改写**（运行时数据，写者只有引擎）。
+`{data_root}/tasks/{id}/` 下：`meta.json`（元数据+状态）、`checkpoint.json`（循环进度，PASS 后删除）、`meta_ctx.json`（Meta 编排上下文）、`chat_history.json`（Yang 对话快照）、`verify_state.json`（Yin 验证缓存）、`decompose_result.json`（完成标记+结果缓存）、`deliverables/`（产物）、`children/`（子任务树）、`trace.jsonl`（审计）。**只读诊断，不要手动改写**（运行时数据，写者只有引擎）。
 
 ## 6. 常见工作流
 
@@ -96,4 +96,6 @@ for d in .taiji/tasks/$ID/children/*/; do echo "$d: $(python3 -c "import json;pr
 - 不要用 `taiji mcp`（阻塞式 MCP 服务器，pi 场景用本 skill 的 CLI 路径替代）。
 - 诊断前先 `cargo build` 确保二进制与源码一致。
 - 任务描述模糊会导致 LLM 反复试错烧预算：描述里给足路径、格式、规模约束。
-- 改 `src/` 后跑 `cargo test` 回归（基线 172 passed / 9 ignored），BCP/AGENTS.md 是唯一事实，CLI 行为变更需同步文档。
+- **任务描述过重会触发 context_overflow 死循环（V46 及以前）**：要求 LLM 全量读多个千行级源文件 + 写长文档，会反复上下文超限（trace 里 `context_overflow` 计数持续增长、deliverables 只有 handoff.md、checkpoint 停在 MetaDone/round 0）。V47 起已修复：超限按模式分流——执行模式可再拆 → BACK_TO_META 元重判编排 → recursive_decompose 递归分解（弱模型 Minimal profile 不再隐藏拆解工具）。诊断：`taiji trace <id>` 里 grep `context_overflow` 计数；若仍在死循环，检查是否为叶节点（depth+1 >= max_depth 无法再拆）。
+- **产物路径约定**：系统的产出目录是任务目录 `deliverables/`，不要给任务指定 `dos/` 等非系统约定路径——任务描述里只描述“产出什么”，不指定绝对路径；产物从 `.taiji/tasks/<id>/deliverables/` 取。
+- 改 `src/` 后跑 `cargo test` 回归（基线 305 passed / 9 ignored），`Blueprint.md`（设计定论）+ `AGENTS.md`（实现事实）是事实底，CLI 行为变更需同步文档。

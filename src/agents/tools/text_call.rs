@@ -2,7 +2,7 @@
 //!
 //! 弱模型原生 function calling 训练不足时，LLM 可能在纯文本输出中嵌入
 //! 类 JSON 调用块（```json {"tool": "write", "arguments": {...}} ```）。
-//! 本模块解析此类文本块为 [`ParsedToolCall`]，供 FittingAgent 驱动循环
+//! 本模块解析此类文本块为 [`ParsedToolCall`]，供 YangAgent 驱动循环
 //! 注入 toolresult（P3b 挂接点验证后接线）。
 
 use serde_json::Value;

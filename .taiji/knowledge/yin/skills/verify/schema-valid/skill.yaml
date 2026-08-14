@@ -24,7 +24,7 @@ implementations:
     - status
   severity: hard
   pass_condition: meta.json 必须可解析且包含 id/description/depth/status 字段
-agent_target: CausalAgent
+agent_target: YinAgent
 confidence: 0.8
 version: 1
 status: active

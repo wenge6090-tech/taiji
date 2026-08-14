@@ -1,20 +1,20 @@
 //! V33/MVP-3 主动学习（BCP §6.4 空闲窗口 — 契约假设验证版）。
 //!
-//! DMN 在 pending 空 + `runtime.dmn.active_learning_enabled` 开时：
+//! Lianshan 在 pending 空 + `runtime.lianshan.active_learning_enabled` 开时：
 //! 1. 选高不确定性变体契约节点（UCB 探索项最大者，§6.3 —— 低 N / 高方差优先）；
 //! 2. 生成**模板化探索任务**（静态模板，零 LLM 调用 —— 纯符号层承诺 §6.4）；
 //! 3. 写 `experiments/{ts}.json` 队列；
 //! 4. 执行器（`spawn_runner`，main.rs 独立 spawn）消费队列：RecursiveRunner
 //!    以 Execution 最小预算执行 → 对任务产出跑变体契约（SkillEngine 机械检查，
 //!    零 LLM 裁决 —— 探索裁决符号化，与三权分立 §6.6 一致）→ CheckResult 入队
-//!    pending（enqueue_dmn_pending 幂等）→ 删除 experiments 文件。
+//!    pending（enqueue_lianshan_pending 幂等）→ 删除 experiments 文件。
 //!
 //! 护栏：探索任务不产生新探索任务（无递归）；默认关闭（config 开关）；每窗口限量
-//! （active_learning_max_per_window，DMN Consumer 侧限制入队数）。
+//! （active_learning_max_per_window，Lianshan Consumer 侧限制入队数）。
 
 use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
-use crate::infra::knowledge::LiluoClient;
+use crate::infra::knowledge::GuizangClient;
 use crate::infra::trace::save_json_atomic;
 use crate::orchestration::skill_engine::SkillEngine;
 use crate::orchestration::runner::RecursiveRunner;
@@ -52,7 +52,7 @@ pub fn pick_exploration_target(
     assets
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.status == "active" && a.variant_of.is_some())
+        .filter(|(_, a)| a.status == "active" && a.variant_of.is_some() && a.safe_for_exploration)
         .max_by(|(_, a), (_, b)| {
             let sa = exploration_score(a, n_total, weights, posterior);
             let sb = exploration_score(b, n_total, weights, posterior);
@@ -71,7 +71,14 @@ fn exploration_score(
 ) -> f64 {
     let n_node: f64 = a.checks.iter().map(|c| c.stats.n as f64).sum();
     if n_node < 1.0 {
-        return f64::MAX;
+        // V50：冷启动 = 先验 μ + 有限探索分（非 f64::MAX）——
+        // 先验 μ 由 confidence 映射（α=1+k·c, β=1+k·(1−c)，k=10 与 §6.4.1 一致），
+        // 探索项 = C·√(ln n_total / (0+1))。避免「最大探索分」粗暴遍历。
+        let c = a.confidence.clamp(0.0, 1.0);
+        let alpha = 1.0 + 10.0 * c;
+        let beta = 1.0 + 10.0 * (1.0 - c);
+        let prior_mu = alpha / (alpha + beta);
+        return prior_mu + UCB_C * n_total.ln().sqrt();
     }
     let mu = posterior
         .get(&a.id)
@@ -113,12 +120,12 @@ pub fn build_exploration_task(asset: &VerificationAsset) -> String {
     )
 }
 
-/// 生成探索任务并写入 experiments/ 队列（DMN Consumer 空闲窗口调用，每窗口限量）。
+/// 生成探索任务并写入 experiments/ 队列（Lianshan Consumer 空闲窗口调用，每窗口限量）。
 ///
 /// # Returns
 /// 入队的探索任务数（0 = 无候选 / 已达窗口限量 / 队列非空）。
 pub async fn enqueue_exploration_task(
-    liluo: &LiluoClient,
+    guizang: &GuizangClient,
     data_root: &Path,
     weights: &RewardWeights,
     max_per_window: u32,
@@ -140,9 +147,9 @@ pub async fn enqueue_exploration_task(
         }
     }
 
-    let assets = liluo.load_all_verifications().await?;
+    let assets = guizang.load_all_verifications().await?;
     // V33/MVP-3.5: 贝叶斯后验 map（id → 后验均值；§6.4.1 探索分升级）
-    let posterior: BTreeMap<String, f64> = liluo
+    let posterior: BTreeMap<String, f64> = guizang
         .load_all_models()
         .await?
         .iter()
@@ -174,15 +181,15 @@ pub async fn enqueue_exploration_task(
     Ok(queued)
 }
 
-/// 探索执行器入口（main.rs `--with-dmn` 时 spawn；开关关闭 → 不启动）。
+/// 探索执行器入口（main.rs `--with-lianshan` 时 spawn；开关关闭 → 不启动）。
 pub fn spawn_runner(
     factory: Arc<AgentFactory>,
     config: TaijiConfig,
     data_root: &Path,
     cancel: CancellationToken,
-    liluo: Arc<LiluoClient>,
+    guizang: Arc<GuizangClient>,
 ) -> Option<tokio::task::JoinHandle<()>> {
-    if !config.runtime.dmn.active_learning_enabled {
+    if !config.runtime.lianshan.active_learning_enabled {
         return None;
     }
     let data_root = data_root.to_path_buf();
@@ -193,7 +200,7 @@ pub fn spawn_runner(
                 tracing::info!("[active_learning] runner cancelled, exiting");
                 return;
             }
-            match run_experiment_queue(&runner, &liluo, &data_root, &cancel).await {
+            match run_experiment_queue(&runner, &guizang, &data_root, &cancel).await {
                 Ok(processed) if processed == 0 => {
                     // 空闲等待
                     tokio::select! {
@@ -225,7 +232,7 @@ pub fn spawn_runner(
 /// 本次处理的探索任务数。
 async fn run_experiment_queue(
     runner: &RecursiveRunner,
-    liluo: &LiluoClient,
+    guizang: &GuizangClient,
     data_root: &Path,
     cancel: &CancellationToken,
 ) -> Result<u32, TaijiError> {
@@ -277,13 +284,14 @@ async fn run_experiment_queue(
             Ok(result) => {
                 // 对产物跑变体契约（机械检查，零 LLM 裁决 —— §6.6 L0/L1）
                 let task_dir = data_root.join("tasks").join(&result.task_id);
-                if let Some(asset) = liluo.load_verification(asset_id).await? {
+                if let Some(asset) = guizang.load_verification(asset_id).await? {
                     let report = SkillEngine::run_checks(&[asset], &task_dir).await;
                     let checks = report.results;
                     // CheckResult 入队 pending（幂等覆盖写；同任务重复探索覆盖不重复学习）。
                     // V44 去分区化：回传统一落根（model_key 由 pending 内字段承载）。
-                    if let Err(e) = crate::orchestration::tpn_cycle::enqueue_dmn_pending(
+                    if let Err(e) = crate::orchestration::zhouyi::enqueue_lianshan_pending(
                         data_root,
+                        &task_dir,
                         &result.task_id,
                         &checks,
                         &[],
@@ -325,7 +333,7 @@ async fn run_experiment_queue(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::knowledge::LiluoClient;
+    use crate::infra::knowledge::GuizangClient;
     use crate::types::verification::{CheckKind, CheckSeverity, CheckSpec, CheckStats};
 
     fn mk_asset(id: &str, n: u64, pass_count: u64, variant_of: Option<&str>) -> VerificationAsset {
@@ -346,6 +354,7 @@ mod tests {
             vec!["general".into()],
         );
         a.variant_of = variant_of.map(|v| v.to_string());
+        a.safe_for_exploration = true; // 测试资产默认允许探索（安全隔离在专门测试覆盖）
         a
     }
 
@@ -360,6 +369,19 @@ mod tests {
         // 变体（n=0 → f64::MAX 探索分）优先于根资产
         let idx = pick_exploration_target(&assets, &RewardWeights::default(), &BTreeMap::new()).expect("candidate");
         assert_eq!(assets[idx].id, "root-a-v1", "unverified variant has max exploration score");
+    }
+
+    #[test]
+    fn pick_exploration_target_skips_unsafe_variant() {
+        let mut safe = mk_asset("v-safe", 0, 0, Some("root"));
+        safe.safe_for_exploration = true;
+        let mut unsafe_ = mk_asset("v-unsafe", 0, 0, Some("root"));
+        unsafe_.safe_for_exploration = false;
+        let assets = vec![safe, unsafe_];
+        // 只有 safe 变体进入候选（V50 危险隔离）
+        let idx = pick_exploration_target(&assets, &RewardWeights::default(), &BTreeMap::new())
+            .expect("safe candidate exists");
+        assert_eq!(assets[idx].id, "v-safe", "unsafe variant filtered out");
     }
 
     #[test]
@@ -390,22 +412,22 @@ mod tests {
         tokio::fs::create_dir_all(&dir).await.unwrap();
         let knowledge = dir.join("knowledge");
         tokio::fs::create_dir_all(&knowledge).await.unwrap();
-        let liluo = LiluoClient::new(&knowledge).await.unwrap();
+        let guizang = GuizangClient::new(&knowledge).await.unwrap();
 
         // 一个低 N 变体 → 入队 1 个
         let mut root = mk_asset("x-a", 10, 9, None);
-        liluo.save_verification(&mut root).await.unwrap();
+        guizang.save_verification(&mut root).await.unwrap();
         let mut v1 = mk_asset("x-a-v1", 0, 0, Some("x-a"));
-        liluo.save_verification(&mut v1).await.unwrap();
+        guizang.save_verification(&mut v1).await.unwrap();
 
-        let queued = enqueue_exploration_task(&liluo, &dir, &RewardWeights::default(), 1)
+        let queued = enqueue_exploration_task(&guizang, &dir, &RewardWeights::default(), 1)
             .await
             .unwrap();
         assert_eq!(queued, 1);
         assert!(dir.join("experiments").join("x-a-v1.json").exists());
 
         // 队列非空 → 防堆积：不再入队
-        let queued2 = enqueue_exploration_task(&liluo, &dir, &RewardWeights::default(), 1)
+        let queued2 = enqueue_exploration_task(&guizang, &dir, &RewardWeights::default(), 1)
             .await
             .unwrap();
         assert_eq!(queued2, 0, "queue busy — no stacking");

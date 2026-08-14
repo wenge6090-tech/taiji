@@ -18,7 +18,7 @@ implementations:
   params: {}
   severity: hard
   pass_condition: deliverables/ 下至少存在一个文件（任意扩展名）
-agent_target: CausalAgent
+agent_target: YinAgent
 confidence: 0.8
 version: 1
 status: active

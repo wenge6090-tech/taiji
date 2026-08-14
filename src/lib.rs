@@ -1,10 +1,10 @@
-// taiji — lightweight AGI cognitive kernel (TPN-DMN-归藏)
+// taiji — lightweight AGI cognitive kernel (Zhouyi-Lianshan-归藏)
 //
 // Module structure (7-layer):
 //   L0 types          — foundational data types
 //   L1 infra          — infrastructure (config, knowledge, providers, trace, etc.)
 //   L2 hooks          — Rig AgentHook implementations (safety, trace)
-//   L3 agents         — transient Rig Agents (meta, fitting, causal) + tools
+//   L3 agents         — transient Rig Agents (meta, yang, yin) + tools
 //   L4 orchestration  — runner, constraint engine, trigger engine, cognition evolver
 //   L5 mcp            — MCP server/client
 //   L6 ws             — WebSocket event server (frontend bridge)
@@ -20,7 +20,7 @@ pub mod ws;
 
 // Re-export key types for convenience
 pub use types::{
-    task::{Checkpoint, ChildResultSummary, CyclePhase, DecomposeResult, SubtaskSpec, Task, TaskStatus, TPNResult},
+    task::{Checkpoint, ChildResultSummary, CyclePhase, DecomposeResult, SubtaskSpec, Task, TaskStatus, ZhouyiResult},
     agent::MetaContext,
     verification::{VerificationReport, ConvergenceDecision, VerificationRoute, ConvergenceStatus},
 };

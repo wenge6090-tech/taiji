@@ -199,8 +199,8 @@ impl WsServer {
                     let r = crate::ws::handler::handle_get_task_tree(&root_task_id, &st);
                     to_response(&request_id, r)
                 }
-                ClientMessage::GetTpnState { task_id, .. } => {
-                    let r = crate::ws::handler::handle_get_tpn_state(&task_id, &st);
+                ClientMessage::GetZhouyiState { task_id, .. } => {
+                    let r = crate::ws::handler::handle_get_zhouyi_state(&task_id, &st);
                     to_response(&request_id, r)
                 }
                 ClientMessage::ChatMessage {
@@ -263,7 +263,7 @@ fn request_id_of(msg: &ClientMessage) -> &str {
         | ClientMessage::SubmitReview { request_id, .. }
         | ClientMessage::ListTasks { request_id, .. }
         | ClientMessage::GetTaskTree { request_id, .. }
-        | ClientMessage::GetTpnState { request_id, .. }
+        | ClientMessage::GetZhouyiState { request_id, .. }
         | ClientMessage::ChatMessage { request_id, .. } => request_id,
     }
 }

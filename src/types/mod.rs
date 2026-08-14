@@ -5,3 +5,5 @@ pub mod execution;
 pub mod task_spec;
 pub mod plan;
 pub mod frontend;
+pub mod manifold;
+pub mod ontology;

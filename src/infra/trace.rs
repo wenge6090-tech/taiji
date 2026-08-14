@@ -9,7 +9,7 @@ use std::sync::OnceLock;
 const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024; // 10MB
 const MAX_GENERATIONS: u32 = 5;
 
-/// TPN execution trace writer (JSONL format, 10MB rotation).
+/// Zhouyi execution trace writer (JSONL format, 10MB rotation).
 pub struct TraceWriter {
     path: PathBuf,
 }
@@ -199,7 +199,7 @@ impl TraceWriter {
 
 // ---------------------------------------------------------------------------
 // Persistence helpers — atomic JSON save + graceful load
-// Used by TpnCycle, FittingAgent, CausalAgent, MetaAgent for checkpoint
+// Used by ZhouyiCycle, YangAgent, YinAgent, MetaAgent for checkpoint
 // and conversation-history persistence.
 // ---------------------------------------------------------------------------
 

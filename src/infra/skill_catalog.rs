@@ -15,14 +15,15 @@ use std::collections::HashMap;
 pub enum ToolProfile {
     /// 完整工具集（强模型 / 默认）。
     Full,
-    /// 最小集（弱模型路由——隐藏高代价执行体；阴判据保留，验证闭环不断）。
+    /// 最小集（弱模型路由——隐藏高代价联网；阴判据保留，验证闭环不断）。
     Minimal,
 }
 
 /// 加载合并视图（元层 ∪ 资产层，同 id 资产优先）。
 ///
-/// `profile` 过滤执行体：`Minimal` profile 隐藏 `RecursiveDecompose`/`Webfetch`
-/// 等重工具（弱模型路由）；元层判据（Verify/Converge）不受 profile 影响。
+/// `profile` 过滤执行体：`Minimal` profile 隐藏 `Webfetch`（高代价联网；
+/// V47 起不再隐藏 RecursiveDecompose——拆解正是弱模型规避超限的核心手段）；
+/// 元层判据（Verify/Converge）不受 profile 影响。
 pub async fn load_skill_catalog(
     guizang: &crate::infra::knowledge::GuizangClient,
     category: SkillCategory,
@@ -49,18 +50,19 @@ pub async fn load_skill_catalog(
 
 /// Minimal profile 下隐藏的 Skill（弱模型路由）。
 ///
-/// 隐藏高阶编排/联网能力，保留 read/write/bash + search 基础集——
-/// 任务基础执行与验证闭环仍可用（元层判据不受影响）。
+/// V47（BCP §8.14）：仅隐藏 webfetch（高代价联网）；recursive-decompose 不再
+/// 隐藏——拆解正是弱模型（小上下文）规避上下文超限的核心手段。保留
+/// read/write/bash + search 基础集——任务基础执行与验证闭环仍可用。
 fn is_profile_hidden(s: &SkillAsset) -> bool {
     let cat = s.effective_category();
     // 仅过滤阳面执行体；阴面判据保留（验证闭环不能断）。
     if !matches!(cat, Some(SkillCategory::Orch) | Some(SkillCategory::Exec)) {
         return false;
     }
-    // 隐藏高代价工具：编排分解 + 网页抓取。
+    // 仅隐藏高代价联网工具。
     s.implementations
         .iter()
-        .any(|i| matches!(i.kind, SkillKind::RecursiveDecompose | SkillKind::Webfetch))
+        .any(|i| matches!(i.kind, SkillKind::Webfetch))
 }
 
 /// 合并视图域 dual 解析：在已加载的 catalog 中查找对偶资产。
@@ -74,9 +76,10 @@ mod tests {
 
     #[test]
     fn test_is_profile_hidden_minimal() {
-        // recursive-decompose 隐藏；read 保留；阴判据全保留。
+        // V47：recursive-decompose 不再隐藏（拆解是弱模型规避超限的手段）；
+        // webfetch 隐藏；read 保留；阴判据全保留。
         let rd = meta_skill_by_id("recursive-decompose");
-        assert!(is_profile_hidden(&rd));
+        assert!(!is_profile_hidden(&rd));
         let rd_w = meta_skill_by_id("webfetch");
         assert!(is_profile_hidden(&rd_w));
         let read = meta_skill_by_id("read");
@@ -108,13 +111,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_load_skill_catalog_minimal_filters_recursive_decompose() {
+    async fn test_load_skill_catalog_minimal_keeps_recursive_decompose() {
         let dir = tempfile_dir();
         let guizang = crate::infra::knowledge::GuizangClient::new(&dir).await.expect("guizang init");
         let orch = load_skill_catalog(&guizang, SkillCategory::Orch, ToolProfile::Minimal)
             .await
             .expect("orch load");
-        assert!(orch.is_empty(), "minimal profile 隐藏 recursive-decompose → orch 空");
+        assert_eq!(
+            orch.len(),
+            1,
+            "V47: minimal profile 保留 recursive-decompose → orch 1 个"
+        );
 
         let orch_full = load_skill_catalog(&guizang, SkillCategory::Orch, ToolProfile::Full)
             .await

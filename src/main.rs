@@ -19,11 +19,11 @@ enum Command {
         /// Resume an interrupted/failed task by ID (reuses task dir + recovery chain)
         #[arg(long)]
         resume: Option<String>,
-        /// Activate the DMN Consumer (passive learning — backprop check stats)
+        /// Activate the Lianshan Consumer (passive learning — backprop check stats)
         #[arg(long)]
-        with_dmn: bool,
+        with_lianshan: bool,
     },
-    /// Initialize workspace (.taiji/ + 理络 knowledge store)
+    /// Initialize workspace (.taiji/ + 归藏 knowledge store)
     Init,
     /// Restore seed assets from an existing model partition directory
     /// (prompts/ + verifications/) into the knowledge root (V44 去分区化恢复工具)。
@@ -45,8 +45,10 @@ enum Command {
     },
     /// List tasks
     List,
-    /// Show DMN / cognition status
+    /// Show Lianshan / cognition status
     Status,
+    /// Migrate legacy persisted values in task dirs (V45 曾用名→新值，一次性)
+    Migrate,
     /// Start MCP server for tool integration
     Mcp,
     /// Serve the taiji-web frontend (pure-Web mode): HTTP static hosting +
@@ -73,8 +75,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::Run {
             description,
             resume,
-            with_dmn,
-        } => cmd_run(description, resume, with_dmn).await?,
+            with_lianshan,
+        } => cmd_run(description, resume, with_lianshan).await?,
         Command::Init => cmd_init().await?,
         Command::Seed { model_key } => cmd_seed(&model_key).await?,
         Command::Trace {
@@ -84,6 +86,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         } => cmd_trace(&task_id, tree, tail).await?,
         Command::List => cmd_list()?,
         Command::Status => cmd_status()?,
+        Command::Migrate => cmd_migrate().await?,
         Command::Mcp => cmd_mcp().await?,
         Command::Serve { port, no_open } => cmd_serve(port, no_open).await?,
     }
@@ -98,7 +101,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 async fn cmd_run(
     description: Vec<String>,
     resume: Option<String>,
-    with_dmn: bool,
+    with_lianshan: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let desc = description.join(" ");
     let config = load_config()?;
@@ -107,28 +110,29 @@ async fn cmd_run(
     // Provider registry (LLM clients).
     let factory = build_engine(&config).await?;
 
-    // ── V33/MVP-2: --with-dmn 激活 DMN Consumer（被动学习 — BCP §6.4/§8.23）──
-    // TPN PASS 入队 pending/（tpn_cycle.rs enqueue_dmn_pending）→ 本进程内
+    // ── V33/MVP-2: --with-lianshan 激活 Lianshan Consumer（被动学习 — BCP §6.4/§8.23）──
+    // Zhouyi PASS 入队 pending/（zhouyi.rs enqueue_lianshan_pending）→ 本进程内
     // 消费者单写归藏统计。MVP 时序：任务结束后等待 3s（消费者 1s 首扫 + 处理）
     // 再退出；正式生命周期（serve 常驻/主动学习）归 MVP-3。
-    let mut dmn_handle: Option<(
+    let mut lianshan_handle: Option<(
+        tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
         tokio::task::JoinHandle<()>,
         tokio_util::sync::CancellationToken,
     )> = None;
-    if with_dmn {
+    if with_lianshan {
         let evolver = Arc::new(
             taiji::orchestration::cognition_evolver::CognitionEvolver::new(
                 factory.guizang.clone(),
             ),
         );
         let cancel = tokio_util::sync::CancellationToken::new();
-        let dmn_config = config.runtime.dmn.clone();
-        let consumer = taiji::orchestration::dmn_consumer::DmnConsumer::new(
+        let lianshan_config = config.runtime.lianshan.clone();
+        let consumer = taiji::orchestration::lianshan::LianshanConsumer::new(
             evolver,
             cancel.clone(),
             &data_root,
-            dmn_config.clone(),
+            lianshan_config.clone(),
         );
         // V33/MVP-3 主动学习执行器（默认关闭；开启时消费 experiments/ 队列）
         // V44：探索目标直接使用根级资产树。
@@ -139,11 +143,25 @@ async fn cmd_run(
             cancel.clone(),
             factory.guizang.clone(),
         );
-        dmn_handle = Some((consumer.spawn(), al_handle.unwrap_or_else(|| tokio::task::spawn(async {})), cancel));
+        // V50 编译执行器（默认关闭；开启时消费 compile/ 队列，§6.0）
+        let compile_handle = taiji::orchestration::compile::spawn_compiler(
+            factory.clone(),
+            config.clone(),
+            &data_root,
+            cancel.clone(),
+            factory.guizang.clone(),
+        );
+        lianshan_handle = Some((
+            consumer.spawn(),
+            al_handle.unwrap_or_else(|| tokio::task::spawn(async {})),
+            compile_handle.unwrap_or_else(|| tokio::task::spawn(async {})),
+            cancel,
+        ));
         tracing::info!(
             pending_dir = %data_root.join("pending").display(),
-            active_learning = dmn_config.active_learning_enabled,
-            "--with-dmn: DMN Consumer spawned (passive learning)"
+            active_learning = lianshan_config.active_learning_enabled,
+            compile = lianshan_config.compile_enabled,
+            "--with-lianshan: Lianshan Consumer spawned (passive learning)"
         );
     }
 
@@ -155,12 +173,12 @@ async fn cmd_run(
     println!("  Content: {}", result.content);
     println!("  Tools used: {}", result.tools_used.join(", "));
 
-    // ── 等待 DMN Consumer 处理 pending 后退出（MVP 时序修正）──
+    // ── 等待 Lianshan Consumer 处理 pending 后退出（MVP 时序修正）──
     // 固定 3s 不够：消费者 backoff 指数增长（1,2,4,8,16,32,60s），长任务
     // 结束时 backoff 已大，3s 内不会扫描到新 pending。改为轮询 pending
     // 清空（上限 60s，1s 间隔）——pending 目录下的 dead/ 子目录不计。
-    if let Some((handle, al_handle, cancel)) = dmn_handle {
-        tracing::info!("--with-dmn: waiting for DMN Consumer to drain pending/");
+    if let Some((handle, al_handle, compile_handle, cancel)) = lianshan_handle {
+        tracing::info!("--with-lianshan: waiting for Lianshan Consumer to drain pending/");
         let pending_dir = data_root.join("pending");
         for _ in 0..60 {
             let mut remaining = 0usize;
@@ -185,7 +203,8 @@ async fn cmd_run(
         cancel.cancel();
         let _ = handle.await;
         let _ = al_handle.await;
-        tracing::info!("--with-dmn: DMN Consumer stopped");
+        let _ = compile_handle.await;
+        tracing::info!("--with-lianshan: Lianshan Consumer stopped");
     }
 
     Ok(())
@@ -204,7 +223,7 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
         std::fs::create_dir_all(dir)?;
     }
 
-    // Initialize 理络 knowledge store.
+    // Initialize 归藏 knowledge store.
     let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
     match taiji::infra::knowledge::GuizangClient::new(&knowledge_dir).await {
         Ok(_) => {
@@ -219,12 +238,12 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
                 println!("⚠ yang/yin directory migration failed: {e}");
             }
             println!(
-                "✓ 理络 knowledge store initialised at {}",
+                "✓ 归藏 knowledge store initialised at {}",
                 knowledge_dir.display()
             );
         }
         Err(e) => {
-            println!("⚠ 理络 knowledge store initialisation failed: {e}");
+            println!("⚠ 归藏 knowledge store initialisation failed: {e}");
             println!("  The system will run with a sparse (empty) knowledge store");
         }
     }
@@ -351,6 +370,23 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+/// V45 曾用名数据迁移：扫描任务目录，将旧值（FittingDone / BackToTpn /
+/// fitting_system_prompt）替换为新值（YangDone / BackToZhouyi /
+/// yang_system_prompt）。幂等，可重复执行。
+async fn cmd_migrate() -> Result<(), Box<dyn std::error::Error>> {
+    let config = load_config()?;
+    let data_root = std::path::PathBuf::from(&config.data_root);
+    let touched =
+        taiji::infra::migrate::migrate_all(&data_root).await?;
+    println!("taiji migrate:");
+    println!("  Scanned tasks root: {}", data_root.join("tasks").display());
+    println!("  Migrated task dirs: {touched}");
+    if touched == 0 {
+        println!("  （无旧值需迁移——任务目录为空或已是最新格式）");
+    }
+    Ok(())
+}
+
 fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
     let config = load_config()?;
     let data_root = std::path::PathBuf::from(&config.data_root);
@@ -359,7 +395,7 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Workspace: {}", config.workspace);
     println!("  Data root: {}", data_root.display());
     println!(
-        "  理络 knowledge store: {}",
+        "  归藏 knowledge store: {}",
         config.knowledge.data_dir
     );
     println!(
@@ -369,7 +405,7 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
     println!("  Max depth: {}", config.runtime.max_depth);
     println!("  Max rounds: {}", config.runtime.max_rounds);
 
-    // Count pending/dead items in the DMN pending queue.
+    // Count pending/dead items in the Lianshan pending queue.
     let pending_dir = data_root.join("pending");
     let pending_count = if pending_dir.exists() {
         std::fs::read_dir(&pending_dir)
@@ -389,7 +425,7 @@ fn cmd_status() -> Result<(), Box<dyn std::error::Error>> {
         0
     };
 
-    println!("  Pending DMN tasks: {}", pending_count);
+    println!("  Pending Lianshan tasks: {}", pending_count);
     println!("  Completed tasks: {}", task_count);
 
     Ok(())

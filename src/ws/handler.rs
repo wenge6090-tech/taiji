@@ -13,7 +13,7 @@ use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
 use crate::orchestration::runner::RecursiveRunner;
 use crate::orchestration::task_tree_builder::build_task_tree;
-use crate::types::frontend::{TaskTreeSnapshot, TpnPhaseState, YinIntervention};
+use crate::types::frontend::{TaskTreeSnapshot, ZhouyiPhaseState, YinIntervention};
 use crate::types::task::Task;
 
 /// Shared engine snapshot injected into WS request handling.
@@ -30,7 +30,7 @@ pub struct ServeState {
 
 /// Execute a new root task (the `/run` command).
 ///
-/// Runs the recursive TPN loop via [`RecursiveRunner`], then builds and
+/// Runs the recursive Zhouyi loop via [`RecursiveRunner`], then builds and
 /// returns the resulting spindle tree snapshot. The engine broadcasts
 /// `TaskCreated` / `ChildSpawned` events through the event bus as the task
 /// unfolds; this function only returns once the whole recursion converges.
@@ -46,7 +46,7 @@ pub async fn handle_execute_task(
 
 /// Yin-intervention review: write `{data_root}/tasks/{task_id}/review.json`.
 ///
-/// The TPN cycle injects this on resume (approval closed loop).
+/// The Zhouyi cycle injects this on resume (approval closed loop).
 pub fn handle_submit_review(
     intervention: &YinIntervention,
     state: &ServeState,
@@ -102,31 +102,31 @@ pub fn handle_get_task_tree(
     build_task_tree(&state.data_root, root_task_id)
 }
 
-/// Fetch the TPN phase detail of one node, built live from
+/// Fetch the Zhouyi phase detail of one node, built live from
 /// `checkpoint.json` / `meta.json` / `deliverables/` / `trace.jsonl`.
-pub fn handle_get_tpn_state(
+pub fn handle_get_zhouyi_state(
     task_id: &str,
     state: &ServeState,
-) -> Result<TpnPhaseState, TaijiError> {
+) -> Result<ZhouyiPhaseState, TaijiError> {
     let task_dir = state.data_root.join("tasks").join(task_id);
     if !task_dir.is_dir() {
         return Err(TaijiError::Other(format!("任务 {task_id} 不存在")));
     }
 
     // Phase from checkpoint.json
-    let mut current_phase = crate::types::frontend::TpnPhase::Idle;
+    let mut current_phase = crate::types::frontend::ZhouyiPhase::Idle;
     let checkpoint_path = task_dir.join("checkpoint.json");
     if let Ok(content) = std::fs::read_to_string(&checkpoint_path) {
         if let Ok(cp) = serde_json::from_str::<crate::types::task::Checkpoint>(&content) {
             current_phase = match cp.phase {
                 crate::types::task::CyclePhase::MetaDone => {
-                    crate::types::frontend::TpnPhase::Meta
+                    crate::types::frontend::ZhouyiPhase::Meta
                 }
-                crate::types::task::CyclePhase::FittingDone => {
-                    crate::types::frontend::TpnPhase::Fitting
+                crate::types::task::CyclePhase::YangDone => {
+                    crate::types::frontend::ZhouyiPhase::Yang
                 }
-                crate::types::task::CyclePhase::VerifyDone => {
-                    crate::types::frontend::TpnPhase::Causal
+                crate::types::task::CyclePhase::YinDone => {
+                    crate::types::frontend::ZhouyiPhase::Yin
                 }
             };
         }
@@ -139,7 +139,7 @@ pub fn handle_get_tpn_state(
                 task.status,
                 crate::types::task::TaskStatus::Completed
             ) {
-                current_phase = crate::types::frontend::TpnPhase::Converged;
+                current_phase = crate::types::frontend::ZhouyiPhase::Converged;
             }
         }
     }
@@ -178,12 +178,12 @@ pub fn handle_get_tpn_state(
         trace_preview.reverse();
     }
 
-    Ok(TpnPhaseState {
+    Ok(ZhouyiPhaseState {
         task_id: task_id.to_string(),
         current_phase,
         meta_summary: None,
-        fitting_summary: None,
-        causal_verdict: None,
+        yang_summary: None,
+        yin_verdict: None,
         deliverables,
         trace_preview,
     })

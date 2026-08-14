@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { SpindleNode, TpnPhase, TpnPhaseState } from "../types";
+import type { SpindleNode, ZhouyiPhase, ZhouyiPhaseState } from "../types";
 import PhaseDetail from "./PhaseDetail";
 import YinIntervene from "./YinIntervene";
 
@@ -13,17 +13,17 @@ const STATUS_DOT: Record<SpindleNode["status"], string> = {
   AwaitingHumanReview: "bg-node-review",
 };
 
-const TAB_PHASES: TpnPhase[] = ["Meta", "Fitting", "Causal"];
+const TAB_PHASES: ZhouyiPhase[] = ["Meta", "Yang", "Yin"];
 
-const PHASE_TAB_STYLE: Record<TpnPhase, string> = {
+const PHASE_TAB_STYLE: Record<ZhouyiPhase, string> = {
   Meta: "text-purple-400 border-purple-500/50",
-  Fitting: "text-yang border-yang/50",
-  Causal: "text-cyan-400 border-cyan-500/50",
+  Yang: "text-yang border-yang/50",
+  Yin: "text-cyan-400 border-cyan-500/50",
   Idle: "text-slate-400 border-slate-600/50",
   Converged: "text-green-400 border-green-500/50",
 };
 
-export default function TpnPopup({
+export default function ZhouyiPopup({
   node,
   phaseState,
   loading,
@@ -31,13 +31,13 @@ export default function TpnPopup({
   onClose,
 }: {
   node: SpindleNode;
-  phaseState: TpnPhaseState | null;
+  phaseState: ZhouyiPhaseState | null;
   loading: boolean;
   error: string | null;
   onClose: () => void;
 }) {
   const currentPhase = phaseState?.currentPhase ?? node.phase;
-  const [activeTab, setActiveTab] = useState<TpnPhase>(
+  const [activeTab, setActiveTab] = useState<ZhouyiPhase>(
     TAB_PHASES.includes(currentPhase) ? currentPhase : "Meta"
   );
 

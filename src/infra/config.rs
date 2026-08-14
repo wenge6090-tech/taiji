@@ -94,9 +94,9 @@ pub struct RuntimeConfig {
     /// V29 上下文窗口预算（BCP §8.19）：精准 token 计数替换 max_turns 轮次。
     #[serde(default)]
     pub context_limits: ContextLimits,
-    /// V33/MVP-3 DMN 演化配置（§6.3/§6.4：回报权重 / UCB 采样门槛 / 演化激活门槛 / 主动学习）。
+    /// V33/MVP-3 Lianshan 演化配置（§6.3/§6.4：回报权重 / UCB 采样门槛 / 演化激活门槛 / 主动学习）。
     #[serde(default)]
-    pub dmn: DmnConfig,
+    pub lianshan: LianshanConfig,
     /// V37 多级模型路由配置（§8.8 相位级异源裁判）。
     #[serde(default)]
     pub model_routing: ModelRoutingConfig,
@@ -106,7 +106,7 @@ pub struct RuntimeConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ModelRoutingConfig {
-    /// 异源裁判开关（默认 false）。true 且路由候选 ≥2 时，Causal 验证/收敛
+    /// 异源裁判开关（默认 false）。true 且路由候选 ≥2 时，Yin 验证/收敛
     /// 相位用独立验证模型（裁判 ≠ 运动员——「概率系统不验证概率系统」的
     /// 又一缓解，§1.3 self-preference 偏置）。
     #[serde(default)]
@@ -124,7 +124,7 @@ impl Default for RuntimeConfig {
             // 蓝图 §8.6: 默认 600s（10 分钟），允许复杂任务完整执行
             exec_timeout: 600,
             context_limits: ContextLimits::default(),
-            dmn: DmnConfig::default(),
+            lianshan: LianshanConfig::default(),
             model_routing: ModelRoutingConfig::default(),
         }
     }
@@ -139,32 +139,59 @@ impl Default for RuntimeConfig {
 #[serde(default)]
 #[allow(clippy::derivable_impls)]
 pub struct ContextLimits {
-    /// 超限阈值：累计 `usage.input_tokens >= handoff_tokens` → 必须写交接文件
-    /// （failure_reason=context_overflow → BACK_TO_TPN → 阳基于产出递归分解）。
+    /// 模型上下文窗口大小（tokens）。handoff / hard_cutoff 阈值按此比例推导。
+    pub context_window_tokens: u64,
+    /// 交接阈值绝对值覆盖：0 = 按窗口 30% 推导；>0 = 用此绝对值。
+    /// 窗口占用（单次 input_tokens）≥ 阈值 → 必须写交接文件
+    /// （failure_reason=context_overflow → BACK_TO_ZHOUYI → 阳基于产出递归分解）。
     pub handoff_tokens: u64,
-    /// 硬截止阈值：`>= hard_cutoff_tokens` → 写交接文件后直接上报 FAIL
-    /// （预算保护，不进 BACK_TO_* 循环）。
+    /// 硬截止阈值绝对值覆盖：0 = 按窗口 35% 推导；>0 = 用此绝对值。
+    /// 窗口占用 ≥ 阈值 → 写交接文件后直接上报 FAIL（预算保护，不进 BACK_TO_* 循环）。
     pub hard_cutoff_tokens: u64,
     /// 收尾压缩输入截断上限（§8.18 LLM 压缩收尾）：序列化对话截断到此量
     /// （首部 2k 保留任务目标 + 尾部最新状态），防超限路径再花一次大调用。
     pub compress_input_tokens: u64,
 }
 
+impl ContextLimits {
+    /// 交接阈值（单次窗口占用）：显式绝对值优先，否则窗口 30%。
+    /// V48：编排/执行统一，废除 V32 编排 60k 快拆特例（BCP §8.19）。
+    pub fn effective_handoff(&self) -> u64 {
+        if self.handoff_tokens > 0 {
+            self.handoff_tokens
+        } else {
+            self.context_window_tokens * 30 / 100
+        }
+    }
+
+    /// 硬截止阈值（单次窗口占用）：显式绝对值优先，否则窗口 35%。
+    pub fn effective_hard_cutoff(&self) -> u64 {
+        if self.hard_cutoff_tokens > 0 {
+            self.hard_cutoff_tokens
+        } else {
+            self.context_window_tokens * 35 / 100
+        }
+    }
+}
+
 impl Default for ContextLimits {
     fn default() -> Self {
         Self {
-            // BCP §8.19 默认值：250k 交接 / 300k 硬截止，50k 余量即「收尾写交接」预算
-            handoff_tokens: 250_000,
-            hard_cutoff_tokens: 300_000,
+            // BCP §8.19 默认值（V48）：1M 窗口（deepseek-v4-flash），
+            // handoff/hard_cutoff 默认 0 = 按窗口比例推导（30% / 35%），
+            // 35%-30% = 5%（=50k）余量即「收尾写交接」预算。
+            context_window_tokens: 1_000_000,
+            handoff_tokens: 0,
+            hard_cutoff_tokens: 0,
             // BCP §8.18：收尾压缩输入截断上限（字符近似，1 字符 ≤ 1 token 保守上界）
             compress_input_tokens: 20_000,
         }
     }
 }
 
-/// V33/MVP-3 DMN 演化配置（§6.3 UCB / §6.4 回报与主动学习 / §8.12 激活门槛）。
+/// V33/MVP-3 Lianshan 演化配置（§6.3 UCB / §6.4 回报与主动学习 / §8.12 激活门槛）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct DmnConfig {
+pub struct LianshanConfig {
     /// 回报函数权重（§6.4 默认 0.5/0.3/0.2/0.1）。
     #[serde(default)]
     pub reward_weights: crate::types::verification::RewardWeights,
@@ -185,7 +212,7 @@ pub struct DmnConfig {
     pub active_learning_max_per_window: u32,
     /// V33/MVP-3.5 贝叶斯后验开关（§6.4.1）：true → 演化决策用后验均值/σ_beta；
     /// false → 回退频率路径（MVP-3 行为）。
-    #[serde(default = "DmnConfig::default_bayesian_enabled")]
+    #[serde(default = "LianshanConfig::default_bayesian_enabled")]
     pub bayesian_enabled: bool,
     /// 先验强度 k（§6.4.1）：α = 1 + k·confidence，β = 1 + k·(1−confidence)。
     /// k 大 → 低采样结果更贴先验（人工种子权威性高）。
@@ -195,15 +222,21 @@ pub struct DmnConfig {
     /// 来源 URL + LLM 语义复核）。默认 0 = 不审计；激活条件后置（MVP-4 只落字段）。
     #[serde(default)]
     pub audit_rate: f64,
+    /// V50 编译任务开关（§6.0 编译任务契约；默认关闭——编译涉及 LLM 调用，opt-in）。
+    #[serde(default)]
+    pub compile_enabled: bool,
+    /// V50 编译任务独立 token 预算配额（§6.0；0 = 不限）。
+    #[serde(default)]
+    pub compile_budget: u32,
 }
 
-impl DmnConfig {
+impl LianshanConfig {
     fn default_bayesian_enabled() -> bool {
         true
     }
 }
 
-impl Default for DmnConfig {
+impl Default for LianshanConfig {
     fn default() -> Self {
         Self {
             reward_weights: crate::types::verification::RewardWeights::default(),
@@ -215,6 +248,8 @@ impl Default for DmnConfig {
             bayesian_enabled: true,
             audit_rate: 0.0,
             prior_strength: 10.0,
+            compile_enabled: false,
+            compile_budget: 20_000,
         }
     }
 }

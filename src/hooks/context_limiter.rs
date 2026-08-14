@@ -1,11 +1,12 @@
 //! ContextLimiter — V29 上下文窗口预算（BCP §8.19）。
 //!
-//! 精准 token 统计替换 max_turns 轮次：`on_completion_response` 累计
+//! 精准 token 统计替换 max_turns 轮次：`on_completion_response` 记录
 //! `response.usage.input_tokens`（provider 报告的真实请求 token 数，含历史
-//! 重放与工具结果），累计值 >= handoff_tokens 返回
-//! `HookAction::Terminate("context_overflow")`（必须产出交接文件 → BACK_TO_TPN
-//! 拆解）；>= hard_cutoff_tokens 返回 `Terminate("hard_cutoff")`（硬截止 →
-//! 直接 FAIL，预算保护）。
+//! 重放与工具结果）作为**单次窗口占用**（V48 起不再跨轮累计——input_tokens
+//! 每轮都含完整历史重放，累计会多重计数同一段历史）。单次值 >= handoff
+//! 返回 `HookAction::Terminate("context_overflow")`（必须产出交接文件 →
+//! BACK_TO_ZHOUYI 拆解）；>= hard_cutoff 返回 `Terminate("hard_cutoff")`
+//! （硬截止 → 直接 FAIL，预算保护）。
 //!
 //! 轮次计数器（max_rounds / max_cycles）降级为循环防护，不再承担上下文管理。
 
@@ -17,7 +18,7 @@ use std::sync::{Arc, Mutex};
 /// 已触发的预算限制类型。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKind {
-    /// >= handoff_tokens：必须写交接文件，BACK_TO_TPN 拆解（粒度错误信号）
+    /// >= handoff_tokens：必须写交接文件，BACK_TO_ZHOUYI 拆解（粒度错误信号）
     Handoff,
     /// >= hard_cutoff_tokens：硬截止，直接 FAIL（预算保护）
     HardCutoff,
@@ -28,6 +29,7 @@ pub enum LimitKind {
 pub struct ContextLimiter {
     handoff: u64,
     hard: u64,
+    /// 最新窗口占用（tokens）——单次 input_tokens，非跨轮累计（V48）。
     used: Arc<AtomicU64>,
     triggered: Arc<Mutex<Option<LimitKind>>>,
 }
@@ -42,13 +44,13 @@ impl ContextLimiter {
         }
     }
 
-    /// 已触发的限制类型（供 Fitting 错误路径映射为 ContextOverflow / HardCutoff）。
+    /// 已触发的限制类型（供 Yang 错误路径映射为 ContextOverflow / HardCutoff）。
     /// 未触发返回 None。
     pub fn triggered(&self) -> Option<LimitKind> {
         self.triggered.lock().map(|g| *g).unwrap_or(None)
     }
 
-    /// 累计上下文 token 数（审计 / 冒烟验证）。
+    /// 最近一次请求的窗口占用 token 数（审计 / 冒烟验证）。
     pub fn tokens_used(&self) -> u64 {
         self.used.load(Ordering::Relaxed)
     }
@@ -60,11 +62,12 @@ impl<M: CompletionModel> PromptHook<M> for ContextLimiter {
         _prompt: &Message,
         response: &CompletionResponse<M::Response>,
     ) -> HookAction {
-        let used = self
-            .used
-            .fetch_add(response.usage.input_tokens, Ordering::Relaxed)
-            + response.usage.input_tokens;
-        tracing::debug!(tokens_used = used, "ContextLimiter: {used} tokens used");
+        // V48：单次窗口占用语义（BCP §8.19）。input_tokens 每轮都含完整历史
+        // 重放，本身即当前窗口占用——取单次值而非跨轮累计（累计会多重计数
+        // 同一段历史，导致窗口远未用满即触顶假爆）。
+        let used = response.usage.input_tokens;
+        self.used.store(used, Ordering::Relaxed);
+        tracing::debug!(tokens_used = used, "ContextLimiter: window occupancy {used} tokens");
 
         if used >= self.hard {
             if let Ok(mut g) = self.triggered.lock() {
@@ -122,7 +125,28 @@ mod tests {
     #[tokio::test]
     async fn test_handoff_threshold_triggers_terminate() {
         let limiter = ContextLimiter::new(100, 200);
-        // 60 + 60 = 120 >= 100 → Handoff
+        // 单次 input_tokens=120 >= 100 → Handoff（V48：单次窗口占用语义）
+        let action = <ContextLimiter as PromptHook<TestCompletionModel>>::on_completion_response(
+            &limiter,
+            &Message::user("u"),
+            &response_with_input_tokens(120),
+        )
+        .await;
+        assert_eq!(
+            action,
+            HookAction::Terminate {
+                reason: "context_overflow".into()
+            }
+        );
+        assert_eq!(limiter.triggered(), Some(LimitKind::Handoff));
+        assert_eq!(limiter.tokens_used(), 120);
+    }
+
+    #[tokio::test]
+    async fn test_no_cumulative_double_counting() {
+        // V48 回归：窗口占用取单次值，不跨轮累计——两次 60 不等于 120。
+        // 历史在每轮 input_tokens 中已重放，累计会多重计数同一段历史。
+        let limiter = ContextLimiter::new(100, 200);
         let _ = <ContextLimiter as PromptHook<TestCompletionModel>>::on_completion_response(
             &limiter,
             &Message::user("u"),
@@ -135,14 +159,9 @@ mod tests {
             &response_with_input_tokens(60),
         )
         .await;
-        assert_eq!(
-            action,
-            HookAction::Terminate {
-                reason: "context_overflow".into()
-            }
-        );
-        assert_eq!(limiter.triggered(), Some(LimitKind::Handoff));
-        assert_eq!(limiter.tokens_used(), 120);
+        assert_eq!(action, HookAction::Continue);
+        assert_eq!(limiter.triggered(), None);
+        assert_eq!(limiter.tokens_used(), 60);
     }
 
     #[tokio::test]

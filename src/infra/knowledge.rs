@@ -27,7 +27,12 @@
 //! - V38：标签检索实时目录扫描（`scan_assets`），无持久化索引需维护。
 
 use crate::infra::error::TaijiError;
+use crate::infra::git_backend::{CommitEntry, DiffEntry, GitBackend};
 use crate::types::agent::{PromptAsset, VerificationAsset};
+use crate::types::manifold::ManifoldTopology;
+use crate::types::ontology::{
+    CooccurPair, FailureGroup, OntologyEdge, OntologyRule, SemanticType, SemanticTypeFile,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -181,11 +186,11 @@ impl IndexData {
 pub struct GuizangClient {
     /// knowledge 根目录（构造时传入）——资产树 + model_stats.yaml 所在层。
     data_dir: PathBuf,
+    /// 版本控制后端（BCP §10.0：归藏 = git 版本控制的库）。
+    git: GitBackend,
 }
 
-/// Compatibility alias — 旧代码中的 `LiluoClient` 等效于 `GuizangClient`。
-pub type LiluoClient = GuizangClient;
-
+/// Compatibility alias — 旧代码中的 `GuizangClient` 等效于 `GuizangClient`。
 impl GuizangClient {
     /// Directory name for each asset type within `data_dir`.
     fn type_dir_name(type_: &str) -> &'static str {
@@ -222,8 +227,10 @@ impl GuizangClient {
                 context: format!("failed to create knowledge root {:?}: {e}", data_dir),
             }
         })?;
+        let git = GitBackend::init(data_dir).await?;
         let this = Self {
             data_dir: data_dir.to_path_buf(),
+            git,
         };
         this.ensure_dirs().await?;
         Ok(this)
@@ -234,8 +241,10 @@ impl GuizangClient {
     /// V44：与 [`new`](Self::new) 同语义（根级资产树）；不建目录，
     /// 适合只读/迁移场景。
     pub async fn new_sparse(data_dir: &Path) -> Result<Self, TaijiError> {
+        let git = GitBackend::init(data_dir).await?;
         Ok(Self {
             data_dir: data_dir.to_path_buf(),
+            git,
         })
     }
 
@@ -243,10 +252,10 @@ impl GuizangClient {
     async fn ensure_dirs(&self) -> Result<(), TaijiError> {
         let dirs = [
             self.data_dir.join("models"),
-            self.data_dir.join("yang/prompts"),           // 阳轨 FittingAgent 提示词
+            self.data_dir.join("yang/prompts"),           // 阳轨 YangAgent 提示词
             self.data_dir.join("yang/skills/orch"),       // 阳轨编排 Skill
             self.data_dir.join("yang/skills/exec"),       // 阳轨执行 Skill
-            self.data_dir.join("yin/prompts"),            // 阴轨 CausalAgent 提示词
+            self.data_dir.join("yin/prompts"),            // 阴轨 YinAgent 提示词
             self.data_dir.join("yin/skills/verify"),      // 阴轨验证 Skill（BCP §10.1）
             self.data_dir.join("yin/skills/converge"),    // 阴轨收敛 Skill（BCP §10.1）
         ];
@@ -269,7 +278,7 @@ impl GuizangClient {
         } else {
             Err(TaijiError::KnowledgeStoreUnavailable {
                 context: format!(
-                    "理络 data directory does not exist: {:?}",
+                    "归藏 data directory does not exist: {:?}",
                     self.data_dir
                 ),
             })
@@ -279,6 +288,29 @@ impl GuizangClient {
     /// Return the knowledge directory path (replaces `collection_name()`).
     pub fn knowledge_dir(&self) -> &Path {
         &self.data_dir
+    }
+
+    // ── 版本控制（BCP §10.0：归藏 = git 版本控制的库）───────────────────
+
+    /// 提交当前知识树为一次版本快照，返回 commit id。
+    /// commit 失败上抛（归藏 I/O 硬错误，AGENTS.md §8 无降级原则）。
+    pub async fn commit(&self, msg: &str) -> Result<String, TaijiError> {
+        self.git.commit(msg).await
+    }
+
+    /// 版本历史（最旧在前）。
+    pub async fn history(&self) -> Result<Vec<CommitEntry>, TaijiError> {
+        self.git.log().await
+    }
+
+    /// 回滚到指定 commit（清空当前树 + 从快照恢复，保留 .history）。
+    pub async fn rollback(&self, commit_id: &str) -> Result<(), TaijiError> {
+        self.git.rollback(commit_id).await
+    }
+
+    /// 对比两个 commit 的差异（路径相对知识根）。
+    pub async fn diff(&self, a: &str, b: &str) -> Result<Vec<DiffEntry>, TaijiError> {
+        self.git.diff(a, b).await
     }
 
     // ── Model stats（V36 元权重表，根级共享）──────────────────────────
@@ -316,7 +348,7 @@ impl GuizangClient {
         }
     }
 
-    /// 原子写根级 model_stats.yaml（DMN 单写者调用；TPN 只读）。
+    /// 原子写根级 model_stats.yaml（Lianshan 单写者调用；Zhouyi 只读）。
     pub async fn save_model_stats(
         &self,
         stats: &std::collections::BTreeMap<String, crate::types::agent::ModelStatsRow>,
@@ -460,6 +492,9 @@ impl GuizangClient {
             }
         })?;
 
+        // 版本控制（BCP §10.0）：每次写入 = 一次 commit（可审计/可回滚）。
+        self.git.commit(&format!("save {type_}:{id}")).await?;
+
         Ok(())
     }
 
@@ -581,13 +616,13 @@ impl GuizangClient {
     // ── Prompt asset convenience methods ──────────────────────────────
 
     /// Save a [`PromptAsset`] to the appropriate directory:
-    /// - `agent_target="FittingAgent"` → `yang/prompts/`（BCP §10.1 阳轨）
-    /// - `agent_target="CausalAgent"` → `yin/prompts/`（BCP §10.1 阴轨）
+    /// - `agent_target="YangAgent"` → `yang/prompts/`（BCP §10.1 阳轨）
+    /// - `agent_target="YinAgent"` → `yin/prompts/`（BCP §10.1 阴轨）
     /// - 空或其他 → `prompts/`（旧兼容）
     pub async fn save_prompt(&self, prompt: &mut PromptAsset) -> Result<(), TaijiError> {
         let type_str = match prompt.agent_target.as_str() {
-            "FittingAgent" => "yang_prompt",
-            "CausalAgent" => "yin_prompt",
+            "YangAgent" => "yang_prompt",
+            "YinAgent" => "yin_prompt",
             _ => "prompt",
         };
         prompt.asset_type = type_str.into();
@@ -597,7 +632,7 @@ impl GuizangClient {
         Ok(())
     }
 
-    /// Load a [`PromptAsset`] from the 理络 `prompts/` directory by name.
+    /// Load a [`PromptAsset`] from the 归藏 `prompts/` directory by name.
     ///
     /// Returns `None` when no asset with that name exists (as opposed to
     /// returning an error), so callers can gracefully fall back.
@@ -673,7 +708,7 @@ impl GuizangClient {
     }
 
     /// Persist a Bayesian posterior asset（MVP-3.5 — BCP §6.4.1；version++ 原子写）。
-    /// DMN Consumer 是唯一写者（TPN 执行期归藏只读 §8.3）。
+    /// Lianshan Consumer 是唯一写者（Zhouyi 执行期归藏只读 §8.3）。
     pub async fn save_model(
         &self,
         model: &mut ModelAsset,
@@ -683,6 +718,225 @@ impl GuizangClient {
         self.save_asset(&mut asset).await?;
         model.header.version = asset.version();
         Ok(())
+    }
+
+    /// 保存迹拓扑（BCP §6.0 蓝图文件契约）——`manifold/{root_task}.yaml`。
+    /// 原子写（tmp + rename）+ git commit。Lianshan Consumer 是唯一写者（§8.3）。
+    pub async fn save_topology(
+        &self,
+        root_task: &str,
+        topology: &ManifoldTopology,
+    ) -> Result<(), TaijiError> {
+        let dir = self.data_dir.join("manifold");
+        fs::create_dir_all(&dir).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to create manifold dir {:?}: {e}", dir),
+            }
+        })?;
+        let path = dir.join(format!("{root_task}.yaml"));
+        let yaml = serde_yaml::to_string(topology).map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to serialise topology: {e}"),
+            }
+        })?;
+        let tmp_path = path.with_extension("yaml.tmp");
+        {
+            let mut tmp = fs::File::create(&tmp_path).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to create temp file {:?}: {e}", tmp_path),
+                }
+            })?;
+            tmp.write_all(yaml.as_bytes()).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to write temp file {:?}: {e}", tmp_path),
+                }
+            })?;
+            tmp.flush().await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to flush temp file {:?}: {e}", tmp_path),
+                }
+            })?;
+        }
+        fs::rename(&tmp_path, &path).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to rename temp file {:?}: {e}", tmp_path),
+            }
+        })?;
+        self.git.commit(&format!("save topology:{root_task}")).await?;
+        Ok(())
+    }
+
+    /// 读取迹拓扑（None = 不存在）。
+    pub async fn load_topology(
+        &self,
+        root_task: &str,
+    ) -> Result<Option<ManifoldTopology>, TaijiError> {
+        let path = self.data_dir.join("manifold").join(format!("{root_task}.yaml"));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&path).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to read topology {:?}: {e}", path),
+            }
+        })?;
+        serde_yaml::from_str(&content).map(Some).map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to parse topology {:?}: {e}", path),
+            }
+        })
+    }
+
+    // ── V50 §6.6 本体挖掘：ontology/ 资产层存取（三层：词汇表/拓扑/逻辑 + 共现累积）──
+
+    /// ontology/ 目录下读一个 YAML 文件（不存在 → None）。
+    async fn load_ontology_yaml<T: serde::de::DeserializeOwned>(
+        &self,
+        filename: &str,
+    ) -> Result<Option<T>, TaijiError> {
+        let path = self.data_dir.join("ontology").join(filename);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = fs::read_to_string(&path).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to read ontology {:?}: {e}", path),
+            }
+        })?;
+        serde_yaml::from_str(&content).map(Some).map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to parse ontology {:?}: {e}", path),
+            }
+        })
+    }
+
+    /// ontology/ 目录下原子写一个 YAML 文件（tmp + rename + git commit）。
+    async fn save_ontology_yaml<T: serde::Serialize>(
+        &self,
+        filename: &str,
+        value: &T,
+    ) -> Result<(), TaijiError> {
+        let dir = self.data_dir.join("ontology");
+        fs::create_dir_all(&dir).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to create ontology dir {:?}: {e}", dir),
+            }
+        })?;
+        let path = dir.join(filename);
+        let yaml = serde_yaml::to_string(value).map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to serialise ontology {:?}: {e}", path),
+            }
+        })?;
+        let tmp_path = path.with_extension("yaml.tmp");
+        {
+            let mut tmp = fs::File::create(&tmp_path).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to create temp file {:?}: {e}", tmp_path),
+                }
+            })?;
+            tmp.write_all(yaml.as_bytes()).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to write temp file {:?}: {e}", tmp_path),
+                }
+            })?;
+            tmp.flush().await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to flush temp file {:?}: {e}", tmp_path),
+                }
+            })?;
+        }
+        fs::rename(&tmp_path, &path).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to rename temp file {:?}: {e}", tmp_path),
+            }
+        })?;
+        self.git.commit(&format!("save ontology:{filename}")).await?;
+        Ok(())
+    }
+
+    /// 词汇表（types.yaml）。
+    pub async fn load_semantic_types(&self) -> Result<Vec<SemanticType>, TaijiError> {
+        Ok(self
+            .load_ontology_yaml::<SemanticTypeFile>("types.yaml")
+            .await?
+            .map(|f| f.types)
+            .unwrap_or_default())
+    }
+
+    pub async fn save_semantic_types(&self, types: &[SemanticType]) -> Result<(), TaijiError> {
+        self.save_ontology_yaml("types.yaml", &SemanticTypeFile { types: types.to_vec() })
+            .await
+    }
+
+    /// 拓扑（relations.yaml，type→type 边）。
+    pub async fn load_relations(&self) -> Result<Vec<OntologyEdge>, TaijiError> {
+        Ok(self
+            .load_ontology_yaml::<Vec<OntologyEdge>>("relations.yaml")
+            .await?
+            .unwrap_or_default())
+    }
+
+    pub async fn save_relations(&self, edges: &[OntologyEdge]) -> Result<(), TaijiError> {
+        self.save_ontology_yaml("relations.yaml", &edges.to_vec()).await
+    }
+
+    /// 逻辑（rules.yaml，type-level 规则）。
+    pub async fn load_rules(&self) -> Result<Vec<OntologyRule>, TaijiError> {
+        Ok(self
+            .load_ontology_yaml::<Vec<OntologyRule>>("rules.yaml")
+            .await?
+            .unwrap_or_default())
+    }
+
+    pub async fn save_rules(&self, rules: &[OntologyRule]) -> Result<(), TaijiError> {
+        self.save_ontology_yaml("rules.yaml", &rules.to_vec()).await
+    }
+
+    /// 共现累积（cooccur.yaml）。
+    pub async fn load_cooccur(&self) -> Result<Vec<CooccurPair>, TaijiError> {
+        Ok(self
+            .load_ontology_yaml::<Vec<CooccurPair>>("cooccur.yaml")
+            .await?
+            .unwrap_or_default())
+    }
+
+    pub async fn save_cooccur(&self, pairs: &[CooccurPair]) -> Result<(), TaijiError> {
+        self.save_ontology_yaml("cooccur.yaml", &pairs.to_vec()).await
+    }
+
+    /// 失败分组累积（failures.yaml，Extract_Constraint 输入）。
+    pub async fn load_failures(&self) -> Result<Vec<FailureGroup>, TaijiError> {
+        Ok(self
+            .load_ontology_yaml::<Vec<FailureGroup>>("failures.yaml")
+            .await?
+            .unwrap_or_default())
+    }
+
+    pub async fn save_failures(&self, failures: &[FailureGroup]) -> Result<(), TaijiError> {
+        self.save_ontology_yaml("failures.yaml", &failures.to_vec()).await
+    }
+
+    /// 资产 id → 语义类型 id（扫资产 tags 匹配 types.yaml 词表；无匹配 = 不映射）。
+    /// MVP-1 覆盖 prompts（assets_used 现只含 prompt）；skills 映射随 skill 共现
+    /// 数据源扩展（阻塞点 §6.6）。
+    pub async fn asset_type_map(&self) -> Result<HashMap<String, String>, TaijiError> {
+        let type_ids: HashSet<String> = self
+            .load_semantic_types()
+            .await?
+            .into_iter()
+            .map(|t| t.id)
+            .collect();
+        let mut map = HashMap::new();
+        if type_ids.is_empty() {
+            return Ok(map); // 无词表种子 → 空映射（状态分支，非错误）
+        }
+        for p in self.load_all_prompts().await? {
+            if let Some(t) = p.tags.iter().find(|t| type_ids.contains(*t)) {
+                map.insert(p.id.clone(), t.clone());
+            }
+        }
+        Ok(map)
     }
 
     /// Load a single Bayesian posterior asset by id（None = 未初始化——调用方
@@ -861,7 +1115,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
     /// 扫描顺序（同 id 首次优先）：
     /// 1. 新文件夹 `yin/skills/verify/{id}/skill.yaml`（SkillAsset → VerificationAsset）
     /// 2. 旧扁平 `yin/skills/verify/*.yaml`（**原样** VerificationAsset——保留 checks.stats / variant_of，
-    ///    DMN evolver 依赖这些字段，禁止经 SkillAsset 往返丢字段）
+    ///    Lianshan evolver 依赖这些字段，禁止经 SkillAsset 往返丢字段）
     /// 3. 元层 verify 判据——**仅磁盘为空时**注入（冷启动保底；有磁盘资产时不混入，
     ///    避免污染 evolver 计数。运行时 verify 仍走 catalog 元层∪资产层）
     pub async fn load_all_verifications(
@@ -946,7 +1200,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
         Ok(verifications)
     }
 
-    /// SkillAsset → VerificationAsset（DMN/evolver 过渡桥——保留 checks 形态）。
+    /// SkillAsset → VerificationAsset（Lianshan/evolver 过渡桥——保留 checks 形态）。
     fn skill_asset_to_verification(
         s: &crate::types::verification::SkillAsset,
     ) -> VerificationAsset {
@@ -966,7 +1220,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
                     // 阳面 kind 不进 VerificationAsset.checks
                     _ => return None,
                 };
-                // 空 command 的 CommandSucceeds 不落盘给 DMN（避免 soft-fail 噪声）
+                // 空 command 的 CommandSucceeds 不落盘给 Lianshan（避免 soft-fail 噪声）
                 if kind == CheckKind::CommandSucceeds {
                     let cmd = impl_
                         .params
@@ -1005,6 +1259,8 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             success_rate: 0.0,
             status: s.status.clone(),
             variant_of: s.variant_of.clone(),
+            env_tags: s.env_tags.clone(),
+            safe_for_exploration: s.safe_for_exploration,
         }
     }
 
@@ -1143,7 +1399,9 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
         SkillAsset {
             id: v.id.clone(),
             name: v.name.clone(),
+            summary: String::new(),
             description: v.description.clone(),
+            detail: None,
             tags: v.tags.clone(),
             examples: Vec::new(),
             input_modes: vec!["text".to_string()],
@@ -1159,6 +1417,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             env_tags: Vec::new(),
             parent_id: None,
             variant_of: None,
+            safe_for_exploration: false,
         }
     }
 
@@ -1306,7 +1565,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
         }
 
         // dual 校验（合并视图域）：目标必须存在，且 effective_category 与本 skill 类别互补。
-        // 互补表：Orch↔Converge、Exec↔Verify（含 causal-verify 桥）。
+        // 互补表：Orch↔Converge、Exec↔Verify（含 yin-verify 桥）。
         let dual_s = match crate::infra::meta_skills::meta_skill(&skill.dual) {
             Some(s) => Some(s),
             None => {
@@ -1383,6 +1642,12 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
         fs::rename(&tmp, &path).await.map_err(|e| TaijiError::KnowledgeStoreUnavailable {
             context: format!("failed to rename skill tmp {:?}: {e}", path),
         })?;
+
+        // 版本控制（BCP §10.0）：每次写入 = 一次 commit。
+        self.git
+            .commit(&format!("save skill {}", skill.id))
+            .await?;
+
         Ok(())
     }
 }
@@ -1391,7 +1656,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
 // CognitiveAsset enum (tagged union for serialisation)
 // ---------------------------------------------------------------------------
 
-/// A cognitive asset stored in the 理络 warehouse.
+/// A cognitive asset stored in the 归藏 warehouse.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum CognitiveAsset {
@@ -1597,7 +1862,7 @@ pub struct SeedReport {
 
 /// V42 归藏目录 yang/yin 迁移（BCP §10.1）——幂等，可重跑：
 /// - `prompts/*.yaml` → 按 agent_target 分派：
-///   `"FittingAgent"` → `yang/prompts/`，`"CausalAgent"` → `yin/prompts/`
+///   `"YangAgent"` → `yang/prompts/`，`"YinAgent"` → `yin/prompts/`
 /// - `verifications/*.yaml` → `yin/skills/verify/`（V43：verifications 概念已废弃）
 /// - `yin/verifications/*.yaml` → `yin/skills/verify/`（V43：迁移过渡目录）
 /// - models/ 不迁移（根级统一存放，无需 yang/yin 拆分）
@@ -1605,7 +1870,7 @@ pub struct SeedReport {
 /// V42 归藏目录 yang/yin 迁移（BCP §10.1）——幂等，可重跑。
 /// V44：改为根级处理（不再遍历模型分区——分区已合并回根）。
 /// - `prompts/*.yaml` → 按 agent_target 分派：
-///   `"CausalAgent"` → `yin/prompts/`，其余 → `yang/prompts/`
+///   `"YinAgent"` → `yin/prompts/`，其余 → `yang/prompts/`
 /// - `verifications/*.yaml` → `yin/skills/verify/`（V43：verifications 概念已废弃）
 /// - `yin/verifications/*.yaml` → `yin/skills/verify/`（V43：迁移过渡目录）
 /// - models/ 不迁移（无需 yang/yin 拆分）
@@ -1630,8 +1895,8 @@ pub async fn migrate_to_yang_yin(root: &Path) -> Result<(), TaijiError> {
                 Ok(content) => {
                     if let Ok(val) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
                         match val.get("agent_target").and_then(|v| v.as_str()) {
-                            Some("CausalAgent") => &yin_dir,
-                            _ => &yang_dir, // FittingAgent / 空 / 其他 → 阳轨
+                            Some("YinAgent") => &yin_dir,
+                            _ => &yang_dir, // 其余 → 阳轨
                         }
                     } else {
                         &yang_dir
@@ -1857,7 +2122,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let dir = std::env::temp_dir().join(format!("taiji_liluo_test_{name}_{ts}"));
+        let dir = std::env::temp_dir().join(format!("taiji_guizang_test_{name}_{ts}"));
         // Clean up any previous test data.
         let _ = fs::remove_dir_all(&dir).await;
         dir
@@ -1902,12 +2167,12 @@ mod tests {
             "根提示词",
             "root",
             "content",
-            "FittingAgent",
+            "YangAgent",
             vec!["general".into()],
         );
         root.save_prompt(&mut prompt).await.unwrap();
 
-        // 资产落根级 yang/prompts（agent_target=FittingAgent）
+        // 资产落根级 yang/prompts（agent_target=YangAgent）
         assert!(dir.join("yang/prompts/root-prompt.yaml").exists());
         let loaded = root.load_asset("yang_prompt", "root-prompt").await;
         assert!(loaded.is_ok(), "root asset loadable from root client");
@@ -1930,7 +2195,7 @@ mod tests {
         fs::create_dir_all(&part_yang_prompts).await.unwrap();
         fs::write(
             part_yang_prompts.join("legacy-prompt.yaml"),
-            "id: legacy-prompt\ntype: prompt\nname: 旧提示词\ndescription: test\nlayer: 1\ntags: [legacy]\nconfidence: 0.9\nversion: 1\ncontent: content\nagent_target: FittingAgent\n",
+            "id: legacy-prompt\ntype: prompt\nname: 旧提示词\ndescription: test\nlayer: 1\ntags: [legacy]\nconfidence: 0.9\nversion: 1\ncontent: content\nagent_target: YangAgent\n",
         )
         .await
         .unwrap();
@@ -1968,7 +2233,7 @@ mod tests {
         fs::create_dir_all(&src_prompts).await.unwrap();
         let write_prompt = |path: &std::path::Path, id: &str, status: &str| {
             let yaml = format!(
-                "id: {id}\ntype: prompt\nname: {id}\ndescription: test\nstatus: {status}\nlayer: 1\nconfidence: 0.9\nversion: 1\nagent_target: FittingAgent\ntags: [general]\ncontent: content\n"
+                "id: {id}\ntype: prompt\nname: {id}\ndescription: test\nstatus: {status}\nlayer: 1\nconfidence: 0.9\nversion: 1\nagent_target: YangAgent\ntags: [general]\ncontent: content\n"
             );
             std::fs::write(path, yaml).unwrap();
         };
@@ -1987,7 +2252,7 @@ mod tests {
         fs::create_dir_all(dir.join("prompts")).await.unwrap();
         fs::write(
             dir.join("prompts/seed-prompt.yaml"),
-            "id: seed-prompt\ntype: prompt\nname: 已存在\ndescription: test\nstatus: active\nlayer: 1\nconfidence: 0.9\nversion: 1\nagent_target: FittingAgent\ntags: [general]\ncontent: content\n",
+            "id: seed-prompt\ntype: prompt\nname: 已存在\ndescription: test\nstatus: active\nlayer: 1\nconfidence: 0.9\nversion: 1\nagent_target: YangAgent\ntags: [general]\ncontent: content\n",
         )
         .await
         .unwrap();
@@ -2172,7 +2437,7 @@ mod tests {
             "Math Prompt",
             "",
             "content",
-            "FittingAgent",
+            "YangAgent",
             vec!["math".into(), "logic".into()],
         ));
         client.save_asset(&mut asset).await.unwrap();
@@ -2234,24 +2499,24 @@ mod tests {
         let client = GuizangClient::new(&dir).await.unwrap();
 
         let mut prompt = crate::types::agent::PromptAsset::new(
-            "orch-fitting",
+            "orch-yang",
             "编排拟合提示词",
-            "Orchestration mode FittingAgent system prompt",
+            "Orchestration mode YangAgent system prompt",
             "你是概率拟合专家（编排模式）...",
-            "FittingAgent",
-            vec!["fitting".into(), "orchestration".into()],
+            "YangAgent",
+            vec!["yang".into(), "orchestration".into()],
         );
 
         client.save_prompt(&mut prompt).await.unwrap();
         assert_eq!(prompt.version, 1);
 
         // Load back via convenience method.
-        let loaded = client.load_prompt("orch-fitting").await.unwrap();
+        let loaded = client.load_prompt("orch-yang").await.unwrap();
         assert!(loaded.is_some());
         let p = loaded.unwrap();
         assert_eq!(p.name, "编排拟合提示词");
-        assert_eq!(p.agent_target, "FittingAgent");
-        assert!(p.tags.contains(&"fitting".to_string()));
+        assert_eq!(p.agent_target, "YangAgent");
+        assert!(p.tags.contains(&"yang".to_string()));
 
         // Load nonexistent prompt returns None (not error).
         let missing = client.load_prompt("nonexistent").await.unwrap();
@@ -2267,29 +2532,29 @@ mod tests {
 
         // Save two prompts with overlapping tags.
         let mut p1 = crate::types::agent::PromptAsset::new(
-            "exec-fitting",
+            "exec-yang",
             "执行拟合提示词",
-            "Execution mode FittingAgent prompt",
+            "Execution mode YangAgent prompt",
             "你是执行专家...",
-            "FittingAgent",
-            vec!["fitting".into(), "execution".into()],
+            "YangAgent",
+            vec!["yang".into(), "execution".into()],
         );
         client.save_prompt(&mut p1).await.unwrap();
 
         let mut p2 = crate::types::agent::PromptAsset::new(
             "exec-verify",
             "执行验证提示词",
-            "Execution mode CausalAgent verify prompt",
+            "Execution mode YinAgent verify prompt",
             "你是因果验证器（执行模式）...",
-            "CausalAgent",
+            "YinAgent",
             vec!["verify".into(), "execution".into()],
         );
         client.save_prompt(&mut p2).await.unwrap();
 
-        // Search by "fitting" — should find only p1.
-        let results = client.search_prompts(&["fitting"]).await.unwrap();
+        // Search by "yang" — should find only p1.
+        let results = client.search_prompts(&["yang"]).await.unwrap();
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "exec-fitting");
+        assert_eq!(results[0].id, "exec-yang");
 
         // Search by "execution" — should find both.
         let results = client.search_prompts(&["execution"]).await.unwrap();
@@ -2350,6 +2615,85 @@ content: 手写内容
 
         cleanup(&dir).await;
     }
+
+    /// V50 §6.6：ontology 三层资产 round-trip + asset_type_map（种子词表 → 类型映射）。
+    #[tokio::test]
+    async fn test_ontology_assets_roundtrip_and_type_map() {
+        use crate::types::ontology::{OntologyEdgeKind, RuleCondition, TypeSource};
+        use crate::types::verification::CheckSeverity;
+
+        let dir = test_dir("ontology").await;
+        let client = GuizangClient::new(&dir).await.unwrap();
+
+        // 种子词表（types.yaml）
+        client
+            .save_semantic_types(&[
+                SemanticType {
+                    id: "security-check".into(),
+                    name: "安全合规检查".into(),
+                    description: "验证产出不引入安全漏洞".into(),
+                    parent: None,
+                    source: TypeSource::Human,
+                },
+                SemanticType {
+                    id: "deploy-action".into(),
+                    name: "部署动作".into(),
+                    description: "发布到运行环境".into(),
+                    parent: None,
+                    source: TypeSource::Human,
+                },
+            ])
+            .await
+            .unwrap();
+        let types = client.load_semantic_types().await.unwrap();
+        assert_eq!(types.len(), 2, "词汇表 round-trip");
+
+        // 拓扑边 + 规则 round-trip
+        client
+            .save_relations(&[OntologyEdge {
+                from: "deploy-action".into(),
+                to: "security-check".into(),
+                kind: OntologyEdgeKind::WeakDependency,
+                strength: 0.9,
+                samples: 60,
+                evidence: vec!["a".into()],
+            }])
+            .await
+            .unwrap();
+        let edges = client.load_relations().await.unwrap();
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from, "deploy-action");
+
+        client
+            .save_rules(&[OntologyRule {
+                id: "g1".into(),
+                when: RuleCondition::default(),
+                require: vec!["check:command_succeeds".into()],
+                forbid: vec![],
+                severity: CheckSeverity::Hard,
+            }])
+            .await
+            .unwrap();
+        assert_eq!(client.load_rules().await.unwrap().len(), 1);
+
+        // asset_type_map：给 prompt 打语义类型 tag → 资产 id 映射到类型 id
+        let mut p = PromptAsset::new(
+            "deploy-prompt",
+            "部署",
+            "d",
+            "c",
+            "YangAgent",
+            vec!["deploy-action".into()],
+        );
+        client.save_prompt(&mut p).await.unwrap();
+        let map = client.asset_type_map().await.unwrap();
+        assert_eq!(
+            map.get("deploy-prompt").map(|s| s.as_str()),
+            Some("deploy-action")
+        );
+
+        cleanup(&dir).await;
+    }
 }
 
 #[cfg(test)]
@@ -2398,6 +2742,7 @@ mod model_asset_tests {
         assert_eq!(neg.posterior_sigma(), 0.0);
         assert_eq!(neg.posterior_mean(), 0.0);
     }
+
 }
 
 // ── UCB 检索排序（V35/MVP-5：检索数学化，BCP §6.3 实现层定稿）────
@@ -2419,6 +2764,7 @@ pub(crate) fn rank_prompts_by_ucb(
     models: &[ModelAsset],
     c: f64,
     prior_strength: f64,
+    current_env_tags: &[String],
 ) -> Vec<usize> {
     let total_n: f64 = prompts.iter().map(|p| p.stats.n as f64).sum();
     let n_total = total_n.max(1.0);
@@ -2438,7 +2784,16 @@ pub(crate) fn rank_prompts_by_ucb(
             };
             let n_node = p.stats.n as f64;
             let explore = c * (n_total.ln() / (n_node + 1.0)).sqrt();
-            (mu + explore, p.id.as_str(), i)
+            let mut score = mu + explore;
+            // V50 env_tags 降权：当前环境指纹非空、候选 env_tags 非空且无交集 → ×0.5
+            //（降权非过滤；候选 env_tags 空 = 环境无关，不降权）。
+            if !current_env_tags.is_empty()
+                && !p.env_tags.is_empty()
+                && !p.env_tags.iter().any(|t| current_env_tags.contains(t))
+            {
+                score *= 0.5;
+            }
+            (score, p.id.as_str(), i)
         })
         .collect();
 
@@ -2459,7 +2814,7 @@ mod ucb_rank_tests {
     use crate::types::verification::CheckStats;
 
     fn mk_p(id: &str, confidence: f64, n: u64, pass: u64) -> PromptAsset {
-        let mut p = PromptAsset::new(id, id, "t", "t", "FittingAgent", vec!["x".into()]);
+        let mut p = PromptAsset::new(id, id, "t", "t", "YangAgent", vec!["x".into()]);
         p.confidence = confidence;
         p.stats = CheckStats { n, pass_count: pass, ..Default::default() };
         p
@@ -2473,7 +2828,7 @@ mod ucb_rank_tests {
             mk_p("p-high", 0.95, 0, 0),
             mk_p("p-mid", 0.8, 0, 0),
         ];
-        let ranked = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0);
+        let ranked = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0, &[]);
         // 先验 μ：0.95→(1+9.5)/(2+10)=0.9583；0.8→0.9；0.5→0.5
         let ids: Vec<&str> = ranked.iter().map(|&i| prompts[i].id.as_str()).collect();
         assert_eq!(ids, vec!["p-high", "p-mid", "p-low"], "cold start = prior μ desc");
@@ -2487,7 +2842,7 @@ mod ucb_rank_tests {
             mk_p("p-sampled", 0.9, 50, 45),
             mk_p("p-fresh", 0.9, 0, 0),
         ];
-        let ranked = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0);
+        let ranked = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0, &[]);
         assert_eq!(prompts[ranked[0]].id, "p-fresh", "n=0 gets exploration bonus");
     }
 
@@ -2499,9 +2854,26 @@ mod ucb_rank_tests {
             mk_p("b", 0.6, 3, 2),
             mk_p("c", 0.6, 3, 2),
         ];
-        let r1 = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0);
-        let r2 = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0);
+        let r1 = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0, &[]);
+        let r2 = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0, &[]);
         assert_eq!(r1, r2, "same input → same ranking (id lexicographic tiebreak)");
+    }
+
+    /// V50：env_tags 降权——当前环境指纹非空、候选 env_tags 无交集 → ×0.5（降权非过滤）。
+    #[test]
+    fn ucb_rank_env_tags_mismatch_downweights() {
+        let mut env_match = mk_p("env-match", 0.9, 0, 0);
+        env_match.env_tags = vec!["linux".into()];
+        let mut env_miss = mk_p("env-miss", 0.95, 0, 0);
+        env_miss.env_tags = vec!["macos".into()];
+        let env_agnostic = mk_p("env-none", 0.85, 0, 0); // env_tags 空 = 环境无关，不降权
+        let prompts = vec![env_match, env_miss, env_agnostic];
+        let current = vec!["linux".to_string()];
+        let ranked = rank_prompts_by_ucb(&prompts, &[], 1.414, 10.0, &current);
+        // env-miss ×0.5 后垫底；env-none 不降权（环境无关）
+        let ids: Vec<&str> = ranked.iter().map(|&i| prompts[i].id.as_str()).collect();
+        assert_eq!(ids[0], "env-match");
+        assert_eq!(ids[2], "env-miss", "mismatch downweighted to last");
     }
 
     // ── V45 save_skill dual 校验 ──
@@ -2518,7 +2890,9 @@ mod ucb_rank_tests {
         let mut skill = SkillAsset {
             id: "file-exists".into(),
             name: "交付物存在性".into(),
+            summary: String::new(),
             description: "test".into(),
+            detail: None,
             tags: vec![],
             examples: vec![],
             input_modes: vec!["text".into()],
@@ -2540,6 +2914,7 @@ mod ucb_rank_tests {
             env_tags: vec![],
             parent_id: None,
             variant_of: None,
+            safe_for_exploration: false,
         };
         guizang.save_skill(&mut skill).await.expect("valid dual saves");
         assert_eq!(skill.version, 1, "首次写 version=1");
@@ -2548,7 +2923,7 @@ mod ucb_rank_tests {
         // 重读。
         let loaded = guizang.load_skill_assets(crate::types::verification::SkillCategory::Verify).await.unwrap();
         assert!(loaded.iter().any(|s| s.id == "file-exists"), "读回成功");
-        // load_all_verifications 应能读到文件夹 skill.yaml（DMN 桥）
+        // load_all_verifications 应能读到文件夹 skill.yaml（Lianshan 桥）
         let verifs = guizang.load_all_verifications().await.unwrap();
         assert!(
             verifs.iter().any(|v| v.id == "file-exists"),
@@ -2568,7 +2943,9 @@ mod ucb_rank_tests {
         let mut skill = SkillAsset {
             id: "bogus-skill".into(),
             name: "测试".into(),
+            summary: String::new(),
             description: "test".into(),
+            detail: None,
             tags: vec![],
             examples: vec![],
             input_modes: vec!["text".into()],
@@ -2590,6 +2967,7 @@ mod ucb_rank_tests {
             env_tags: vec![],
             parent_id: None,
             variant_of: None,
+            safe_for_exploration: false,
         };
         let err = guizang.save_skill(&mut skill).await;
         assert!(err.is_err(), "dual 不存在应拒绝保存");
@@ -2598,7 +2976,7 @@ mod ucb_rank_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// V45：空知识库 load_all_verifications 元层保底（DMN 冷启动）。
+    /// V45：空知识库 load_all_verifications 元层保底（Lianshan 冷启动）。
     #[tokio::test]
     async fn test_load_all_verifications_meta_fallback() {
         let dir = std::env::temp_dir().join(format!("taiji_verif_meta_{}", std::process::id()));

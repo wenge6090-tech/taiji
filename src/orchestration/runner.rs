@@ -1,10 +1,10 @@
-//! RecursiveRunner — thin wrapper: task dir init + TpnCycle delegation.
+//! RecursiveRunner — thin wrapper: task dir init + ZhouyiCycle delegation.
 //!
-//! The actual TPN loop (MetaAgent → FittingAgent → CausalAgent → route) is
-//! owned by [`TpnCycle`].  This runner is responsible for:
+//! The actual Zhouyi loop (MetaAgent → YangAgent → YinAgent → route) is
+//! owned by [`ZhouyiCycle`].  This runner is responsible for:
 //!
 //! 1. Creating the task directory and initial `meta.json`.
-//! 2. Delegating to [`TpnCycle::execute`] inside a `tokio::timeout`.
+//! 2. Delegating to [`ZhouyiCycle::execute`] inside a `tokio::timeout`.
 //! 3. Updating task status on completion.
 
 use std::sync::Arc;
@@ -17,22 +17,22 @@ use crate::infra::config::TaijiConfig;
 use crate::infra::error::TaijiError;
 use crate::infra::trace::load_json_optional;
 use crate::orchestration::event_bus;
-use crate::orchestration::tpn_cycle::{write_task_status, TpnCycle};
+use crate::orchestration::zhouyi::{write_task_status, ZhouyiCycle};
 use crate::types::agent::ExternalContext;
 use crate::types::execution::EngineContext;
 use crate::types::frontend::NodeStatus;
-use crate::types::task::{Task, TaskStatus, TPNResult};
+use crate::types::task::{Task, TaskStatus, ZhouyiResult};
 use crate::ws::types::TaskEvent;
 
-/// Thin wrapper around the root-level TPN execution loop.
+/// Thin wrapper around the root-level Zhouyi execution loop.
 ///
 /// Responsibilities:
 /// - Create task directory and initial metadata
 /// - Bootstrap an [`EngineContext`] at depth 0
-/// - Delegate to [`TpnCycle`] for the actual TPN loop
+/// - Delegate to [`ZhouyiCycle`] for the actual Zhouyi loop
 /// - Persist final task status on completion
 ///
-/// Recursive decomposition is handled **within** FittingAgent via the
+/// Recursive decomposition is handled **within** YangAgent via the
 /// `recursive_decompose` tool — this runner only owns the root invocation.
 #[derive(Debug)]
 pub struct RecursiveRunner {
@@ -51,12 +51,12 @@ impl RecursiveRunner {
     ///
     /// Same as [`execute`](Self::execute) but also materialises the external
     /// context (files, tool results, session summary) into `task_dir/context/`
-    /// and sets `engine_ctx.context_dir` so FittingAgent can reference it.
+    /// and sets `engine_ctx.context_dir` so YangAgent can reference it.
     ///
     /// # Resume (V26)
     /// `resume_task_id: Some(id)` reuses the existing task directory instead of
     /// creating a new one: the task_id is kept, `depth` is read back from
-    /// `meta.json`, and `TpnCycle` walks the standard recovery chain
+    /// `meta.json`, and `ZhouyiCycle` walks the standard recovery chain
     /// (resume_history > decompose_result.json > checkpoint.json).  Root and
     /// child tasks therefore share the exact same recovery code path.
     pub async fn execute_with_context(
@@ -64,7 +64,7 @@ impl RecursiveRunner {
         description: &str,
         external_ctx: Option<ExternalContext>,
         resume_task_id: Option<String>,
-    ) -> Result<TPNResult, TaijiError> {
+    ) -> Result<ZhouyiResult, TaijiError> {
         // ── 1. Resolve task identity: resume reuses, fresh generates ──
         let (task_id, task_dir, resume_depth) = match &resume_task_id {
             Some(id) => {
@@ -160,23 +160,23 @@ impl RecursiveRunner {
         // ── 5. CancellationToken for the entire execution tree ────────
         let cancel = CancellationToken::new();
 
-        // ── 6. TPN cycle via TpnCycle ─────────────────────────────────
-        let tpn_cycle = TpnCycle::new(self.factory.clone(), self.config.clone(), cancel.clone());
+        // ── 6. Zhouyi cycle via ZhouyiCycle ─────────────────────────────────
+        let zhouyi = ZhouyiCycle::new(self.factory.clone(), self.config.clone(), cancel.clone());
         let timeout_secs = self.config.runtime.exec_timeout;
         let result = match timeout(
             Duration::from_secs(timeout_secs),
-            tpn_cycle.execute(description, None, &mut engine_ctx, None),
+            zhouyi.execute(description, None, &mut engine_ctx, None),
         )
         .await
         {
             Ok(inner) => inner,
             Err(_) => {
                 // ── Timeout: cancel the execution tree + persist Failed.
-                //    TpnCycle is dropped with the timeout, so status is
+                //    ZhouyiCycle is dropped with the timeout, so status is
                 //    written here (V26 统一状态管理).
                 cancel.cancel();
                 tracing::error!(task_id = %task_id, "Task execution timed out");
-                // V26.5-P3-F1: the timeout drops the TpnCycle future, which
+                // V26.5-P3-F1: the timeout drops the ZhouyiCycle future, which
                 // drops the RecursiveDecomposeTool JoinSet → tokio aborts all
                 // in-flight subtasks WITHOUT running their status-writing
                 // paths, so `children/<idx>/meta.json` would stay `Running`
@@ -218,7 +218,7 @@ impl RecursiveRunner {
     ///
     /// Delegates to [`execute_with_context`](Self::execute_with_context) with
     /// `external_ctx = None` and `resume_task_id = None`.
-    pub async fn execute(&self, description: &str) -> Result<TPNResult, TaijiError> {
+    pub async fn execute(&self, description: &str) -> Result<ZhouyiResult, TaijiError> {
         self.execute_with_context(description, None, None).await
     }
 }
@@ -229,13 +229,13 @@ mod tests {
     use crate::agents::factory::AgentFactory;
     use crate::hooks::safety::SafetyHook;
     use crate::infra::config::{LlmConfig, RuntimeConfig, SafetyConfig, TaijiConfig};
-    use crate::infra::knowledge::LiluoClient;
+    use crate::infra::knowledge::GuizangClient;
     use crate::infra::provider::ProviderRegistry;
     use crate::infra::trace::save_json_atomic;
     use crate::orchestration::constraint_engine::ConstraintEngine;
     use crate::orchestration::trigger_engine::SkillTriggerEngine;
     use crate::orchestration::worker_pool::WorkerPool;
-    use crate::types::task::{Checkpoint, CyclePhase, TaskStatus, TPNResult};
+    use crate::types::task::{Checkpoint, CyclePhase, TaskStatus, ZhouyiResult};
 
     fn make_config(tmp_root: &std::path::Path) -> TaijiConfig {
         TaijiConfig {
@@ -264,7 +264,7 @@ mod tests {
         ));
         let _ = std::fs::remove_dir_all(&knowledge_dir);
         let guizang = Arc::new(
-            LiluoClient::new(&knowledge_dir).await.expect("LiluoClient should initialise"),
+            GuizangClient::new(&knowledge_dir).await.expect("GuizangClient should initialise"),
         );
         let providers = ProviderRegistry::new(config).expect("ProviderRegistry");
         Arc::new(AgentFactory {
@@ -312,13 +312,13 @@ mod tests {
         write_meta(&task_dir, &task_id, 2, TaskStatus::Failed);
 
         let checkpoint = Checkpoint {
-            phase: CyclePhase::VerifyDone,
+            phase: CyclePhase::YinDone,
             round: 0,
             cycle: 0,
         };
         save_json_atomic(&checkpoint, &task_dir.join("checkpoint.json")).expect("checkpoint");
 
-        let cached = TPNResult {
+        let cached = ZhouyiResult {
             task_id: task_id.clone(),
             content: "cached output".into(),
             tools_used: vec![],

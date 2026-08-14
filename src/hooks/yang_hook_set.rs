@@ -1,4 +1,4 @@
-//! FittingHookSet — composes the three FittingAgent hooks into a single
+//! YangHookSet — composes the three YangAgent hooks into a single
 //! Rig 0.39 hook (safety → trace → chat-history snapshot).
 //!
 //! # Why this exists
@@ -6,7 +6,7 @@
 //! the previously registered hook (`hook: Some(hook)` in the builder). Chaining
 //! `.hook(a).hook(b).hook(c)` therefore keeps **only `c`** — first observed in
 //! the V26.1-3 E2E smoke run as a missing `trace.jsonl` plus empty `tools_used`
-//! (and, retroactively, the FittingAgent SafetyHook had never actually been
+//! (and, retroactively, the YangAgent SafetyHook had never actually been
 //! mounted since V25, which chained `.hook(safety).hook(trace)`).
 //!
 //! This set forwards every [`PromptHook`] method to the three inner hooks in
@@ -35,7 +35,7 @@ use super::trace::TraceHook;
 /// (required by the `PromptHook` trait bound) because all inner hooks are
 /// cheaply `Clone` (`Arc`-backed state).
 #[derive(Clone)]
-pub struct FittingHookSet<M> {
+pub struct YangHookSet<M> {
     safety: SafetyHook,
     trace: TraceHook,
     snapshot: ChatHistorySnapshotHook,
@@ -49,8 +49,8 @@ pub struct FittingHookSet<M> {
     _marker: PhantomData<fn(M) -> M>,
 }
 
-impl<M> FittingHookSet<M> {
-    /// Compose the FittingAgent hooks into a single Rig hook.
+impl<M> YangHookSet<M> {
+    /// Compose the YangAgent hooks into a single Rig hook.
     ///
     /// Order matters: safety first (rejections short-circuit), then trace
     /// (real tool-call recording), then chat-history snapshot (last writer),
@@ -130,7 +130,7 @@ macro_rules! fwd {
     };
 }
 
-impl<M: CompletionModel> PromptHook<M> for FittingHookSet<M> {
+impl<M: CompletionModel> PromptHook<M> for YangHookSet<M> {
     async fn on_completion_call(&self, prompt: &Message, history: &[Message]) -> HookAction {
         fwd!(SafetyHook, self.safety, on_completion_call, HookAction::Continue, prompt, history);
         fwd!(TraceHook, self.trace, on_completion_call, HookAction::Continue, prompt, history);
@@ -256,7 +256,7 @@ mod tests {
 
     fn make_context(tag: &str) -> EngineContext {
         let dir = std::env::temp_dir().join(format!(
-            "fitting_hook_set_{tag}_{}",
+            "yang_hook_set_{tag}_{}",
             std::process::id()
         ));
         let _ = std::fs::remove_dir_all(&dir);
@@ -271,7 +271,7 @@ mod tests {
         }
     }
 
-    fn make_hook_set<M>(ctx: &EngineContext) -> FittingHookSet<M>
+    fn make_hook_set<M>(ctx: &EngineContext) -> YangHookSet<M>
     where
         M: CompletionModel,
     {
@@ -279,11 +279,11 @@ mod tests {
         let trace = TraceHook::new(ctx, "test-model");
         let snapshot = ChatHistorySnapshotHook::new(&ctx.task_dir);
         let limiter = ContextLimiter::new(250_000, 300_000);
-        FittingHookSet::new(safety, trace, snapshot, limiter, ctx.task_dir.clone())
+        YangHookSet::new(safety, trace, snapshot, limiter, ctx.task_dir.clone())
     }
 
     #[tokio::test]
-    async fn test_fitting_hook_set_forwards_completion_call_to_all_hooks() {
+    async fn test_yang_hook_set_forwards_completion_call_to_all_hooks() {
         let ctx = make_context("forward");
         let hook_set = make_hook_set::<TestCompletionModel>(&ctx);
 
@@ -313,7 +313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fitting_hook_set_safety_rejection_short_circuits_tool_call() {
+    async fn test_yang_hook_set_safety_rejection_short_circuits_tool_call() {
         let ctx = make_context("shortcircuit");
         let hook_set = make_hook_set::<TestCompletionModel>(&ctx);
 
@@ -348,7 +348,7 @@ mod tests {
     }
 
     #[test]
-    fn test_fitting_hook_set_is_clone() {
+    fn test_yang_hook_set_is_clone() {
         let ctx = make_context("clone");
         let hook_set = make_hook_set::<TestCompletionModel>(&ctx);
         // Clones share the Arc-backed trace state.
@@ -401,7 +401,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fitting_hook_set_write_domain_short_circuits_tool_call() {
+    async fn test_yang_hook_set_write_domain_short_circuits_tool_call() {
         // V30 封地边界：hook 链上 write 越出 task_dir → Skip，且不进 trace。
         let ctx = make_context("domain_hook");
         let hook_set = make_hook_set::<TestCompletionModel>(&ctx);
@@ -455,7 +455,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fitting_hook_set_limiter_terminates_on_budget_exceeded() {
+    async fn test_yang_hook_set_limiter_terminates_on_budget_exceeded() {
         // V29 上下文预算：hook 链尾的 ContextLimiter 超限时 Terminate
         // （safety → trace → snapshot 已记录，最后 gate 生效）。
         let ctx = make_context("limiter");
@@ -463,7 +463,7 @@ mod tests {
         let trace = TraceHook::new(&ctx, "test-model");
         let snapshot = ChatHistorySnapshotHook::new(&ctx.task_dir);
         let limiter = ContextLimiter::new(10, 100); // 小阈值便于触发
-        let hook_set = FittingHookSet::<TestCompletionModel>::new(
+        let hook_set = YangHookSet::<TestCompletionModel>::new(
             safety,
             trace,
             snapshot,

@@ -164,7 +164,7 @@ impl ProviderRegistry {
 
     /// 路由候选 ModelKey 列表（default 在前，tie 时确定性首选）。
     /// 仅含 deepseek 系候选——OpenAI-compat 条目不参与路由（执行层
-    /// Fitting/Causal 仅从 deepseek client map 建 agent，跨类型 agent builder
+    /// Yang/Yin 仅从 deepseek client map 建 agent，跨类型 agent builder
     /// 动态分发未实现，MVP 边界）。
     pub fn model_keys(&self) -> Vec<crate::types::agent::ModelKey> {
         self.model_candidates

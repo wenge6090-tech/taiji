@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::path::Path;
 
 use super::common::{self, enforce_read_scope, truncate_head, READ_TOOL_MAX_BYTES};
 use super::BuiltinSkill;
@@ -25,7 +26,7 @@ impl BuiltinSkill for ReadTool {
         "read"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+    async fn call(&self, _task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let path_str = args
             .get("path")
             .and_then(JsonValue::as_str)
@@ -122,7 +123,7 @@ mod tests {
     async fn test_read_tool_missing_path() {
         let tool = ReadTool;
         let args = serde_json::json!({});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("missing required 'path'"));
     }
@@ -132,7 +133,7 @@ mod tests {
         let tool = ReadTool;
         // V26.3 E2: SkillTool plain-string passthrough (`{"input": "Cargo.toml"}`).
         let args = serde_json::json!({"input": "Cargo.toml"});
-        let result = tool.call(&args).await.unwrap();
+        let result = tool.call(std::path::Path::new("."), &args).await.unwrap();
         assert_eq!(result["status"], "ok");
         assert!(result["content"].as_str().unwrap_or("").len() > 0);
     }
@@ -146,7 +147,7 @@ mod tests {
         std::fs::write(&bin_path, &bin_content).ok();
 
         let args = serde_json::json!({"path": bin_path.to_string_lossy().to_string()});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         // Clean up
         std::fs::remove_file(&bin_path).ok();
 
@@ -158,7 +159,7 @@ mod tests {
     async fn test_read_tool_nonexistent_file() {
         let tool = ReadTool;
         let args = serde_json::json!({"path": "/tmp/__nonexistent_file_12345__"});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
     }
 }

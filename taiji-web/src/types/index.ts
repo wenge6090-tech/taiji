@@ -11,8 +11,8 @@ export type NodeStatus =
   | "Cancelled"
   | "AwaitingHumanReview";
 
-/** TPN 三相位(后端 TpnPhase)。 */
-export type TpnPhase = "Idle" | "Meta" | "Fitting" | "Causal" | "Converged";
+/** Zhouyi 三相位(后端 ZhouyiPhase)。 */
+export type ZhouyiPhase = "Idle" | "Meta" | "Yang" | "Yin" | "Converged";
 
 /** 纺锤树节点(后端 SpindleNode)。 */
 export interface SpindleNode {
@@ -22,7 +22,7 @@ export interface SpindleNode {
   siblingIndex: number;
   totalSiblings: number;
   status: NodeStatus;
-  phase: TpnPhase;
+  phase: ZhouyiPhase;
   round: number;
   cycle: number;
   parentId: string | null;
@@ -46,8 +46,8 @@ export interface EvolutionSummary {
   timestamp: string;
 }
 
-/** 认知库活跃度(后端 DmnActivity)。 */
-export interface DmnActivity {
+/** Lianshan 活跃度(后端 LianshanActivity)。 */
+export interface LianshanActivity {
   activeNodes: number;
   recentEvolutions: EvolutionSummary[];
 }
@@ -58,7 +58,7 @@ export interface TaskTreeSnapshot {
   rootDescription: string;
   nodes: SpindleNode[];
   edges: SpindleEdge[];
-  dmnActivity: DmnActivity | null;
+  lianshanActivity: LianshanActivity | null;
 }
 
 /** 追踪记录预览(后端 TraceRecordPreview)。 */
@@ -71,21 +71,21 @@ export interface TraceRecordPreview {
   summary: string;
 }
 
-/** 因果裁决(后端 CausalVerdict)。 */
-export interface CausalVerdict {
+/** Yin 裁决(后端 YinVerdict)。 */
+export interface YinVerdict {
   route: string;
   confidence: number;
   summary: string;
   violations: string[];
 }
 
-/** TPN 相位详情(后端 TpnPhaseState)。 */
-export interface TpnPhaseState {
+/** Zhouyi 相位详情(后端 ZhouyiPhaseState)。 */
+export interface ZhouyiPhaseState {
   taskId: string;
-  currentPhase: TpnPhase;
+  currentPhase: ZhouyiPhase;
   metaSummary: string | null;
-  fittingSummary: string | null;
-  causalVerdict: CausalVerdict | null;
+  yangSummary: string | null;
+  yinVerdict: YinVerdict | null;
   deliverables: string[];
   tracePreview: TraceRecordPreview[];
 }
@@ -116,10 +116,10 @@ export interface ServerResponse {
 export type TaskEvent =
   | { type: "TaskCreated"; data: { taskId: string; description: string; parentId: string | null; depth: number } }
   | { type: "TaskStatusChanged"; data: { taskId: string; oldStatus: NodeStatus; newStatus: NodeStatus } }
-  | { type: "PhaseChanged"; data: { taskId: string; phase: TpnPhase } }
+  | { type: "PhaseChanged"; data: { taskId: string; phase: ZhouyiPhase } }
   | { type: "ChildSpawned"; data: { parentTaskId: string; childTaskId: string; description: string; depth: number } }
   | { type: "ChildCompleted"; data: { childTaskId: string; status: NodeStatus; deliverables: string[]; rounds: number } }
-  | { type: "TpnRouteDecision"; data: { taskId: string; route: string; cycle: number; round: number; verdict: string } }
+  | { type: "ZhouyiRouteDecision"; data: { taskId: string; route: string; cycle: number; round: number; verdict: string } }
   | { type: "DeliverableCreated"; data: { taskId: string; path: string; sizeBytes: number } }
-  | { type: "DmnEvolution"; data: { evolutions: EvolutionSummary[] } }
+  | { type: "LianshanEvolution"; data: { evolutions: EvolutionSummary[] } }
   | { type: "TaskTreeHeartbeat"; data: { activeTasks: number; timestamp: string } };

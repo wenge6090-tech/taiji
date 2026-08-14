@@ -19,7 +19,7 @@ implementations:
     field: output_refs
   severity: soft
   pass_condition: output_refs 内每个路径均存在（相对路径按任务目录解析）
-agent_target: CausalAgent
+agent_target: YinAgent
 confidence: 0.7
 version: 1
 status: active

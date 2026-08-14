@@ -10,6 +10,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::path::Path;
 
 use super::common::{self, BASH_DEFAULT_TIMEOUT_SECS};
 use super::BuiltinSkill;
@@ -25,7 +26,7 @@ impl BuiltinSkill for BashTool {
         "bash"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+    async fn call(&self, _task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let command = args
             .get("command")
             .and_then(JsonValue::as_str)
@@ -138,7 +139,7 @@ mod tests {
     async fn test_bash_tool_echo() {
         let tool = BashTool;
         let args = serde_json::json!({"command": "echo hello"});
-        let result = tool.call(&args).await.unwrap();
+        let result = tool.call(std::path::Path::new("."), &args).await.unwrap();
         assert_eq!(result["status"], "ok");
         assert!(result["stdout"].as_str().unwrap().contains("hello"));
     }
@@ -147,7 +148,7 @@ mod tests {
     async fn test_bash_tool_missing_command() {
         let tool = BashTool;
         let args = serde_json::json!({});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
     }
 
@@ -156,7 +157,7 @@ mod tests {
         let tool = BashTool;
         // V26.3 E2: SkillTool plain-string passthrough (`{"input": "ls"}`).
         let args = serde_json::json!({"input": "echo hello"});
-        let result = tool.call(&args).await.unwrap();
+        let result = tool.call(std::path::Path::new("."), &args).await.unwrap();
         assert_eq!(result["status"], "ok");
         assert!(result["stdout"].as_str().unwrap().contains("hello"));
     }
@@ -168,7 +169,7 @@ mod tests {
         // is unwrapped by SkillTool::call; BashTool sees the canonical keyed
         // object here. This test pins the direct-object form as well.
         let args = serde_json::json!({"command": "echo hello"});
-        let result = tool.call(&args).await.unwrap();
+        let result = tool.call(std::path::Path::new("."), &args).await.unwrap();
         assert_eq!(result["status"], "ok");
     }
 
@@ -176,7 +177,7 @@ mod tests {
     async fn test_bash_tool_nonzero_exit() {
         let tool = BashTool;
         let args = serde_json::json!({"command": "exit 42"});
-        let result = tool.call(&args).await.unwrap();
+        let result = tool.call(std::path::Path::new("."), &args).await.unwrap();
         assert_eq!(result["status"], "error");
         assert_eq!(result["exit_code"], serde_json::json!(42));
     }
@@ -185,7 +186,7 @@ mod tests {
     async fn test_bash_tool_stderr() {
         let tool = BashTool;
         let args = serde_json::json!({"command": "echo error >&2; echo output"});
-        let result = tool.call(&args).await.unwrap();
+        let result = tool.call(std::path::Path::new("."), &args).await.unwrap();
         assert_eq!(result["status"], "ok");
         assert!(result["stdout"].as_str().unwrap().contains("output"));
         assert!(result["stderr"].as_str().unwrap().contains("error"));

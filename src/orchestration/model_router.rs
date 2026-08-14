@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 
 use crate::infra::error::TaijiError;
-use crate::infra::knowledge::LiluoClient;
+use crate::infra::knowledge::GuizangClient;
 use crate::infra::provider::ProviderRegistry;
 use crate::types::agent::{ModelKey, ModelStatsRow};
 use crate::types::verification::RewardWeights;
@@ -42,7 +42,7 @@ pub struct ModelRouter {
 }
 
 impl ModelRouter {
-    /// 构建路由决策器。`stats` 来自 `LiluoClient::load_model_stats`（根级）。
+    /// 构建路由决策器。`stats` 来自 `GuizangClient::load_model_stats`（根级）。
     pub fn new(providers: &ProviderRegistry, stats: BTreeMap<String, ModelStatsRow>) -> Self {
         let candidates = providers.model_keys();
         let default_key = providers.default_model_key();
@@ -161,21 +161,21 @@ pub struct ModelStatsSignal {
 
 /// 累加一次任务级信号到根级 model_stats.yaml（n++ 等），原子写。
 ///
-/// DMN 单写者调用（§8.3）；失败上抛（调用方决定 warn 或进死信——回传是
+/// Lianshan 单写者调用（§8.3）；失败上抛（调用方决定 warn 或进死信——回传是
 /// 增强层，不阻断 backprop 主流程）。
 pub async fn update_model_stats(
-    liluo: &LiluoClient,
+    guizang: &GuizangClient,
     model_key: &ModelKey,
     signal: &ModelStatsSignal,
 ) -> Result<(), TaijiError> {
-    let mut stats = liluo.load_model_stats().await?;
+    let mut stats = guizang.load_model_stats().await?;
     let row = stats.entry(model_key.key().to_string()).or_default();
     row.n += 1;
     row.pass_count += u64::from(signal.passed);
     row.cost_sum += signal.cost_tokens;
     row.rounds_sum += u64::from(signal.verify_rounds);
     row.quality_sum += signal.quality;
-    liluo.save_model_stats(&stats).await
+    guizang.save_model_stats(&stats).await
 }
 
 #[cfg(test)]
@@ -363,7 +363,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         ));
-        let client = LiluoClient::new(&dir).await.unwrap();
+        let client = GuizangClient::new(&dir).await.unwrap();
         let key = ModelKey::from_parts("deepseek", "deepseek-chat");
 
         update_model_stats(

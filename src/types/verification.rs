@@ -1,12 +1,12 @@
 use serde::{Deserialize, Serialize};
 
-/// Routing decision emitted by CausalAgent (因果验证·阴).
+/// Routing decision emitted by YinAgent (因果验证·阴).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum VerificationRoute {
-    /// Task passed verification — convergence, proceed to DMN reflection.
+    /// Task passed verification — convergence, proceed to Lianshan reflection.
     Pass,
     /// Execution deviation — retry 概率拟合 (阳).
-    BackToTpn,
+    BackToZhouyi,
     /// Cognitive deviation — retry 权重更新 (元).
     BackToMeta,
 }
@@ -19,7 +19,7 @@ pub enum ConvergenceStatus {
     Diverged,
 }
 
-/// Output of CausalAgent.verify().
+/// Output of YinAgent.verify().
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VerificationReport {
     pub route: VerificationRoute,
@@ -28,7 +28,7 @@ pub struct VerificationReport {
     pub constraint_violations: Vec<String>,
 }
 
-/// Output of CausalAgent.converge().
+/// Output of YinAgent.converge().
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConvergenceDecision {
     pub status: ConvergenceStatus,
@@ -239,9 +239,15 @@ pub struct SkillAsset {
     pub id: String,
     /// 人类可读名称。
     pub name: String,
-    /// Skill 功能描述（自然语言，供 LLM 理解何时调用）。
+    /// 层 0：一句话摘要（进 tool 列表/检索候选，最小上下文占用，BCP §10.2 渐进披露）。
+    #[serde(default)]
+    pub summary: String,
+    /// 层 1：Skill 功能描述（自然语言，供 LLM 理解何时调用）。
     #[serde(default)]
     pub description: String,
+    /// 层 2：完整涌现文本（LLM 决定调用后按需加载；None = 无额外 detail，BCP §10.2）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
     /// 分类标签。
     #[serde(default)]
     pub tags: Vec<String>,
@@ -262,7 +268,7 @@ pub struct SkillAsset {
     pub dual: String,
     /// 机械可执行体数组（≥1）。
     pub implementations: Vec<SkillImpl>,
-    /// 消费方 Agent：FittingAgent | CausalAgent。
+    /// 消费方 Agent：YangAgent | YinAgent。
     #[serde(default)]
     pub agent_target: String,
     /// [0, 1] 先验置信度。
@@ -278,6 +284,10 @@ pub struct SkillAsset {
     /// 环境维度（空 = 环境无关）。
     #[serde(default)]
     pub env_tags: Vec<String>,
+    /// V50 危险隔离：只有 true 的资产允许进入主动学习探索候选
+    /// （默认 false——write/bash 类高危执行体不参与探索，改走沙箱/测试任务）。
+    #[serde(default)]
+    pub safe_for_exploration: bool,
     /// fork 来源（None = 根资产）。
     #[serde(default)]
     pub parent_id: Option<String>,
@@ -337,7 +347,7 @@ pub enum CheckKind {
     ReferenceResolves,
     /// 命令执行成功：params = {command: "cargo check"}——白名单前缀 + 30s 超时。
     CommandSucceeds,
-    /// LLM 裁决：不机械执行，由 CausalAgent 收集注入 verify prompt（§6.6 L2）。
+    /// LLM 裁决：不机械执行，由 YinAgent 收集注入 verify prompt（§6.6 L2）。
     LlmJudgement,
     /// V34/MVP-4 断言证据链：产出中 `[证据: 工具名]` 引用 → 任务 trace.jsonl
     /// `tool_call::*` 记录存在性校验（引用完整性，reference_resolves 推广，§8.22）。
@@ -380,7 +390,7 @@ pub struct CheckSpec {
     pub severity: CheckSeverity,
     /// 人读判据（llm_judgement 类注入 LLM prompt）。
     pub pass_condition: String,
-    /// 检查项级统计（MVP-2 DMN backprop 回传 — BCP §6.4 V33 统计粒度）。
+    /// 检查项级统计（MVP-2 Lianshan backprop 回传 — BCP §6.4 V33 统计粒度）。
     /// serde default：旧契约 YAML 零迁移。
     #[serde(default)]
     pub stats: CheckStats,
@@ -391,7 +401,7 @@ pub struct CheckSpec {
 /// 全部来自既有数据（CheckResult 携带，零新增持久化文件）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
 pub struct CheckStats {
-    /// 采样次数（DMN backprop 累加）。
+    /// 采样次数（Lianshan backprop 累加）。
     #[serde(default)]
     pub n: u64,
     /// 通过次数。
@@ -400,7 +410,7 @@ pub struct CheckStats {
     /// token 成本累计（trace usage.input_tokens 求和摊派）。
     #[serde(default)]
     pub cost_sum: u64,
-    /// 验证轮数累计（BACK_TO_TPN 次数，收敛速度倒数）。
+    /// 验证轮数累计（BACK_TO_ZHOUYI 次数，收敛速度倒数）。
     #[serde(default)]
     pub rounds_sum: u64,
     /// 质量分累计（派生：route 映射 × VerificationReport.confidence，不落 VerificationReport schema）。
@@ -445,7 +455,7 @@ impl CheckStats {
         }
     }
 
-    /// 回报函数（BCP §6.4 写死，config `runtime.dmn.reward_weights` 可覆盖）：
+    /// 回报函数（BCP §6.4 写死，config `runtime.lianshan.reward_weights` 可覆盖）：
     /// `reward = w_pass·pass_rate + w_quality·avg_quality − w_cost·avg_cost − w_rounds·avg_verify_rounds`
     pub fn reward(&self, w: &RewardWeights) -> f64 {
         w.pass * self.pass_rate()
@@ -455,7 +465,7 @@ impl CheckStats {
     }
 }
 
-/// 回报函数权重（§6.4 默认值，config `runtime.dmn.reward_weights` 可覆盖）。
+/// 回报函数权重（§6.4 默认值，config `runtime.lianshan.reward_weights` 可覆盖）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct RewardWeights {
     pub pass: f64,
@@ -488,7 +498,7 @@ pub struct CheckResult {
     /// token 成本（trace usage.input_tokens 求和；serde default 零迁移）。
     #[serde(default)]
     pub cost_tokens: u64,
-    /// 验证轮数（verify_state.round；BACK_TO_TPN 次数）。
+    /// 验证轮数（verify_state.round；BACK_TO_ZHOUYI 次数）。
     #[serde(default)]
     pub verify_rounds: u32,
     /// 质量分（route 映射 × confidence 派生，§6.4）。
@@ -497,7 +507,7 @@ pub struct CheckResult {
 }
 
 /// SkillEngine 输出（L0 机械 + L1 契约，§8.22）。
-/// 仅含机械检查项结果；llm_judgement 项由调用方（CausalAgent）收集。
+/// 仅含机械检查项结果；llm_judgement 项由调用方（YinAgent）收集。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillReport {
     /// 任一 hard 机械项失败 → false。

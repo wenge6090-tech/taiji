@@ -66,7 +66,7 @@ impl TraceHook {
     /// de-duplicated and in first-call order.
     ///
     /// Populated by [`PromptHook::on_tool_call`] — this covers both L1 Skills
-    /// and built-in composite tools (`recursive_decompose`, `causal_verify`),
+    /// and built-in composite tools (`recursive_decompose`, `yin_verify`),
     /// and does not rely on text-matching the LLM response.
     pub fn tools_called(&self) -> Vec<String> {
         if let Ok(guard) = self.tools_called.lock() {
@@ -559,13 +559,13 @@ mod tests {
         // on_tool_call is async in Rig 0.39's PromptHook — await each call.
         let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "read", None, "call-1", "{}").await;
         let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "read", None, "call-2", "{}").await;
-        let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "causal_verify", None, "call-3", "{}").await;
+        let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "yin_verify", None, "call-3", "{}").await;
         let _ = PromptHook::<TestCompletionModel>::on_tool_call(&hook, "read", None, "call-4", "{}").await;
 
         let called = hook.tools_called();
         assert_eq!(
             called,
-            vec!["read".to_string(), "causal_verify".to_string()],
+            vec!["read".to_string(), "yin_verify".to_string()],
             "tools_called should be de-duplicated and first-call ordered"
         );
 

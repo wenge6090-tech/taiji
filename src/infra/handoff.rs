@@ -4,7 +4,7 @@
 //! 父层（parent_deliverables 注入）、同任务其他 agent（verify/converge 逐文件
 //! 核验）、元校准（BACK_TO_META 读产出）、恢复链全部经既有路径发现。
 //!
-//! 本模块是交接文件读写的唯一实现；`failure_reason` 路由信号由 Fitting 错误路径
+//! 本模块是交接文件读写的唯一实现；`failure_reason` 路由信号由 Yang 错误路径
 //! 运行时捕获（BCP §8.18：路由不依赖解析交接文件），front matter 仅作审计与
 //! LLM 消费。
 
@@ -14,7 +14,7 @@ use std::path::Path;
 /// 交接文件 front matter 结构化字段（BCP §8.18）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffInfo {
-    /// 产出相位（当前恒为 fitting）。
+    /// 产出相位（当前恒为 yang）。
     pub phase: String,
     /// 失败原因（context_overflow / hard_cutoff / llm_failed / …）。
     pub failure_reason: String,
@@ -95,7 +95,7 @@ pub fn list_deliverables(task_dir: &Path) -> Vec<String> {
 
 /// 构造「基于前一瞬态产出」的任务描述（V28 产出继承）。
 ///
-/// 用于：BACK_TO_TPN 时取代「原 description + chat_history 重放」（BCP §8.18）；
+/// 用于：BACK_TO_ZHOUYI 时取代「原 description + chat_history 重放」（BCP §8.18）；
 /// 也供 BACK_TO_META 注入 MetaAgent 作产出校准。列出 deliverables/ 全部产出物
 /// 与 handoff.md 内容，让 LLM 基于产出继续 / 拆解。
 pub fn build_handoff_description(task_dir: &Path) -> String {
@@ -257,7 +257,7 @@ mod tests {
     fn test_write_read_roundtrip() {
         let dir = tmp_dir("roundtrip");
         let info = HandoffInfo {
-            phase: "fitting".into(),
+            phase: "yang".into(),
             failure_reason: "context_overflow".into(),
             degraded: false,
             output_refs: vec![
@@ -283,7 +283,7 @@ mod tests {
         // V29+ LLM 压缩收尾：body 覆盖静态正文（交接 = 压缩产物）。
         let dir = tmp_dir("body");
         let info = HandoffInfo {
-            phase: "fitting".into(),
+            phase: "yang".into(),
             failure_reason: "context_overflow".into(),
             degraded: false,
             output_refs: vec![],
@@ -301,7 +301,7 @@ mod tests {
     fn test_write_handoff_empty_body_falls_back() {
         let dir = tmp_dir("empty_body");
         let info = HandoffInfo {
-            phase: "fitting".into(),
+            phase: "yang".into(),
             failure_reason: "llm_failed".into(),
             degraded: true,
             output_refs: vec![],
@@ -341,7 +341,7 @@ mod tests {
     fn test_build_handoff_description_includes_handoff() {
         let dir = tmp_dir("desc");
         let info = HandoffInfo {
-            phase: "fitting".into(),
+            phase: "yang".into(),
             failure_reason: "context_overflow".into(),
             degraded: false,
             output_refs: vec![],

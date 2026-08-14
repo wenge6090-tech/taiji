@@ -1,24 +1,24 @@
-//! CausalAgent builder (因果验证·阴) — "causal verification, the yin phase".
+//! YinAgent builder (因果验证·阴) — "yin verification, the yin phase".
 //!
-//! The CausalAgent is the **third** agent in the TPN cycle.  It operates in
+//! The YinAgent is the **third** agent in the Zhouyi cycle.  It operates in
 //! two modes (each with mode-paired templates, V27 阴阳配对):
 //!
 //! | Mode        | Role                 | Output                               | max_turns |
 //! |-------------|----------------------|--------------------------------------|-----------|
-//! | `verify`    | 因果验证器 (verifier) | [`VerificationReport`]               | 10        |
-//! | `converge`  | 收敛判决器 (judge)    | [`ConvergenceDecision`]              | 10        |
+//! | `verify`    | 因果验证器 (verifier) | [`VerificationReport`]               | 200       |
+//! | `converge`  | 收敛判决器 (judge)    | [`ConvergenceDecision`]              | 200       |
 //!
-//! # Verify mode (CausalVerifyAgentBuilder)
+//! # Verify mode (YinVerifyAgentBuilder)
 //! Checks a task output (or intermediate tool result) against:
 //! 1. **Constraint pre-check** ([`ConstraintEngine`]) — run **before** the LLM
 //!    call.  Any hard constraint violation immediately short-circuits with
 //!    `BackToMeta`.  Soft violations are injected into the LLM prompt.
 //! 2. **LLM judgment** — the model reviews the output and issues a verdict
-//!    (`Pass` / `BackToTpn` / `BackToMeta`).  The fallback template is
+//!    (`Pass` / `BackToZhouyi` / `BackToMeta`).  The fallback template is
 //!    selected by `meta_ctx.mode` (V27): `VERIFY_ORC` for orchestration
 //!    nodes, `VERIFY_EXEC` for execution nodes.
 //!
-//! # Converge mode (CausalConvergeAgentBuilder)
+//! # Converge mode (YinConvergeAgentBuilder)
 //! Aggregates results from all subtasks of a recursive decomposition and
 //! decides whether the overall task has converged, partially converged,
 //! or diverged.  The fallback template is selected by `meta_ctx.mode`
@@ -26,7 +26,8 @@
 //! execution nodes.
 //!
 //! # Constraints (AGENTS.md §2, §4)
-//! - `max_turns = 10` for both modes (V26 3→6 仍不足，V26.1 升至 10).
+//! - `max_turns = 200` for both modes (V49 防御兜底——预算由 ContextLimiter 承担，
+//!   BCP §8.19 阴预算对称；V26.1 曾升 10，V49 起降级为防死循环兜底).
 //! - Verify system prompt starts with `"你是因果验证器"`.
 //! - Converge system prompt starts with `"你是收敛判决器"`.
 
@@ -37,8 +38,10 @@ use rig::completion::Prompt;
 use rig::providers::deepseek;
 
 use crate::agents::tools::skills::SkillRegistry;
+use crate::hooks::context_limiter::{ContextLimiter, LimitKind};
 use crate::hooks::safety::SafetyHook;
-use crate::infra::config::SafetyConfig;
+use crate::hooks::yin_hook_set::YinHookSet;
+use crate::infra::config::{ContextLimits, SafetyConfig};
 use crate::infra::error::TaijiError;
 use crate::infra::json_util::parse_llm_json;
 use crate::infra::knowledge::GuizangClient;
@@ -58,7 +61,7 @@ use crate::types::verification::{
 // Verify mode
 // ---------------------------------------------------------------------------
 
-/// Builder for the CausalAgent in **verify** mode (因果验证·阴).
+/// Builder for the YinAgent in **verify** mode (因果验证·阴).
 ///
 /// Checks whether a task output (or tool result) satisfies L4 Truth
 /// constraints and passes LLM-based verification.
@@ -69,8 +72,8 @@ use crate::types::verification::{
 /// (defaults to `SafetyConfig::default()` when no shared singleton is
 /// injected) — "带工具必有安全钩子" is a type-level guarantee (蓝图 V25 §8.5).
 ///
-/// Created by [`AgentFactory::create_causal_verify_agent`].
-pub struct CausalVerifyAgentBuilder {
+/// Created by [`AgentFactory::create_yin_verify_agent`].
+pub struct YinVerifyAgentBuilder {
     engine_ctx: EngineContext,
     model: String,
     provider: Arc<ProviderRegistry>,
@@ -80,16 +83,18 @@ pub struct CausalVerifyAgentBuilder {
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
+    /// V49 阴预算（BCP §8.19）：窗口阈值来源（30% 交接 / 35% 硬截止），工厂设置。
+    context_limits: ContextLimits,
     /// 归藏客户端（V33 SkillEngine 加载验证契约）。工厂总是设置；
     /// None = 未接线（测试/异常路径）→ 契约层跳过并 warn（BCP §8.22
     /// 无契约资产时退化为纯 LLM 验证）。
     guizang: Option<Arc<GuizangClient>>,
 }
 
-impl CausalVerifyAgentBuilder {
-    /// Create a new `CausalVerifyAgentBuilder`.
+impl YinVerifyAgentBuilder {
+    /// Create a new `YinVerifyAgentBuilder`.
     ///
-    /// Normally called from [`AgentFactory::create_causal_verify_agent`] —
+    /// Normally called from [`AgentFactory::create_yin_verify_agent`] —
     /// external callers should use the factory rather than constructing this
     /// directly.
     pub fn new(
@@ -102,8 +107,9 @@ impl CausalVerifyAgentBuilder {
             model: model.to_string(),
             provider,
             provider_name: "deepseek".to_string(),
-            max_turns: 10,
+            max_turns: 200,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
+            context_limits: ContextLimits::default(),
             guizang: None,
         }
     }
@@ -126,11 +132,17 @@ impl CausalVerifyAgentBuilder {
         self
     }
 
+    /// V49 阴预算（BCP §8.19）：设置窗口阈值来源（工厂接线）。
+    pub fn context_limits(mut self, limits: ContextLimits) -> Self {
+        self.context_limits = limits;
+        self
+    }
+
     /// Run verification: check the task output and tool results against L4
     /// Truth constraints and an LLM judgment.
     ///
     /// # Logic
-    /// 1. **Constraint pre-check**: runs `ConstraintEngine::check_causal_output`
+    /// 1. **Constraint pre-check**: runs `ConstraintEngine::check_yin_output`
     ///    on the concatenated input.  Any hard violation short-circuits with
     ///    `BackToMeta` immediately (no LLM call).
     /// 2. **LLM verification**: constructs a Rig agent with the verify system
@@ -150,7 +162,7 @@ impl CausalVerifyAgentBuilder {
     /// let constraints = ConstraintEngine::load_truths(&[]);
     ///
     /// // Step 1a: run pre-check (hard violations short-circuit)
-    /// let pre_check = ConstraintEngine::check_causal_output(
+    /// let pre_check = ConstraintEngine::check_yin_output(
     ///     task_output,
     ///     tool_results,
     ///     &constraints,
@@ -180,7 +192,7 @@ impl CausalVerifyAgentBuilder {
     /// let agent = client
     ///     .agent(&self.model)
     ///     .preamble(VERIFY_ORC_SYSTEM_PROMPT)
-    ///     .max_turns(10)
+    ///     .max_turns(200)
     ///     .build();
     ///
     /// let input = format!(
@@ -212,11 +224,16 @@ impl CausalVerifyAgentBuilder {
         meta_ctx: &MetaContext,
     ) -> Result<VerificationReport, TaijiError> {
         // ── Load constraints relevant to this task ──
-        // In production, pass actual task_type_tags from the task spec.
-        let constraints = ConstraintEngine::load_truths(&[]);
+        // V50 §6.6：元层基线 ∪ 连山挖掘规则（rules.yaml）；None = 未接线测试路径
+        // （状态分支）；归藏 I/O 失败上抛（§8 无降级）。
+        let rules = match &self.guizang {
+            Some(g) => g.load_rules().await?,
+            None => vec![],
+        };
+        let constraints = ConstraintEngine::load_truths(&[], &rules);
 
         // ── Step 1: Constraint pre-check ──
-        let pre_check = ConstraintEngine::check_causal_output(task_output, tool_results, &constraints);
+        let pre_check = ConstraintEngine::check_yin_output(task_output, tool_results, &constraints);
 
         if !pre_check.passed {
             let has_hard = pre_check
@@ -275,7 +292,7 @@ impl CausalVerifyAgentBuilder {
             } else {
                 tracing::warn!(
                     task_id = %self.engine_ctx.task_id,
-                    "CausalVerifyAgent: guizang not wired — contract layer skipped"
+                    "YinVerifyAgent: guizang not wired — contract layer skipped"
                 );
                 Vec::new()
             };
@@ -354,18 +371,25 @@ impl CausalVerifyAgentBuilder {
         // ── 收集工具（只读）：read + webfetch — 逐文件核验 deliverables、
         //    联网核实外部事实（V25 权限分工：收集工具三相共有）。
         //    带工具必有安全钩子（§8.5 硬约束，类型级保证）：无条件挂载 SafetyHook ──
-        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new()
+        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new(&self.engine_ctx.task_dir)
             .tools()
             .iter()
             .filter(|t| matches!(t.name(), "read" | "webfetch"))
             .map(|t| Box::new(t.clone()) as Box<dyn rig::tool::ToolDyn>)
             .collect();
+        // V49 阴预算（BCP §8.19）：safety → limiter 组合，一次 .hook() 挂载
+        //（Rig 0.39 单槽 hook，AGENTS.md §4）。
+        let limiter = ContextLimiter::new(
+            self.context_limits.effective_handoff(),
+            self.context_limits.effective_hard_cutoff(),
+        );
+        let hook_set = YinHookSet::new(self.safety_hook.as_ref().clone(), limiter.clone());
         let agent = client
             .agent(&self.model)
             .preamble(system_prompt)
             .max_tokens(1024u64)
             .default_max_turns(self.max_turns as usize)
-            .hook(self.safety_hook.as_ref().clone())
+            .hook(hook_set)
             .tools(skill_tools)
             .build();
 
@@ -425,9 +449,35 @@ impl CausalVerifyAgentBuilder {
             contract = contract_section,
         );
 
-        let response = agent.prompt(&input).await.map_err(|e| {
+        let response_result = agent.prompt(&input).await;
+
+        // V49 阴溢出（BCP §8.19）：先于结果处理检查 limiter——Terminate 可能以
+        // Err 或部分 Ok 浮现（与 yang.rs 同构）。
+        if let Some(kind) = limiter.triggered() {
+            match kind {
+                LimitKind::Handoff => {
+                    tracing::warn!(
+                        task_id = %self.engine_ctx.task_id,
+                        "YinVerifyAgent — context overflow → conservative BackToZhouyi verdict"
+                    );
+                    return Ok(VerificationReport {
+                        route: VerificationRoute::BackToZhouyi,
+                        confidence: 0.0,
+                        summary: "verify context_overflow".into(),
+                        constraint_violations: vec![],
+                    });
+                }
+                LimitKind::HardCutoff => {
+                    return Err(TaijiError::HardCutoff {
+                        threshold: self.context_limits.effective_hard_cutoff(),
+                    });
+                }
+            }
+        }
+
+        let response = response_result.map_err(|e| {
             TaijiError::LLMCallFailed {
-                context: format!("CausalVerifyAgent LLM call failed: {e}"),
+                context: format!("YinVerifyAgent LLM call failed: {e}"),
             }
         })?;
 
@@ -445,7 +495,7 @@ impl CausalVerifyAgentBuilder {
             task_id = %self.engine_ctx.task_id,
             route = ?report.route,
             confidence = report.confidence,
-            "CausalVerifyAgent — LLM verification completed"
+            "YinVerifyAgent — LLM verification completed"
         );
 
         // ── Persist verify state for crash recovery ──
@@ -468,12 +518,12 @@ impl CausalVerifyAgentBuilder {
     }
 }
 
-/// System prompt for the CausalAgent in **verify · Orchestration** mode
+/// System prompt for the YinAgent in **verify · Orchestration** mode
 /// (V27 阴阳配对：编排-验证，编排节点的阴相位)。
 ///
 /// Focuses on MECE completeness, dependency correctness, and decomposition
 /// granularity. Route preference: BACK_TO_META for decomposition issues.
-const VERIFY_ORC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 编排验证 (Causal Verifier · Orchestration).
+const VERIFY_ORC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 编排验证 (Yin Verifier · Orchestration).
 
 你在验证一个编排节点的综合产出——该任务被拆解为子任务后汇聚结果。
 
@@ -489,7 +539,7 @@ const VERIFY_ORC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 编排验证
 
 ## 输出格式（严格 JSON）
 {
-  "route": "Pass" | "BackToTpn" | "BackToMeta",
+  "route": "Pass" | "BackToZhouyi" | "BackToMeta",
   "confidence": 0.0..1.0,
   "summary": "判定依据简述",
   "constraint_violations": ["违规项描述"]
@@ -497,16 +547,16 @@ const VERIFY_ORC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 编排验证
 
 路由指引：
 - "Pass":       综合完备、一致，可交付。
-- "BackToTpn":  执行偏差——产出存在但质量/完整性不足，需重试拟合。
+- "BackToZhouyi":  执行偏差——产出存在但质量/完整性不足，需重试拟合。
 - "BackToMeta": 认知偏差——拆解策略本身有问题，需重新权重更新。
 "#;
 
-/// System prompt for the CausalAgent in **verify · Execution** mode
+/// System prompt for the YinAgent in **verify · Execution** mode
 /// (V27 阴阳配对：执行-验证，执行节点的阴相位)。
 ///
 /// Focuses on requirement satisfaction, artifact quality, and constraint
-/// adherence. Route preference: BACK_TO_TPN for execution quality issues.
-const VERIFY_EXEC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 执行验证 (Causal Verifier · Execution).
+/// adherence. Route preference: BACK_TO_ZHOUYI for execution quality issues.
+const VERIFY_EXEC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 执行验证 (Yin Verifier · Execution).
 
 你在验证一个执行节点的直接产出——任务由 L1 工具直接完成，未经拆解。
 
@@ -521,7 +571,7 @@ const VERIFY_EXEC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 执行验�
 
 ## 输出格式（严格 JSON）
 {
-  "route": "Pass" | "BackToTpn" | "BackToMeta",
+  "route": "Pass" | "BackToZhouyi" | "BackToMeta",
   "confidence": 0.0..1.0,
   "summary": "判定依据简述",
   "constraint_violations": ["违规项描述"]
@@ -529,7 +579,7 @@ const VERIFY_EXEC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 执行验�
 
 路由指引：
 - "Pass":       产出满足需求，可交付。
-- "BackToTpn":  执行偏差——质量/完整性可改进，重试执行。
+- "BackToZhouyi":  执行偏差——质量/完整性可改进，重试执行。
 - "BackToMeta": 认知偏差——任务规格或方法本身有问题，需重新权重更新。
 "#;
 
@@ -537,19 +587,19 @@ const VERIFY_EXEC_SYSTEM_PROMPT: &str = r#"你是因果验证器 — 执行验�
 // Converge mode
 // ---------------------------------------------------------------------------
 
-/// Builder for the CausalAgent in **converge** mode (收敛判决).
+/// Builder for the YinAgent in **converge** mode (收敛判决).
 ///
 /// Aggregates results from all subtasks of a recursive decomposition and
 /// decides whether the overall task has converged.
 ///
-/// Created by [`AgentFactory::create_causal_converge_agent`].
+/// Created by [`AgentFactory::create_yin_converge_agent`].
 ///
 /// The LLM registers read-only verification tools (`read` + `webfetch`) so it
 /// can open each referenced deliverable and cross-check external facts before
 /// issuing the convergence verdict; the [`SafetyHook`] is **always** mounted
 /// (defaults to `SafetyConfig::default()` when no shared singleton is
 /// injected) — "带工具必有安全钩子" is a type-level guarantee (蓝图 V25 §8.5).
-pub struct CausalConvergeAgentBuilder {
+pub struct YinConvergeAgentBuilder {
     engine_ctx: EngineContext,
     model: String,
     provider: Arc<ProviderRegistry>,
@@ -559,15 +609,17 @@ pub struct CausalConvergeAgentBuilder {
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
+    /// V49 阴预算（BCP §8.19）：窗口阈值来源（30% 交接 / 35% 硬截止），工厂设置。
+    context_limits: ContextLimits,
     /// 归藏客户端（V43 SkillEngine 加载 converge Skill）。工厂总是设置；
     /// None = 未接线（测试/异常路径）——converge Skill 层跳过。
     guizang: Option<Arc<GuizangClient>>,
 }
 
-impl CausalConvergeAgentBuilder {
-    /// Create a new `CausalConvergeAgentBuilder`.
+impl YinConvergeAgentBuilder {
+    /// Create a new `YinConvergeAgentBuilder`.
     ///
-    /// Normally called from [`AgentFactory::create_causal_converge_agent`] —
+    /// Normally called from [`AgentFactory::create_yin_converge_agent`] —
     /// external callers should use the factory rather than constructing this
     /// directly.
     pub fn new(
@@ -580,8 +632,9 @@ impl CausalConvergeAgentBuilder {
             model: model.to_string(),
             provider,
             provider_name: "deepseek".to_string(),
-            max_turns: 10,
+            max_turns: 200,
             safety_hook: Arc::new(SafetyHook::new(&SafetyConfig::default())),
+            context_limits: ContextLimits::default(),
             guizang: None,
         }
     }
@@ -601,6 +654,12 @@ impl CausalConvergeAgentBuilder {
     /// Wire the Guizang client（V43 SkillEngine converge Skill 加载通道）。
     pub fn guizang(mut self, guizang: Arc<GuizangClient>) -> Self {
         self.guizang = Some(guizang);
+        self
+    }
+
+    /// V49 阴预算（BCP §8.19）：设置窗口阈值来源（工厂接线）。
+    pub fn context_limits(mut self, limits: ContextLimits) -> Self {
+        self.context_limits = limits;
         self
     }
 
@@ -627,7 +686,7 @@ impl CausalConvergeAgentBuilder {
     /// let agent = client
     ///     .agent(&self.model)
     ///     .preamble(CONVERGE_ORC_SYSTEM_PROMPT)
-    ///     .max_turns(10)
+    ///     .max_turns(200)
     ///     .build();
     ///
     /// let input = serde_json::to_string_pretty(subtask_results)?;
@@ -717,24 +776,30 @@ impl CausalConvergeAgentBuilder {
         } else {
             tracing::warn!(
                 task_id = %self.engine_ctx.task_id,
-                "CausalConvergeAgent: guizang not wired — converge Skill layer skipped"
+                "YinConvergeAgent: guizang not wired — converge Skill layer skipped"
             );
             (Vec::new(), None)
         };
 
         // ── 收集工具（只读）：read + webfetch — 逐文件核验 deliverables、
-        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new()
+        let skill_tools: Vec<Box<dyn rig::tool::ToolDyn>> = SkillRegistry::new(&self.engine_ctx.task_dir)
             .tools()
             .iter()
             .filter(|t| matches!(t.name(), "read" | "webfetch"))
             .map(|t| Box::new(t.clone()) as Box<dyn rig::tool::ToolDyn>)
             .collect();
+        // V49 阴预算（BCP §8.19）：safety → limiter 组合，一次 .hook() 挂载。
+        let limiter = ContextLimiter::new(
+            self.context_limits.effective_handoff(),
+            self.context_limits.effective_hard_cutoff(),
+        );
+        let hook_set = YinHookSet::new(self.safety_hook.as_ref().clone(), limiter.clone());
         let agent = client
             .agent(&self.model)
             .preamble(system_prompt)
             .max_tokens(1024u64)
             .default_max_turns(self.max_turns as usize)
-            .hook(self.safety_hook.as_ref().clone())
+            .hook(hook_set)
             .tools(skill_tools)
             .build();
 
@@ -778,9 +843,32 @@ impl CausalConvergeAgentBuilder {
             input.push_str(&section);
         }
 
-        let response = agent.prompt(&input).await.map_err(|e| {
+        let response_result = agent.prompt(&input).await;
+
+        // V49 阴溢出（BCP §8.19）：先于结果处理检查 limiter。
+        if let Some(kind) = limiter.triggered() {
+            match kind {
+                LimitKind::Handoff => {
+                    tracing::warn!(
+                        task_id = %self.engine_ctx.task_id,
+                        "YinConvergeAgent — context overflow → conservative Partial verdict"
+                    );
+                    return Ok(ConvergenceDecision {
+                        status: ConvergenceStatus::Partial,
+                        task_summary: "converge context_overflow".into(),
+                    });
+                }
+                LimitKind::HardCutoff => {
+                    return Err(TaijiError::HardCutoff {
+                        threshold: self.context_limits.effective_hard_cutoff(),
+                    });
+                }
+            }
+        }
+
+        let response = response_result.map_err(|e| {
             TaijiError::LLMCallFailed {
-                context: format!("CausalConvergeAgent LLM call failed: {e}"),
+                context: format!("YinConvergeAgent LLM call failed: {e}"),
             }
         })?;
 
@@ -797,14 +885,14 @@ impl CausalConvergeAgentBuilder {
             task_id = %self.engine_ctx.task_id,
             subtasks = total,
             status = ?decision.status,
-            "CausalConvergeAgent — LLM convergence judgment completed"
+            "YinConvergeAgent — LLM convergence judgment completed"
         );
 
         Ok(decision)
     }
 }
 
-/// System prompt for the CausalAgent in **converge · Orchestration** mode
+/// System prompt for the YinAgent in **converge · Orchestration** mode
 /// (V27 阴阳配对：编排-收敛，编排节点的阴相位——判决子结果聚合)。
 ///
 /// Aggregates subtask results of a recursive decomposition: coverage,
@@ -842,7 +930,7 @@ const CONVERGE_ORC_SYSTEM_PROMPT: &str = r#"你是收敛判决器 — 编排收�
 - "Diverged":  根本性不一致——拆解策略需修正。
 "#;
 
-/// System prompt for the CausalAgent in **converge · Execution** mode
+/// System prompt for the YinAgent in **converge · Execution** mode
 /// (V27 阴阳配对：执行-收敛，直接产出任务的收敛判决)。
 ///
 /// A single direct output — judge whether it represents a complete,
@@ -914,12 +1002,12 @@ mod tests {
         }
     }
 
-    // ── CausalVerifyAgentBuilder tests ──────────────────────────────────
+    // ── YinVerifyAgentBuilder tests ──────────────────────────────────
 
     #[tokio::test]
     #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_verify_returns_default_pass() {
-        let builder = CausalVerifyAgentBuilder::new(
+        let builder = YinVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
@@ -927,7 +1015,7 @@ mod tests {
             "deepseek-chat",
         );
 
-        let report = builder.verify("CausalAgent executed and verified the task output against all L4 Truth constraints.", &[], &MetaContext::empty()).await.expect("converge");
+        let report = builder.verify("YinAgent executed and verified the task output against all L4 Truth constraints.", &[], &MetaContext::empty()).await.expect("converge");
         assert_eq!(report.route, VerificationRoute::Pass);
     }
 
@@ -935,7 +1023,7 @@ mod tests {
     async fn test_verify_empty_summary_triggers_back_to_meta() {
         // Empty summary should trigger the constraint pre-check for
         // truth:no-fabrication (hard).
-        let builder = CausalVerifyAgentBuilder::new(
+        let builder = YinVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
@@ -955,7 +1043,7 @@ mod tests {
     async fn test_verify_with_soft_violations_passes() {
         // A short summary (< 10 chars) triggers the soft auditability
         // constraint, but since it's soft the verify should still pass.
-        let builder = CausalVerifyAgentBuilder::new(
+        let builder = YinVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
@@ -967,11 +1055,11 @@ mod tests {
         assert_eq!(report.route, VerificationRoute::Pass);
     }
 
-    // ── CausalConvergeAgentBuilder tests ────────────────────────────────
+    // ── YinConvergeAgentBuilder tests ────────────────────────────────
 
     #[tokio::test]
     async fn test_converge_empty_results_converged() {
-        let builder = CausalConvergeAgentBuilder::new(
+        let builder = YinConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
@@ -986,7 +1074,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_converge_all_ok_converged() {
-        let builder = CausalConvergeAgentBuilder::new(
+        let builder = YinConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
@@ -1024,7 +1112,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_converge_some_partial() {
-        let builder = CausalConvergeAgentBuilder::new(
+        let builder = YinConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
@@ -1062,7 +1150,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
     async fn test_converge_all_diverged() {
-        let builder = CausalConvergeAgentBuilder::new(
+        let builder = YinConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
@@ -1103,7 +1191,7 @@ mod tests {
     fn test_verify_system_prompt_starts_with_chinese() {
         assert!(VERIFY_ORC_SYSTEM_PROMPT.starts_with("你是因果验证器"));
         assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("Pass"));
-        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToTpn"));
+        assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToZhouyi"));
         assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("BackToMeta"));
         assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("MECE"));
         assert!(VERIFY_ORC_SYSTEM_PROMPT.contains("文件核验"));
@@ -1111,7 +1199,7 @@ mod tests {
 
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.starts_with("你是因果验证器"));
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("Pass"));
-        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToTpn"));
+        assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToZhouyi"));
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("BackToMeta"));
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("执行验证"));
         assert!(VERIFY_EXEC_SYSTEM_PROMPT.contains("文件核验"));
@@ -1149,15 +1237,15 @@ mod tests {
     }
 
     #[test]
-    fn test_verify_system_prompt_max_turns_ten() {
-        let builder = CausalVerifyAgentBuilder::new(
+    fn test_verify_system_prompt_max_turns_defensive_200() {
+        let builder = YinVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
             ),
             "deepseek-chat",
         );
-        assert_eq!(builder.max_turns, 10, "V26.1: verify max_turns 统一 10");
+        assert_eq!(builder.max_turns, 200, "V49: verify max_turns 降级为防御兜底 200");
     }
 
     #[test]
@@ -1177,27 +1265,27 @@ mod tests {
     }
 
     #[test]
-    fn test_converge_system_prompt_max_turns_ten() {
-        let builder = CausalConvergeAgentBuilder::new(
+    fn test_converge_system_prompt_max_turns_defensive_200() {
+        let builder = YinConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
             ),
             "deepseek-chat",
         );
-        assert_eq!(builder.max_turns, 10, "V26.1: converge max_turns 统一 10");
+        assert_eq!(builder.max_turns, 200, "V49: converge max_turns 降级为防御兜底 200");
     }
 
     #[test]
-    fn test_causal_builders_safety_hook_setters() {
-        // 蓝图 V25 §8.5：Causal 相位带收集工具（read+webfetch）→ 必有安全钩子
+    fn test_yin_builders_safety_hook_setters() {
+        // 蓝图 V25 §8.5：Yin 相位带收集工具（read+webfetch）→ 必有安全钩子
         // （类型级保证，字段非 Option）；注入进程级单例后指针一致。
         let hook = Arc::new(SafetyHook::new(&SafetyConfig {
             enabled: false,
             trusted_mcp_servers: vec![],
         }));
 
-        let verify_builder = CausalVerifyAgentBuilder::new(
+        let verify_builder = YinVerifyAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),
@@ -1207,7 +1295,7 @@ mod tests {
         .safety_hook(hook.clone());
         assert!(Arc::ptr_eq(&verify_builder.safety_hook, &hook));
 
-        let converge_builder = CausalConvergeAgentBuilder::new(
+        let converge_builder = YinConvergeAgentBuilder::new(
             make_engine_ctx("test-task"),
             Arc::new(
                 ProviderRegistry::new(&make_config()).expect("ProviderRegistry"),

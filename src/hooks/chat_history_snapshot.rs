@@ -5,7 +5,7 @@
 //! Implements the rig-core [`PromptHook`] trait.  `on_completion_call` is
 //! invoked before the prompt is sent to the LLM (including inside tool loops),
 //! so each snapshot contains `history + [prompt]` — the same `Vec<Message>`
-//! JSON array format used by `chat_history.json` elsewhere (fitting.rs writes
+//! JSON array format used by `chat_history.json` elsewhere (yang.rs writes
 //! the same format with `save_json_atomic`).
 //!
 //! # Failure handling

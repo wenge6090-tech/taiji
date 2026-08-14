@@ -97,7 +97,7 @@ export default function ChatPanel({
         await wsClient.send("ExecuteTask", { description: desc });
       };
       run()
-        .then(() => typewriter(`⚡ 已创建任务:${desc}，正在启动 TPN 递归循环…`, 400))
+        .then(() => typewriter(`⚡ 已创建任务:${desc}，正在启动 Zhouyi 递归循环…`, 400))
         .catch((e) => typewriter(`任务创建失败:${String(e)}`, 400));
       return;
     }

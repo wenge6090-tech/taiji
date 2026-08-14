@@ -1,19 +1,21 @@
 //! ConstraintEngine — L4 硬约束运行时执行（V38 起内置化，不再读归藏 truths/）。
 //! 两个集成点：
 //!   1. `load_truths()`  — 硬编码基线约束（不编造事实/有依据推理/可审计 + code-safety）
-//!   2. `check_constraints()` / `check_causal_output()` — CausalAgent LLM 调用前的 L0 检查
+//!   2. `check_constraints()` / `check_yin_output()` — YinAgent LLM 调用前的 L0 检查
 //!
-//! V38：truths 资产层已移除——约束不再资产化、不参与 DMN 演化；
+//! V38：truths 资产层已移除——约束不再资产化、不参与 Lianshan 演化；
 //! 硬约束 = 本引擎内置的硬编码检查（summary 非空/有依据/可审计 + code-safety）。
 
 use crate::types::agent::MetaContext;
+use crate::types::ontology::OntologyRule;
 use crate::types::verification::{
-    ConstraintResult, ConstraintSeverity, ConstraintViolation, TruthConstraint,
+    CheckSeverity, ConstraintResult, ConstraintSeverity, ConstraintViolation, TruthConstraint,
+    TruthStatus,
 };
 
 /// Engine for loading and enforcing L4 Truth constraints.
 ///
-/// Constraint checking happens **before** the CausalAgent LLM call.
+/// Constraint checking happens **before** the YinAgent LLM call.
 /// Hard violations short-circuit immediately without invoking the model.
 /// Soft violations are injected as additional context for the LLM to adjudicate.
 #[derive(Debug, Clone)]
@@ -34,8 +36,11 @@ impl ConstraintEngine {
     ///
     /// If tags contain `"code"`, additionally loads:
     ///   - `truth:code-safety`     (Hard) — no security regressions
-    pub fn load_truths(task_type_tags: &[String]) -> Vec<TruthConstraint> {
-        let mut truths = Vec::with_capacity(4);
+    ///
+    /// V50 §6.6：`rules` 为连山本体挖掘的 type-level 约束规则（`rules.yaml`），
+    /// 映射为 TruthConstraint（元层 ∪ 挖掘规则；挖掘规则 id 前缀 `ontology:`）。
+    pub fn load_truths(task_type_tags: &[String], rules: &[OntologyRule]) -> Vec<TruthConstraint> {
+        let mut truths = Vec::with_capacity(4 + rules.len());
 
         truths.push(TruthConstraint::hard(
             "truth:no-fabrication",
@@ -61,6 +66,29 @@ impl ConstraintEngine {
                 "代码安全",
                 "Code changes must not introduce security vulnerabilities",
             ));
+        }
+
+        // V50 §6.6：挖掘规则 → TruthConstraint（require/forbid 清单，阴机械执行）。
+        for r in rules {
+            let severity = match r.severity {
+                CheckSeverity::Hard => ConstraintSeverity::Hard,
+                CheckSeverity::Soft => ConstraintSeverity::Soft,
+            };
+            let mut desc = format!("when={:?}", r.when);
+            if !r.require.is_empty() {
+                desc.push_str(&format!(" require=[{}]", r.require.join(",")));
+            }
+            if !r.forbid.is_empty() {
+                desc.push_str(&format!(" forbid=[{}]", r.forbid.join(",")));
+            }
+            truths.push(TruthConstraint {
+                id: format!("ontology:{}", r.id),
+                name: r.id.clone(),
+                description: desc,
+                severity,
+                justification: Some("连山本体挖掘（§6.6）".into()),
+                status: TruthStatus::Active,
+            });
         }
 
         tracing::debug!(
@@ -122,14 +150,14 @@ impl ConstraintEngine {
         ConstraintResult { passed, violations }
     }
 
-    /// Check CausalAgent textual output (summary + violation list) against
+    /// Check YinAgent textual output (summary + violation list) against
     /// a set of constraints.
     ///
     /// This mirrors `check_constraints` but operates on the string-level
-    /// outputs produced by CausalAgent.verify() / .converge().
+    /// outputs produced by YinAgent.verify() / .converge().
     ///
     /// Any **Hard** violation short-circuits immediately.
-    pub fn check_causal_output(
+    pub fn check_yin_output(
         summary: &str,
         violations: &[String],
         constraints: &[TruthConstraint],
@@ -150,7 +178,7 @@ impl ConstraintEngine {
                         Some(ConstraintViolation {
                             truth_id: constraint.id.clone(),
                             truth_name: constraint.name.clone(),
-                            reason: "CausalAgent summary is empty; possible missing analysis"
+                            reason: "YinAgent summary is empty; possible missing analysis"
                                 .into(),
                             severity: constraint.severity.clone(),
                         })
@@ -192,7 +220,7 @@ impl ConstraintEngine {
                         Some(ConstraintViolation {
                             truth_id: constraint.id.clone(),
                             truth_name: constraint.name.clone(),
-                            reason: "Code safety violations present in CausalAgent output".into(),
+                            reason: "Code safety violations present in YinAgent output".into(),
                             severity: constraint.severity.clone(),
                         })
                     } else {
@@ -209,7 +237,7 @@ impl ConstraintEngine {
                         hard_truth_id = %violation.truth_id,
                         hard_truth_name = %violation.truth_name,
                         reason = %violation.reason,
-                        "Hard constraint violation in causal output — returning all violations"
+                        "Hard constraint violation in yin output — returning all violations"
                     );
                     result_violations.push(violation);
                     return ConstraintResult {
@@ -329,7 +357,7 @@ mod tests {
             assets_used: vec![],
             model: None,
             verify_model: None,
-            fitting_system_prompt: None,
+            yang_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
         }
@@ -346,7 +374,7 @@ mod tests {
     #[test]
     fn test_load_truths_default() {
         let tags: Vec<String> = Vec::new();
-        let truths = ConstraintEngine::load_truths(&tags);
+        let truths = ConstraintEngine::load_truths(&tags, &[]);
         assert_eq!(truths.len(), 3);
         assert!(truths.iter().any(|t| t.id == "truth:no-fabrication"));
         assert!(truths.iter().any(|t| t.id == "truth:evidence-based"));
@@ -356,7 +384,7 @@ mod tests {
     #[test]
     fn test_load_truths_with_code_tag() {
         let tags = vec!["code".into()];
-        let truths = ConstraintEngine::load_truths(&tags);
+        let truths = ConstraintEngine::load_truths(&tags, &[]);
         assert_eq!(truths.len(), 4);
         assert!(truths.iter().any(|t| t.id == "truth:code-safety"));
     }
@@ -364,8 +392,26 @@ mod tests {
     #[test]
     fn test_load_truths_code_tag_case_insensitive() {
         let tags = vec!["CODE".into()];
-        let truths = ConstraintEngine::load_truths(&tags);
+        let truths = ConstraintEngine::load_truths(&tags, &[]);
         assert_eq!(truths.len(), 4);
+    }
+
+    /// V50 §6.6：挖掘规则 → TruthConstraint（元层 ∪ rules）。
+    #[test]
+    fn test_load_truths_with_ontology_rules() {
+        use crate::types::ontology::{OntologyRule, RuleCondition};
+        use crate::types::verification::CheckSeverity;
+        let tags: Vec<String> = vec![];
+        let rules = vec![OntologyRule {
+            id: "guard-command-succeeds-prod".into(),
+            when: RuleCondition { domain: None, env: Some("prod".into()), action: None },
+            require: vec!["check:command_succeeds".into()],
+            forbid: vec![],
+            severity: CheckSeverity::Hard,
+        }];
+        let truths = ConstraintEngine::load_truths(&tags, &rules);
+        assert_eq!(truths.len(), 4); // 3 元层 + 1 挖掘规则
+        assert!(truths.iter().any(|t| t.id == "ontology:guard-command-succeeds-prod"));
     }
 
     #[test]
@@ -461,25 +507,25 @@ mod tests {
     }
 
     #[test]
-    fn test_check_causal_output_empty_summary_fails_hard() {
+    fn test_check_yin_output_empty_summary_fails_hard() {
         let constraints = vec![hard_truth(
             "truth:no-fabrication",
             "不编造事实",
             "no fab",
         )];
         let result =
-            ConstraintEngine::check_causal_output("", &[], &constraints);
+            ConstraintEngine::check_yin_output("", &[], &constraints);
         assert!(!result.passed);
     }
 
     #[test]
-    fn test_check_causal_output_non_empty_summary_passes() {
+    fn test_check_yin_output_non_empty_summary_passes() {
         let constraints = vec![hard_truth(
             "truth:no-fabrication",
             "不编造事实",
             "no fab",
         )];
-        let result = ConstraintEngine::check_causal_output(
+        let result = ConstraintEngine::check_yin_output(
             "Analysis complete: all constraints satisfied.",
             &[],
             &constraints,
@@ -488,14 +534,14 @@ mod tests {
     }
 
     #[test]
-    fn test_check_causal_output_code_safety_detected() {
+    fn test_check_yin_output_code_safety_detected() {
         let constraints = vec![hard_truth(
             "truth:code-safety",
             "代码安全",
             "code safety",
         )];
         let violations = vec!["Unsafe code detected in module X".into()];
-        let result = ConstraintEngine::check_causal_output(
+        let result = ConstraintEngine::check_yin_output(
             "Analysis complete.",
             &violations,
             &constraints,
@@ -506,7 +552,7 @@ mod tests {
 
     #[test]
     fn test_empty_constraints_passes_immediately() {
-        let result = ConstraintEngine::check_causal_output("", &[], &[]);
+        let result = ConstraintEngine::check_yin_output("", &[], &[]);
         assert!(result.passed);
     }
 }

@@ -1,5 +1,5 @@
 //! MCP Client Manager — connects to external MCP servers, wraps their tools
-//! for injection into FittingAgent (概率拟合·阳).
+//! for injection into YangAgent (概率拟合·阳).
 //!
 //! See AGENTS.md §10 for MCP rules.
 //!

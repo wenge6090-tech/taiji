@@ -4,9 +4,9 @@ import ChatPanel from "./components/ChatPanel";
 import GuizangGraph from "./components/GuizangGraph";
 import SpindleTree from "./components/SpindleTree";
 import TaijiBg from "./components/TaijiBg";
-import TpnPopup from "./components/TpnPopup";
+import ZhouyiPopup from "./components/ZhouyiPopup";
 import { useTaskTree } from "./hooks/useTaskTree";
-import { useTpnState } from "./hooks/useTpnState";
+import { useZhouyiState } from "./hooks/useZhouyiState";
 
 const WS_STATUS_TEXT: Record<string, string> = {
   connecting: "连接中",
@@ -29,7 +29,7 @@ export default function App() {
     detailError,
     openNode,
     closeNode,
-  } = useTpnState();
+  } = useZhouyiState();
 
   const [taskList, setTaskList] = useState<string[]>([]);
   const [showGuizang, setShowGuizang] = useState(false);
@@ -136,9 +136,9 @@ export default function App() {
         </main>
       </div>
 
-      {/* TPN 弹窗 */}
+      {/* Zhouyi 弹窗 */}
       {selectedNode && (
-        <TpnPopup
+        <ZhouyiPopup
           node={selectedNode}
           phaseState={phaseState}
           loading={detailLoading}

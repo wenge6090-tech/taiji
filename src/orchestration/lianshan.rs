@@ -1,4 +1,4 @@
-//! DMN Consumer — background task polling pending/ queue.
+//! Lianshan Consumer — background task polling pending/ queue.
 //! tokio::spawn with CancellationToken, exponential backoff.
 //! See AGENTS.md §6 for detailed rules.
 //!
@@ -6,7 +6,7 @@
 //! feeds them to the CognitionEvolver, and moves processed/dead files accordingly.
 //! Backoff starts at 1 s and caps at 60 s (1, 2, 4, 8, 16, 32, 60, 60, …).
 
-use crate::infra::config::DmnConfig;
+use crate::infra::config::LianshanConfig;
 use crate::infra::error::TaijiError;
 use crate::orchestration::cognition_evolver::CognitionEvolver;
 use std::path::{Path, PathBuf};
@@ -18,36 +18,36 @@ use tokio_util::sync::CancellationToken;
 const BACKOFF_INITIAL_MS: u64 = 1_000;   // 1 s
 const BACKOFF_CAP_MS: u64 = 60_000;      // 60 s
 
-/// DMN Consumer — background task that polls the pending/ queue.
-pub struct DmnConsumer {
+/// Lianshan Consumer — background task that polls the pending/ queue.
+pub struct LianshanConsumer {
     /// The cognition evolver that processes each pending task.
     evolver: Arc<CognitionEvolver>,
     /// Cancellation token to signal graceful shutdown.
     cancel: CancellationToken,
     /// Root directory under which `pending/` and `pending/dead/` live.
     data_root: PathBuf,
-    /// V33/MVP-3: DMN 演化配置（回报权重 / 门槛 / 主动学习开关）。
-    dmn_config: DmnConfig,
+    /// V33/MVP-3: Lianshan 演化配置（回报权重 / 门槛 / 主动学习开关）。
+    lianshan_config: LianshanConfig,
 }
 
-impl DmnConsumer {
-    /// Create a new DMN Consumer.
+impl LianshanConsumer {
+    /// Create a new Lianshan Consumer.
     ///
     /// * `evolver` — shared cognition evolver for δ₀–δ₃ operations.
     /// * `cancel` — cancellation token; the loop exits when this is signalled.
     /// * `data_root` — root directory containing the `pending/` subdirectory.
-    /// * `dmn_config` — V33/MVP-3 演化配置（§6.3/§6.4/§8.12）。
+    /// * `lianshan_config` — V33/MVP-3 演化配置（§6.3/§6.4/§8.12）。
     pub fn new(
         evolver: Arc<CognitionEvolver>,
         cancel: CancellationToken,
         data_root: &Path,
-        dmn_config: DmnConfig,
+        lianshan_config: LianshanConfig,
     ) -> Self {
         Self {
             evolver,
             cancel,
             data_root: data_root.to_path_buf(),
-            dmn_config,
+            lianshan_config,
         }
     }
 
@@ -80,7 +80,7 @@ impl DmnConsumer {
             if self.cancel.is_cancelled() {
                 tracing::info!(
                     data_root = %self.data_root.display(),
-                    "[DMN Consumer] received cancellation signal, exiting",
+                    "[Lianshan Consumer] received cancellation signal, exiting",
                 );
                 return;
             }
@@ -92,7 +92,7 @@ impl DmnConsumer {
                     tracing::error!(
                         data_root = %self.data_root.display(),
                         error = %e,
-                        "[DMN Consumer] failed to read pending directory: {e}",
+                        "[Lianshan Consumer] failed to read pending directory: {e}",
                     );
                     Self::backoff_sleep(&self.cancel, backoff_ms).await;
                     backoff_ms = (backoff_ms * 2).min(BACKOFF_CAP_MS);
@@ -115,7 +115,7 @@ impl DmnConsumer {
                         }
                         Err(e) => {
                             tracing::warn!(
-                                "[DMN Consumer] error reading directory entry: {e}",
+                                "[Lianshan Consumer] error reading directory entry: {e}",
                             );
                         }
                     }
@@ -125,7 +125,7 @@ impl DmnConsumer {
             // ── No files → backoff ──────────────────────────────────────
             if files.is_empty() {
                 tracing::debug!(
-                    "[DMN Consumer] no pending files, sleeping {} ms",
+                    "[Lianshan Consumer] no pending files, sleeping {} ms",
                     backoff_ms,
                 );
                 Self::backoff_sleep(&self.cancel, backoff_ms).await;
@@ -137,7 +137,7 @@ impl DmnConsumer {
             backoff_ms = BACKOFF_INITIAL_MS;
             tracing::info!(
                 count = files.len(),
-                "[DMN Consumer] processing {} pending file(s)",
+                "[Lianshan Consumer] processing {} pending file(s)",
                 files.len(),
             );
 
@@ -145,7 +145,7 @@ impl DmnConsumer {
                 // Exit early if cancelled.
                 if self.cancel.is_cancelled() {
                     tracing::info!(
-                        "[DMN Consumer] cancellation during file processing, stopping",
+                        "[Lianshan Consumer] cancellation during file processing, stopping",
                     );
                     return;
                 }
@@ -157,7 +157,7 @@ impl DmnConsumer {
 
                 tracing::info!(
                     file = %file_name,
-                    "[DMN Consumer] processing file: {file_name}",
+                    "[Lianshan Consumer] processing file: {file_name}",
                 );
 
                 // Read and parse the file.
@@ -167,7 +167,7 @@ impl DmnConsumer {
                         tracing::error!(
                             file = %file_name,
                             error = %e,
-                            "[DMN Consumer] failed to read {file_name}: {e}",
+                            "[Lianshan Consumer] failed to read {file_name}: {e}",
                         );
                         move_to_dead(file_path, &dead_dir, &file_name, &e.to_string()).await;
                         continue;
@@ -180,7 +180,7 @@ impl DmnConsumer {
                         tracing::error!(
                             file = %file_name,
                             error = %e,
-                            "[DMN Consumer] failed to parse {file_name}: {e}",
+                            "[Lianshan Consumer] failed to parse {file_name}: {e}",
                         );
                         move_to_dead(file_path, &dead_dir, &file_name, &e.to_string()).await;
                         continue;
@@ -228,7 +228,7 @@ impl DmnConsumer {
                                         &assets_used,
                                         passed,
                                         &checks,
-                                        &self.dmn_config,
+                                        &self.lianshan_config,
                                         model_key,
                                     )
                                     .await
@@ -238,14 +238,14 @@ impl DmnConsumer {
                                         tracing::warn!(
                                             task_id = %task_id,
                                             error = %e,
-                                            "[dmn_consumer] backprop_prompts failed — checks path continues"
+                                            "[lianshan] backprop_prompts failed — checks path continues"
                                         );
                                     }
                                 }
                             }
                             match self
                                 .evolver
-                                .backprop_checks(&task_id, &checks, &self.dmn_config, model_key)
+                                .backprop_checks(&task_id, &checks, &self.lianshan_config, model_key)
                                 .await
                             {
                                 Ok(_updated) => {
@@ -263,7 +263,7 @@ impl DmnConsumer {
                                                 quality: first.map(|c| c.quality).unwrap_or(0.0),
                                             };
                                         if let Err(e) = crate::orchestration::model_router::update_model_stats(
-                                            &self.evolver.liluo(),
+                                            &self.evolver.guizang(),
                                             &crate::types::agent::ModelKey(key.to_string()),
                                             &signal,
                                         )
@@ -273,15 +273,79 @@ impl DmnConsumer {
                                                 task_id = %task_id,
                                                 model_key = %key,
                                                 error = %e,
-                                                "[dmn_consumer] model_stats update failed — checks path continues"
+                                                "[lianshan] model_stats update failed — checks path continues"
                                             );
                                         }
+                                    }
+                                    // ── 蓝图文件·迹拓扑（BCP §6.0 契约）：backprop 成功后压缩
+                                    // 任务目录树 → manifold/{root_task}.yaml。增强层：失败仅
+                                    // warn 不阻断 backprop 主流程（与 model_stats 同构）。
+                                    if let Some(td) = value.get("task_dir").and_then(|v| v.as_str()) {
+                                        match crate::orchestration::manifold::compress_task_tree_to_topology(
+                                            Path::new(td),
+                                            &assets_used,
+                                            &checks,
+                                        ) {
+                                            Ok(topo) => {
+                                                if let Err(e) = self
+                                                    .evolver
+                                                    .guizang()
+                                                    .save_topology(task_id, &topo)
+                                                    .await
+                                                {
+                                                    tracing::warn!(
+                                                        task_id = %task_id,
+                                                        error = %e,
+                                                        "[lianshan] save_topology failed — backprop continues"
+                                                    );
+                                                }
+                                            }
+                                            Err(e) => {
+                                                tracing::warn!(
+                                                    task_id = %task_id,
+                                                    error = %e,
+                                                    "[lianshan] compress_task_tree_to_topology failed — backprop continues"
+                                                );
+                                            }
+                                        }
+                                        // ── V50 编译任务入队（§6.0）：拓扑产出后入队
+                                        // compile/{root_task}.json。增强层：失败仅 warn
+                                        // 不阻断 backprop 主流程（与 model_stats 同构）。
+                                        if let Err(e) = crate::orchestration::compile::enqueue_compile_task(
+                                            &self.data_root,
+                                            task_id,
+                                        )
+                                        .await
+                                        {
+                                            tracing::warn!(
+                                                task_id = %task_id,
+                                                error = %e,
+                                                "[lianshan] compile enqueue failed — backprop continues"
+                                            );
+                                        }
+                                    }
+                                    // ── V50 §6.6 本体挖掘：共现→依赖边 + 失败×model_class→规则。
+                                    // 增强层：失败仅 warn 不阻断 backprop 主流程（与 model_stats 同构）。
+                                    if let Err(e) = crate::orchestration::ontology_miner::run_ontology_mining(
+                                        self.evolver.guizang().as_ref(),
+                                        &assets_used,
+                                        passed,
+                                        &checks,
+                                        model_key,
+                                    )
+                                    .await
+                                    {
+                                        tracing::warn!(
+                                            task_id = %task_id,
+                                            error = %e,
+                                            "[lianshan] ontology mining failed — backprop continues"
+                                        );
                                     }
                                     // ── V33/MVP-3: backprop 后尝试契约演化（单次、激活门槛内）──
                                     // 演化失败（I/O）→ 错误上抛 → pending 进死信：backprop 已成功
                                     // 统计已回传，死信移动防止重复 backprop（幂等性保持）。
                                     self.evolver
-                                        .evolve_contracts(&self.dmn_config, model_key)
+                                        .evolve_contracts(&self.lianshan_config, model_key)
                                         .await
                                 }
                                 Err(e) => Err(e),
@@ -315,7 +379,7 @@ impl DmnConsumer {
                         task_id = %task_id,
                         attempt,
                         error = ?evolve_result.as_ref().unwrap_err(),
-                        "[DMN Consumer] evolve attempt {attempt}/{MAX_EVOLVE_RETRIES} failed",
+                        "[Lianshan Consumer] evolve attempt {attempt}/{MAX_EVOLVE_RETRIES} failed",
                     );
                 }
 
@@ -329,7 +393,7 @@ impl DmnConsumer {
                             models_updated = report.models_updated,
                             grids_rewired = report.grids_rewired,
                             confidence_delta = report.confidence_delta,
-                            "[DMN Consumer] successfully evolved task={task_id}: \
+                            "[Lianshan Consumer] successfully evolved task={task_id}: \
                              pruned={} tuned={} updated={} rewired={} Δ={:.4}",
                             report.pruned,
                             report.skills_tuned,
@@ -343,7 +407,7 @@ impl DmnConsumer {
                             tracing::error!(
                                 file = %file_name,
                                 error = %e,
-                                "[DMN Consumer] failed to remove processed file {file_name}: {e}",
+                                "[Lianshan Consumer] failed to remove processed file {file_name}: {e}",
                             );
                         }
                     }
@@ -352,7 +416,7 @@ impl DmnConsumer {
                             file = %file_name,
                             task_id = %task_id,
                             error = %e,
-                            "[DMN Consumer] evolution failed for task={task_id} after {MAX_EVOLVE_RETRIES} attempts: {e}",
+                            "[Lianshan Consumer] evolution failed for task={task_id} after {MAX_EVOLVE_RETRIES} attempts: {e}",
                         );
                         move_to_dead(file_path, &dead_dir, &file_name, &e.to_string()).await;
                     }
@@ -386,7 +450,7 @@ async fn move_to_dead(
         tracing::error!(
             dead_dir = %dead_dir.display(),
             error = %e,
-            "[DMN Consumer] failed to create dead-letter directory: {e}",
+            "[Lianshan Consumer] failed to create dead-letter directory: {e}",
         );
         return;
     }
@@ -409,7 +473,7 @@ async fn move_to_dead(
             tracing::info!(
                 file = %file_name,
                 dead_path = %dead_path.display(),
-                "[DMN Consumer] moved failed file to dead-letter: {}",
+                "[Lianshan Consumer] moved failed file to dead-letter: {}",
                 dead_path.display(),
             );
         }
@@ -418,7 +482,7 @@ async fn move_to_dead(
                 file = %file_name,
                 dead_path = %dead_path.display(),
                 error = %e,
-                "[DMN Consumer] failed to move file to dead-letter: {e}",
+                "[Lianshan Consumer] failed to move file to dead-letter: {e}",
             );
         }
     }
@@ -427,7 +491,7 @@ async fn move_to_dead(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::infra::knowledge::LiluoClient;
+    use crate::infra::knowledge::GuizangClient;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -437,27 +501,27 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let root = std::env::temp_dir().join(format!("taiji_dmn_test_{name}_{ts}"));
+        let root = std::env::temp_dir().join(format!("taiji_lianshan_test_{name}_{ts}"));
         fs::create_dir_all(root.join("pending")).await.unwrap();
         root
     }
 
-    /// Build a DmnConsumer backed by a file-system LiluoClient.
-    async fn test_consumer(data_root: &Path) -> (DmnConsumer, PathBuf) {
+    /// Build a LianshanConsumer backed by a file-system GuizangClient.
+    async fn test_consumer(data_root: &Path) -> (LianshanConsumer, PathBuf) {
         let knowledge_dir = std::env::temp_dir().join(format!(
-            "taiji_dmn_knowledge_{}",
+            "taiji_lianshan_knowledge_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         let client = Arc::new(
-            LiluoClient::new(&knowledge_dir)
+            GuizangClient::new(&knowledge_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client));
-        let consumer = DmnConsumer::new(evolver, CancellationToken::new(), data_root, DmnConfig::default());
+        let consumer = LianshanConsumer::new(evolver, CancellationToken::new(), data_root, LianshanConfig::default());
         (consumer, knowledge_dir)
     }
 
@@ -504,7 +568,7 @@ mod tests {
 
         // Recreate consumer with the external cancellation token.
         let evolver = consumer.evolver; // reuse the evolver
-        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+        let consumer = LianshanConsumer::new(evolver, cancel.clone(), &data_root, LianshanConfig::default());
         let handle = consumer.spawn();
 
         // Give the loop time to spin once.
@@ -531,26 +595,26 @@ mod tests {
         let task_file = pending.join("task_abc123.json");
         let payload = serde_json::json!({
             "task_id": "task_abc123",
-            "description": "Test DMN evolution",
+            "description": "Test Lianshan evolution",
         });
         fs::write(&task_file, serde_json::to_string_pretty(&payload).unwrap())
             .await
             .unwrap();
 
         let knowledge_dir = std::env::temp_dir().join(format!(
-            "taiji_dmn_knowledge_vf_{}",
+            "taiji_lianshan_knowledge_vf_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         let client = Arc::new(
-            LiluoClient::new(&knowledge_dir)
+            GuizangClient::new(&knowledge_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client));
-        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+        let consumer = LianshanConsumer::new(evolver, cancel.clone(), &data_root, LianshanConfig::default());
         let handle = consumer.spawn();
 
         // Allow one processing cycle.
@@ -584,7 +648,7 @@ mod tests {
         }]);
         let payload = serde_json::json!({
             "task_id": "task_stats",
-            "source": "tpn",
+            "source": "zhouyi",
             "checks": checks,
             "assets_used": [],
             "passed": true,
@@ -595,20 +659,20 @@ mod tests {
             .unwrap();
 
         let knowledge_dir = std::env::temp_dir().join(format!(
-            "taiji_dmn_knowledge_ms_{}",
+            "taiji_lianshan_knowledge_ms_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         let client = Arc::new(
-            LiluoClient::new(&knowledge_dir)
+            GuizangClient::new(&knowledge_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client.clone()));
         let consumer =
-            DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+            LianshanConsumer::new(evolver, cancel.clone(), &data_root, LianshanConfig::default());
         let handle = consumer.spawn();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
@@ -632,6 +696,105 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_backprop_produces_topology_file() {
+        // BCP §6.0 蓝图文件契约：pending 带 task_dir → backprop 成功后
+        // 压缩任务目录树 → manifold/{task_id}.yaml（节点含 task/asset/deliverable）。
+        use crate::types::task::{Task, TaskStatus};
+
+        let data_root = create_test_root("topology").await;
+        let pending = data_root.join("pending");
+        let cancel = CancellationToken::new();
+
+        // 任务目录树：root meta.json + deliverables/out.md
+        let task_dir = std::env::temp_dir().join(format!(
+            "taiji_lianshan_taskdir_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(task_dir.join("deliverables")).unwrap();
+        let root_meta = Task {
+            id: "task_topo".into(),
+            description: "topo test".into(),
+            depth: 0,
+            status: TaskStatus::Completed,
+            parent_id: None,
+            subtask_ids: vec![],
+        };
+        std::fs::write(task_dir.join("meta.json"), serde_json::to_string(&root_meta).unwrap())
+            .unwrap();
+        std::fs::write(task_dir.join("deliverables").join("out.md"), "x").unwrap();
+
+        let task_file = pending.join("task_topo.json");
+        let checks = serde_json::json!([{
+            "check_id": "c1", "kind": "file_exists", "passed": true,
+            "detail": "ok", "duration_ms": 1, "cost_tokens": 100,
+            "verify_rounds": 2, "quality": 1.0
+        }]);
+        let payload = serde_json::json!({
+            "task_id": "task_topo",
+            "task_dir": task_dir.display().to_string(),
+            "source": "zhouyi",
+            "checks": checks,
+            "assets_used": [{"asset_type": "prompt", "id": "exec-yang"}],
+            "passed": true,
+            "model_key": "deepseek-deepseek-v4-flash",
+        });
+        std::fs::write(&task_file, serde_json::to_string(&payload).unwrap()).unwrap();
+
+        let knowledge_dir = std::env::temp_dir().join(format!(
+            "taiji_lianshan_knowledge_topo_{}_{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let client = Arc::new(
+            GuizangClient::new(&knowledge_dir)
+                .await
+                .expect("GuizangClient should initialise"),
+        );
+        let evolver = Arc::new(CognitionEvolver::new(client.clone()));
+        let consumer =
+            LianshanConsumer::new(evolver, cancel.clone(), &data_root, LianshanConfig::default());
+        let handle = consumer.spawn();
+
+        tokio::time::sleep(std::time::Duration::from_millis(800)).await;
+        cancel.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(5), handle)
+            .await
+            .expect("consumer did not shut down")
+            .expect("consumer panicked");
+
+        assert!(!task_file.exists(), "pending file processed");
+        let topo = client
+            .load_topology("task_topo")
+            .await
+            .unwrap()
+            .expect("topology file should exist");
+        assert_eq!(topo.root_task, "task_topo");
+        assert!(topo
+            .nodes
+            .iter()
+            .any(|n| n.kind == crate::types::manifold::TopologyNodeKind::Task));
+        assert!(topo.nodes.iter().any(|n| n.id == "exec-yang"));
+        assert!(topo.nodes.iter().any(|n| n.id.ends_with("deliverables/out.md")));
+
+        // V50：拓扑产出后入队 compile/{root_task}.json（§6.0 编译任务契约）
+        assert!(
+            data_root.join("compile").join("task_topo.json").exists(),
+            "compile task enqueued after topology production"
+        );
+
+        cleanup(&data_root).await;
+        cleanup(&knowledge_dir).await;
+        std::fs::remove_dir_all(&task_dir).unwrap();
+    }
+
+    #[tokio::test]
     async fn test_process_invalid_file_moves_to_dead() {
         let data_root = create_test_root("invalid_file").await;
         let pending = data_root.join("pending");
@@ -642,19 +805,19 @@ mod tests {
         fs::write(&task_file, b"not valid json").await.unwrap();
 
         let knowledge_dir = std::env::temp_dir().join(format!(
-            "taiji_dmn_knowledge_if_{}",
+            "taiji_lianshan_knowledge_if_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         let client = Arc::new(
-            LiluoClient::new(&knowledge_dir)
+            GuizangClient::new(&knowledge_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client));
-        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+        let consumer = LianshanConsumer::new(evolver, cancel.clone(), &data_root, LianshanConfig::default());
         let handle = consumer.spawn();
 
         tokio::time::sleep(tokio::time::Duration::from_millis(800)).await;
@@ -696,16 +859,16 @@ mod tests {
 
         // 知识库种一棵契约资产（与 consumer 共享同一 client）
         let knowledge_dir = std::env::temp_dir().join(format!(
-            "taiji_dmn_knowledge_cb_{}",
+            "taiji_lianshan_knowledge_cb_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         let client = Arc::new(
-            LiluoClient::new(&knowledge_dir)
+            GuizangClient::new(&knowledge_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let mut v = VerificationAsset::new(
             "v-closed-loop",
@@ -727,14 +890,14 @@ mod tests {
 
         let evolver = Arc::new(CognitionEvolver::new(client.clone()));
         let cancel = CancellationToken::new();
-        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+        let consumer = LianshanConsumer::new(evolver, cancel.clone(), &data_root, LianshanConfig::default());
         let handle = consumer.spawn();
 
-        // 写 checks 格式 pending（模拟 TPN PASS 入队）
+        // 写 checks 格式 pending（模拟 Zhouyi PASS 入队）
         let task_file = pending.join("task_loop_1.json");
         let payload = serde_json::json!({
             "task_id": "task_loop_1",
-            "source": "tpn",
+            "source": "zhouyi",
             "checks": [
                 {
                     "check_id": "check-loop",
@@ -782,20 +945,20 @@ mod tests {
         let pending = data_root.join("pending");
 
         let knowledge_dir = std::env::temp_dir().join(format!(
-            "taiji_dmn_knowledge_cbd_{}",
+            "taiji_lianshan_knowledge_cbd_{}",
             SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
                 .as_nanos()
         ));
         let client = Arc::new(
-            LiluoClient::new(&knowledge_dir)
+            GuizangClient::new(&knowledge_dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let evolver = Arc::new(CognitionEvolver::new(client));
         let cancel = CancellationToken::new();
-        let consumer = DmnConsumer::new(evolver, cancel.clone(), &data_root, DmnConfig::default());
+        let consumer = LianshanConsumer::new(evolver, cancel.clone(), &data_root, LianshanConfig::default());
         let handle = consumer.spawn();
 
         // checks 字段格式错误（非数组）→ 解析失败 → 死信

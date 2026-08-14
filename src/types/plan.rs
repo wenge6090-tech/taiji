@@ -2,8 +2,8 @@
 //!
 //! [`PlanSummary`] is produced by [`PlanBuilder`](crate::agents::plan::PlanBuilder)
 //! which runs MetaAgent (权重更新·元) to obtain cognitive context, then asks
-//! an LLM to compose a structured execution plan **without** entering the TPN
-//! loop (no FittingAgent / CausalAgent).
+//! an LLM to compose a structured execution plan **without** entering the Zhouyi
+//! loop (no YangAgent / YinAgent).
 
 use serde::{Deserialize, Serialize};
 

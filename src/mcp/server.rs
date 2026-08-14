@@ -1,4 +1,4 @@
-//! MCP Server — exposes taiji tools (TPN, DMN, cognition assets) over stdio transport.
+//! MCP Server — exposes taiji tools (Zhouyi, Lianshan, cognition assets) over stdio transport.
 //!
 //! See AGENTS.md §10 for MCP rules.  
 //! Uses `rmcp::ServerHandler` (no macros) for broad API compatibility.
@@ -6,7 +6,7 @@
 //! ## Exposed tools
 //! | Tool             | Description                                                          |
 //! |------------------|----------------------------------------------------------------------|
-//! | `taiji_plan`     | Pre-execution plan: MetaAgent + LLM plan summary, no TPN loop.       |
+//! | `taiji_plan`     | Pre-execution plan: MetaAgent + LLM plan summary, no Zhouyi loop.       |
 //! | `taiji_run`      | Execute a task description via `RecursiveRunner`.                    |
 //! | `taiji_explain`  | Post-execution report: reasoning tree summary from trace data.       |
 //! | `taiji_trace`    | Read trace records for a task.                                       |
@@ -126,7 +126,7 @@ impl ServerHandler for TaijiMcpServer {
         let tools = vec![
             Tool::new(
                 "taiji_plan",
-                "Pre-execution plan: run MetaAgent (权重更新) and LLM-compose a structured execution plan (PlanSummary). Does NOT enter the TPN loop.",
+                "Pre-execution plan: run MetaAgent (权重更新) and LLM-compose a structured execution plan (PlanSummary). Does NOT enter the Zhouyi loop.",
                 Arc::new(object_schema(serde_json::json!({
                     "description": {
                         "type": "string",
@@ -136,7 +136,7 @@ impl ServerHandler for TaijiMcpServer {
             ),
             Tool::new(
                 "taiji_run",
-                "Execute a task via the TPN cognitive engine (MetaAgent → FittingAgent → CausalAgent).",
+                "Execute a task via the Zhouyi cognitive engine (MetaAgent → YangAgent → YinAgent).",
                 Arc::new(object_schema(serde_json::json!({
                     "description": {
                         "type": "string",
@@ -654,7 +654,7 @@ fn build_explain_report(
         }
 
         // Group by cycle for timeline phases
-        // Track tool calls per cycle to identify probability fitting phases
+        // Track tool calls per cycle to identify probability yang phases
         let mut prev_cycle = 0u32;
         let mut current_tools: Vec<String> = Vec::new();
         let mut current_duration = 0u64;
@@ -680,7 +680,7 @@ fn build_explain_report(
                     cycle: prev_cycle,
                     round: 0,
                     verdict: "BACK_TO_META".into(),
-                    reason: "TPN 循环检测到认知偏差，重新运行权重更新（元）。".into(),
+                    reason: "Zhouyi 循环检测到认知偏差，重新运行权重更新（元）。".into(),
                     constraint_violations: vec![],
                 });
 
@@ -750,17 +750,17 @@ fn build_explain_report(
 
     let summary = if status == "Completed" {
         format!(
-            "任务已完成。共经历 {} 个 TPN 周期、{} 层递归深度，耗时 {} 秒。生成 {} 个交付产物。",
+            "任务已完成。共经历 {} 个 Zhouyi 周期、{} 层递归深度，耗时 {} 秒。生成 {} 个交付产物。",
             total_cycles, total_depth, total_seconds, deliverables.len(),
         )
     } else if status == "Failed" || status == "Cancelled" {
         format!(
-            "任务失败（{status}）。共经历 {} 个 TPN 周期、{} 层递归深度，耗时 {} 秒。",
+            "任务失败（{status}）。共经历 {} 个 Zhouyi 周期、{} 层递归深度，耗时 {} 秒。",
             total_cycles, total_depth, total_seconds,
         )
     } else {
         format!(
-            "任务当前状态：{status}。已进行 {} 个 TPN 周期、{} 层递归深度，耗时 {} 秒。",
+            "任务当前状态：{status}。已进行 {} 个 Zhouyi 周期、{} 层递归深度，耗时 {} 秒。",
             total_cycles, total_depth, total_seconds,
         )
     };

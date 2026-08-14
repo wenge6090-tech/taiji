@@ -18,7 +18,7 @@ implementations:
   params: {}
   severity: soft
   pass_condition: 共同数据一致；子任务结论无直接矛盾；聚合逻辑自洽
-agent_target: CausalAgent
+agent_target: YinAgent
 confidence: 0.7
 version: 1
 status: active

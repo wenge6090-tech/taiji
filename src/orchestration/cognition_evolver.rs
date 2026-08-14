@@ -1,5 +1,5 @@
-//! CognitionEvolver — DMN cognitive evolution (δ₀-δ₂ + V33/MVP-3 契约演化).
-//! Called by DMN Consumer background task.
+//! CognitionEvolver — Lianshan cognitive evolution (δ₀-δ₂ + V33/MVP-3 契约演化).
+//! Called by Lianshan Consumer background task.
 //! See AGENTS.md §6 for detailed rules.
 //!
 //! Operations:
@@ -8,16 +8,16 @@
 //! - δ₂: L2 Bayesian confidence update (预留).
 //! - evolve(): Run δ₀→δ₂ in sequence, producing an EvolutionReport.
 //! - V33/MVP-3: `evolve_contracts()` — MCTS 四算子作用于契约空间（§8.21）：
-//!   backprop（dmn_consumer 分发）→ fork（严格度参数化变体）→ merge（相似变体合并）→
+//!   backprop（lianshan 分发）→ fork（严格度参数化变体）→ merge（相似变体合并）→
 //!   prune（组内 >2σ 淘汰）。纯符号层，不调 LLM。
 //!
 //! # 归藏 integration
 //! Evolution results are written back to the 归藏 knowledge store as
 //! metadata placeholders (V22: grids/ removed — no asset is persisted).
 
-use crate::infra::config::DmnConfig;
+use crate::infra::config::LianshanConfig;
 use crate::infra::error::TaijiError;
-use crate::infra::knowledge::{LiluoClient, ModelAsset};
+use crate::infra::knowledge::{GuizangClient, ModelAsset};
 use crate::infra::trace::TraceRecord;
 use crate::types::agent::{AssetRef, PromptAsset, VerificationAsset};
 use crate::types::verification::{CheckKind, CheckResult, CheckStats};
@@ -52,31 +52,31 @@ pub struct EvolutionReport {
     pub merged: u64,
 }
 
-/// DMN Cognitive Evolution Engine.
+/// Lianshan Cognitive Evolution Engine.
 ///
 /// Drives the evolution operators (δ₀–δ₂) over the 归藏 knowledge store.
 pub struct CognitionEvolver {
-    liluo: Arc<LiluoClient>,
+    guizang: Arc<GuizangClient>,
 }
 
 impl CognitionEvolver {
     /// Create a new evolver with a reference to the 归藏 client.
-    pub fn new(liluo: Arc<LiluoClient>) -> Self {
-        Self { liluo }
+    pub fn new(guizang: Arc<GuizangClient>) -> Self {
+        Self { guizang }
     }
 
     /// 根归藏 client 访问器（V36：model_stats 根级回传——update_model_stats
     /// 需要 knowledge 根，分区 client 与根 client 的 root_dir 一致，传根即可）。
-    pub fn liluo(&self) -> &Arc<LiluoClient> {
-        &self.liluo
+    pub fn guizang(&self) -> &Arc<GuizangClient> {
+        &self.guizang
     }
 
     /// V44 去分区化：回传统一落根级资产树（model_key 仅作统计键，不派生 client）。
-    async fn partition_liluo(
+    async fn partition_guizang(
         &self,
         _model_key: Option<&str>,
-    ) -> Result<Arc<LiluoClient>, TaijiError> {
-        Ok(self.liluo.clone())
+    ) -> Result<Arc<GuizangClient>, TaijiError> {
+        Ok(self.guizang.clone())
     }
 
     /// δ₀: Prune low-confidence cognitive assets.
@@ -85,7 +85,7 @@ impl CognitionEvolver {
     /// and returns the count of hypothetical pruned nodes.
     pub async fn prune_low_confidence(&self, threshold: f64) -> Result<u64, TaijiError> {
         tracing::info!(
-            knowledge_dir = %self.liluo.knowledge_dir().display(),
+            knowledge_dir = %self.guizang.knowledge_dir().display(),
             threshold = threshold,
             "[δ₀] prune_low_confidence: would remove nodes with confidence < {threshold}",
         );
@@ -101,7 +101,7 @@ impl CognitionEvolver {
     /// Logs the tuning event. Returns `Ok(())` on success.
     pub async fn tune_skill(&self, skill_id: &str, success: bool) -> Result<(), TaijiError> {
         tracing::info!(
-            knowledge_dir = %self.liluo.knowledge_dir().display(),
+            knowledge_dir = %self.guizang.knowledge_dir().display(),
             skill_id = %skill_id,
             success = success,
             "[δ₁] tune_skill: skill={skill_id} success={success}",
@@ -115,17 +115,17 @@ impl CognitionEvolver {
     /// 映射先验初始化（α = 1 + k·confidence，β = 1 + k·(1−confidence)，k = prior_strength）；
     /// 然后 α += success、β += fail → save_model（version++ 原子写）→ 返回后验均值。
     ///
-    /// **单写者约束**：仅 DMN Consumer（backprop 路径）调用——TPN 执行期归藏只读（§8.3）。
+    /// **单写者约束**：仅 Lianshan Consumer（backprop 路径）调用——Zhouyi 执行期归藏只读（§8.3）。
     pub async fn bayesian_update(
         &self,
-        liluo: &LiluoClient,
+        guizang: &GuizangClient,
         asset_id: &str,
         success: u64,
         fail: u64,
         prior_confidence: f64,
         prior_strength: f64,
     ) -> Result<f64, TaijiError> {
-        let mut model = match liluo.load_model(asset_id).await? {
+        let mut model = match guizang.load_model(asset_id).await? {
             Some(m) => m,
             None => {
                 // 首次：纯先验（§6.4.1 先验映射）
@@ -136,13 +136,13 @@ impl CognitionEvolver {
                     prior_strength,
                 );
                 // from_prior 内部构造已含先验伪计数；此处先持久化让版本链从 1 开始
-                liluo.save_model(&mut m).await?;
+                guizang.save_model(&mut m).await?;
                 m
             }
         };
         model.alpha += success as f64;
         model.beta += fail as f64;
-        liluo.save_model(&mut model).await?;
+        guizang.save_model(&mut model).await?;
         let mean = model.posterior_mean();
         tracing::info!(
             asset_id = %asset_id,
@@ -167,7 +167,7 @@ impl CognitionEvolver {
         trace_records: &[TraceRecord],
     ) -> Result<EvolutionReport, TaijiError> {
         tracing::info!(
-            knowledge_dir = %self.liluo.knowledge_dir().display(),
+            knowledge_dir = %self.guizang.knowledge_dir().display(),
             task_id = %task_id,
             trace_count = trace_records.len(),
             "[evolve] starting evolution cycle for task={task_id} with {} trace records",
@@ -190,9 +190,9 @@ impl CognitionEvolver {
         let mut models_updated = 0u64;
         let mut confidence_delta = 0.0;
         for record in trace_records {
-            if record.phase.contains("概率拟合") || record.phase.contains("fitting") {
+            if record.phase.contains("概率拟合") || record.phase.contains("yang") {
                 let new_conf = self
-                    .bayesian_update(&self.liluo, &record.task_id, 1, 1, 0.5, 10.0)
+                    .bayesian_update(&self.guizang, &record.task_id, 1, 1, 0.5, 10.0)
                     .await?;
                 models_updated += 1;
                 confidence_delta += new_conf - 0.5;
@@ -212,7 +212,7 @@ impl CognitionEvolver {
         };
 
         tracing::info!(
-            knowledge_dir = %self.liluo.knowledge_dir().display(),
+            knowledge_dir = %self.guizang.knowledge_dir().display(),
             task_id = %task_id,
             pruned = report.pruned,
             skills_tuned = report.skills_tuned,
@@ -227,7 +227,7 @@ impl CognitionEvolver {
             report.confidence_delta,
         );
 
-        // ── Write evolution result to 理络 ──
+        // ── Write evolution result to 归藏 ──
         self.write_evolution(task_id, &report).await?;
 
         Ok(report)
@@ -262,11 +262,11 @@ impl CognitionEvolver {
     /// 加载全部验证契约资产，按 `check_id` 匹配检查项，累加 `stats`
     /// （n++ / passed → pass_count++），写回归藏（version++）。
     ///
-    /// **单写者约束**：仅 DMN Consumer（单线程后台循环）调用本方法——
-    /// TPN 执行期间归藏只读（§8.3 硬约束），本方法是被动学习的唯一写路径。
+    /// **单写者约束**：仅 Lianshan Consumer（单线程后台循环）调用本方法——
+    /// Zhouyi 执行期间归藏只读（§8.3 硬约束），本方法是被动学习的唯一写路径。
     ///
     /// 未匹配到资产的 check_id 仅 warn（资产可能已删除/重构）；
-    /// 归藏 I/O 失败重试语义由调用方（DMN Consumer）负责。
+    /// 归藏 I/O 失败重试语义由调用方（Lianshan Consumer）负责。
     ///
     /// # Returns
     /// 更新的检查项数量。
@@ -274,7 +274,7 @@ impl CognitionEvolver {
         &self,
         task_id: &str,
         checks: &[CheckResult],
-        config: &DmnConfig,
+        config: &LianshanConfig,
         model_key: Option<&str>,
     ) -> Result<u64, TaijiError> {
         if checks.is_empty() {
@@ -283,8 +283,8 @@ impl CognitionEvolver {
         }
 
         // V36 分区一致性（§8.3）：统计回传到路由模型分区（None → 根/legacy）。
-        let liluo = self.partition_liluo(model_key).await?;
-        let mut verifications = liluo.load_all_verifications().await?;
+        let guizang = self.partition_guizang(model_key).await?;
+        let mut verifications = guizang.load_all_verifications().await?;
         let mut updated_total = 0u64;
         let mut matched_ids: Vec<String> = Vec::new();
 
@@ -313,13 +313,13 @@ impl CognitionEvolver {
                 updated_total += 1;
             }
             if updated_any {
-                liluo.save_verification(verification).await?;
+                guizang.save_verification(verification).await?;
                 // V33/MVP-3.5: 贝叶斯后验双轨（开关关 → 跳过；失败仅 warn——
                 // 频率统计是主数据已持久化，贝叶斯是可增强维度，不阻断学习）
                 if config.bayesian_enabled && (bayes_success > 0 || bayes_fail > 0) {
                     if let Err(e) = self
                         .bayesian_update(
-                            &liluo,
+                            &guizang,
                             &verification.id,
                             bayes_success,
                             bayes_fail,
@@ -368,12 +368,16 @@ impl CognitionEvolver {
     /// 重试不会重复操作（幂等）；中途 I/O 失败的部分应用由调用方死信处理。
     pub async fn evolve_contracts(
         &self,
-        config: &DmnConfig,
+        config: &LianshanConfig,
         model_key: Option<&str>,
     ) -> Result<EvolutionReport, TaijiError> {
         // V36 分区一致性（§8.3）：演化作用于 pending 路由模型分区（None → 根）。
-        let liluo = self.partition_liluo(model_key).await?;
-        let assets = liluo.load_all_verifications().await?;
+        let guizang = self.partition_guizang(model_key).await?;
+        // V50 环境维度轴（§6.3.1）：fork 变体打 env_tags = 触发模型类
+        //（None → 无维度，变体 env_tags 保持空）。
+        let model_env_tag: Option<String> =
+            model_key.map(|k| crate::agents::factory::model_class_from_str(k).to_string());
+        let assets = guizang.load_all_verifications().await?;
         if !Self::activation_gate(&assets, config) {
             tracing::debug!(
                 assets = assets.len(),
@@ -387,18 +391,18 @@ impl CognitionEvolver {
         // V33/MVP-3.5: 贝叶斯后验 map（§6.4.1）——bayesian_enabled=false → 空 map，
         // 算子回退频率路径（MVP-3 行为不变）。
         let posterior: BTreeMap<String, (f64, f64)> = if config.bayesian_enabled {
-            let models = liluo.load_all_models().await?;
+            let models = guizang.load_all_models().await?;
             Self::asset_posterior_map(&assets, &models, config)
         } else {
             BTreeMap::new()
         };
 
-        let forked = self.fork_variants(&liluo, config, &posterior).await?;
-        let merged = self.merge_variants(&liluo, config, &posterior).await?;
-        let pruned = self.prune_variants(&liluo, config, &posterior).await?;
+        let forked = self.fork_variants(&guizang, config, &posterior, model_env_tag.as_deref()).await?;
+        let merged = self.merge_variants(&guizang, config, &posterior).await?;
+        let pruned = self.prune_variants(&guizang, config, &posterior).await?;
 
         // V35/MVP-6: prompts 对称演化（同一 evolve 调用内串行——单写者保持 §8.3）
-        let p_report = self.evolve_prompts(&liluo, config).await?;
+        let p_report = self.evolve_prompts(&guizang, config, model_env_tag.as_deref()).await?;
 
         tracing::info!(
             forked,
@@ -428,7 +432,7 @@ impl CognitionEvolver {
         assets_used: &[AssetRef],
         passed: bool,
         checks: &[CheckResult],
-        config: &DmnConfig,
+        config: &LianshanConfig,
         model_key: Option<&str>,
     ) -> Result<u64, TaijiError> {
         let prompt_refs: Vec<&str> = assets_used
@@ -442,7 +446,7 @@ impl CognitionEvolver {
         }
 
         // V36 分区一致性（§8.3）：prompts 回传到路由模型分区（None → 根/legacy）。
-        let liluo = self.partition_liluo(model_key).await?;
+        let guizang = self.partition_guizang(model_key).await?;
 
         // 任务级四维信号（§6.4——同任务摊派值一致，取首项；空 checks → 0）
         let cost = checks.first().map(|c| c.cost_tokens).unwrap_or(0);
@@ -451,7 +455,7 @@ impl CognitionEvolver {
 
         let mut updated = 0u64;
         for pid in prompt_refs {
-            let Some(mut p) = liluo.load_prompt(pid).await? else {
+            let Some(mut p) = guizang.load_prompt(pid).await? else {
                 tracing::warn!(task_id, prompt = pid, "[backprop_prompts] prompt asset not found — skipping");
                 continue;
             };
@@ -467,12 +471,12 @@ impl CognitionEvolver {
             if p.stats.n > 0 {
                 p.success_rate = Self::stats_pass_rate(&p.stats);
             }
-            liluo.save_prompt(&mut p).await?;
+            guizang.save_prompt(&mut p).await?;
             // 贝叶斯双轨（开关关 → 跳过；失败仅 warn——频率是主数据）
             if config.bayesian_enabled {
                 let (s, f) = if passed { (1, 0) } else { (0, 1) };
                 if let Err(e) = self
-                    .bayesian_update(&liluo, &p.id, s, f, p.confidence, config.prior_strength)
+                    .bayesian_update(&guizang, &p.id, s, f, p.confidence, config.prior_strength)
                     .await
                 {
                     tracing::warn!(
@@ -499,10 +503,11 @@ impl CognitionEvolver {
     /// 激活门槛独立判定（prompts 层自身资产数 + 采样数）。
     pub async fn evolve_prompts(
         &self,
-        liluo: &LiluoClient,
-        config: &DmnConfig,
+        guizang: &GuizangClient,
+        config: &LianshanConfig,
+        model_env_tag: Option<&str>,
     ) -> Result<EvolutionReport, TaijiError> {
-        let prompts = liluo.load_all_prompts().await?;
+        let prompts = guizang.load_all_prompts().await?;
         if !Self::activation_gate_prompts(&prompts, config) {
             tracing::debug!(
                 prompts = prompts.len(),
@@ -512,15 +517,15 @@ impl CognitionEvolver {
         }
         // 同一后验 map 机制（§6.4.1）
         let posterior: BTreeMap<String, (f64, f64)> = if config.bayesian_enabled {
-            let models = liluo.load_all_models().await?;
+            let models = guizang.load_all_models().await?;
             Self::prompt_posterior_map(&prompts, &models, config)
         } else {
             BTreeMap::new()
         };
 
-        let forked = self.fork_prompts(liluo, config, &posterior).await?;
-        let merged = self.merge_prompts(liluo, config, &posterior).await?;
-        let pruned = self.prune_prompts(liluo, config, &posterior).await?;
+        let forked = self.fork_prompts(guizang, config, &posterior, model_env_tag).await?;
+        let merged = self.merge_prompts(guizang, config, &posterior).await?;
+        let pruned = self.prune_prompts(guizang, config, &posterior).await?;
         tracing::info!(
             forked,
             merged,
@@ -539,7 +544,7 @@ impl CognitionEvolver {
     fn prompt_posterior_map(
         prompts: &[PromptAsset],
         models: &[ModelAsset],
-        config: &DmnConfig,
+        config: &LianshanConfig,
     ) -> BTreeMap<String, (f64, f64)> {
         prompts
             .iter()
@@ -568,11 +573,12 @@ impl CognitionEvolver {
     /// 已 fork 防重复；变体 confidence×0.8 + stats 清零 + ModelAsset 独立初始化。
     async fn fork_prompts(
         &self,
-        liluo: &LiluoClient,
-        config: &DmnConfig,
+        guizang: &GuizangClient,
+        config: &LianshanConfig,
         posterior: &BTreeMap<String, (f64, f64)>,
+        model_env_tag: Option<&str>,
     ) -> Result<u64, TaijiError> {
-        let prompts = liluo.load_all_prompts().await?;
+        let prompts = guizang.load_all_prompts().await?;
         let mut forked = 0u64;
 
         for p in prompts.iter().filter(|p| p.variant_of.is_none()) {
@@ -593,9 +599,11 @@ impl CognitionEvolver {
             variant.name = format!("{}（strict 变体）", p.name);
             variant.variant_of = Some(p.id.clone());
             variant.parent_id = Some(p.id.clone());
+            // V50 环境维度轴（§6.3.1）：变体打触发模型类标签（None → 空 = 环境无关）
+            variant.env_tags = model_env_tag.map(|t| vec![t.to_string()]).unwrap_or_default();
             variant.confidence = p.confidence * 0.8;
             variant.stats = CheckStats::default();
-            liluo.save_prompt(&mut variant).await?;
+            guizang.save_prompt(&mut variant).await?;
             if config.bayesian_enabled {
                 let mut model = ModelAsset::from_prior(
                     &variant.id,
@@ -603,7 +611,7 @@ impl CognitionEvolver {
                     variant.confidence,
                     config.prior_strength,
                 );
-                liluo.save_model(&mut model).await?;
+                guizang.save_model(&mut model).await?;
             }
             forked += 1;
             tracing::info!(
@@ -620,11 +628,11 @@ impl CognitionEvolver {
     /// 次者 pruned（同分根优先——read_dir 顺序确定性，与 merge_variants 同构）。
     async fn merge_prompts(
         &self,
-        liluo: &LiluoClient,
-        config: &DmnConfig,
+        guizang: &GuizangClient,
+        config: &LianshanConfig,
         posterior: &BTreeMap<String, (f64, f64)>,
     ) -> Result<u64, TaijiError> {
-        let mut prompts = liluo.load_all_prompts().await?;
+        let mut prompts = guizang.load_all_prompts().await?;
         let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (i, p) in prompts.iter().enumerate() {
             let key = p.variant_of.clone().unwrap_or_else(|| p.id.clone());
@@ -680,14 +688,14 @@ impl CognitionEvolver {
                             + config.prior_strength.max(0.0)
                                 * (1.0 - prompts[candidate].confidence.clamp(0.0, 1.0));
                         if let Ok(Some(mut best_model)) =
-                            liluo.load_model(&prompts[best].id).await
+                            guizang.load_model(&prompts[best].id).await
                         {
                             if let Ok(Some(cand_model)) =
-                                liluo.load_model(&prompts[candidate].id).await
+                                guizang.load_model(&prompts[candidate].id).await
                             {
                                 best_model.alpha += cand_model.alpha - cand_prior_alpha;
                                 best_model.beta += cand_model.beta - cand_prior_beta;
-                                if let Err(e) = liluo.save_model(&mut best_model).await {
+                                if let Err(e) = guizang.save_model(&mut best_model).await {
                                     tracing::warn!(
                                         asset_id = %prompts[best].id,
                                         error = %e,
@@ -709,7 +717,7 @@ impl CognitionEvolver {
             }
         }
         for i in changed {
-            liluo.save_prompt(&mut prompts[i]).await?;
+            guizang.save_prompt(&mut prompts[i]).await?;
         }
         Ok(merged)
     }
@@ -719,11 +727,11 @@ impl CognitionEvolver {
     /// 频率回退（bayesian_enabled=false）：组内 σ 标准差版（与 prune_variants 同构）。
     async fn prune_prompts(
         &self,
-        liluo: &LiluoClient,
-        config: &DmnConfig,
+        guizang: &GuizangClient,
+        config: &LianshanConfig,
         posterior: &BTreeMap<String, (f64, f64)>,
     ) -> Result<u64, TaijiError> {
-        let mut prompts = liluo.load_all_prompts().await?;
+        let mut prompts = guizang.load_all_prompts().await?;
         let mut groups: BTreeMap<String, Vec<usize>> = BTreeMap::new();
         for (i, p) in prompts.iter().enumerate() {
             let key = p.variant_of.clone().unwrap_or_else(|| p.id.clone());
@@ -784,7 +792,7 @@ impl CognitionEvolver {
         }
         if pruned > 0 {
             for p in prompts.iter_mut().filter(|p| p.is_pruned()) {
-                liluo.save_prompt(p).await?;
+                guizang.save_prompt(p).await?;
             }
         }
         Ok(pruned)
@@ -796,7 +804,7 @@ impl CognitionEvolver {
     fn asset_posterior_map(
         assets: &[VerificationAsset],
         models: &[ModelAsset],
-        config: &DmnConfig,
+        config: &LianshanConfig,
     ) -> BTreeMap<String, (f64, f64)> {
         let k = config.prior_strength.max(0.0);
         assets
@@ -823,7 +831,7 @@ impl CognitionEvolver {
 
     /// 激活门槛（§8.12）：每层资产数 ≥ 5 且累积采样 ≥ 50。
     /// backprop 不受限（数据积累期），演化算子受此门槛保护。
-    fn activation_gate(assets: &[VerificationAsset], config: &DmnConfig) -> bool {
+    fn activation_gate(assets: &[VerificationAsset], config: &LianshanConfig) -> bool {
         if assets.len() < config.activation_min_assets {
             return false;
         }
@@ -836,7 +844,7 @@ impl CognitionEvolver {
     }
 
     /// V35/MVP-6：prompts 版激活门槛（同一数学：资产数 + 总采样数，独立判定）。
-    fn activation_gate_prompts(prompts: &[PromptAsset], config: &DmnConfig) -> bool {
+    fn activation_gate_prompts(prompts: &[PromptAsset], config: &LianshanConfig) -> bool {
         if prompts.len() < config.activation_min_assets {
             return false;
         }
@@ -853,11 +861,12 @@ impl CognitionEvolver {
     /// 防重复：已存在变体的根资产不重复 fork；变体不 fork 变体（树不爆炸）。
     async fn fork_variants(
         &self,
-        liluo: &LiluoClient,
-        config: &DmnConfig,
+        guizang: &GuizangClient,
+        config: &LianshanConfig,
         posterior: &BTreeMap<String, (f64, f64)>,
+        model_env_tag: Option<&str>,
     ) -> Result<u64, TaijiError> {
-        let assets = liluo.load_all_verifications().await?;
+        let assets = guizang.load_all_verifications().await?;
         let mut forked = 0u64;
 
         for asset in assets.iter().filter(|a| a.variant_of.is_none()) {
@@ -884,6 +893,8 @@ impl CognitionEvolver {
             variant.id = format!("{}-v1", asset.id);
             variant.name = format!("{}（strict 变体）", asset.name);
             variant.variant_of = Some(asset.id.clone());
+            // V50 环境维度轴（§6.3.1）：变体打触发模型类标签（None → 空 = 环境无关）
+            variant.env_tags = model_env_tag.map(|t| vec![t.to_string()]).unwrap_or_default();
             variant.confidence = asset.confidence * 0.8;
             for check in &mut variant.checks {
                 check.stats = CheckStats::default();
@@ -894,7 +905,7 @@ impl CognitionEvolver {
                     check.id = format!("{}@{}", check.id, variant.id);
                 }
             }
-            liluo.save_verification(&mut variant).await?;
+            guizang.save_verification(&mut variant).await?;
             // V33/MVP-3.5: 变体后验独立初始化（降权 confidence 映射先验，stats 清零同构）
             if config.bayesian_enabled {
                 let mut model = ModelAsset::from_prior(
@@ -903,7 +914,7 @@ impl CognitionEvolver {
                     variant.confidence,
                     config.prior_strength,
                 );
-                liluo.save_model(&mut model).await?;
+                guizang.save_model(&mut model).await?;
             }
             forked += 1;
             tracing::info!(
@@ -920,11 +931,11 @@ impl CognitionEvolver {
     /// 通过率差 < 0.1（无显著差异）→ 统计按 check 位置并入最优者，次者 pruned。
     async fn merge_variants(
         &self,
-        liluo: &LiluoClient,
-        config: &DmnConfig,
+        guizang: &GuizangClient,
+        config: &LianshanConfig,
         posterior: &BTreeMap<String, (f64, f64)>,
     ) -> Result<u64, TaijiError> {
-        let mut assets = liluo.load_all_verifications().await?;
+        let mut assets = guizang.load_all_verifications().await?;
         let groups = Self::group_variants(&assets);
         let mut merged = 0u64;
         let mut changed: Vec<usize> = Vec::new();
@@ -993,15 +1004,15 @@ impl CognitionEvolver {
                             + config.prior_strength.max(0.0)
                                 * (1.0 - assets[candidate].confidence.clamp(0.0, 1.0));
                         if let Ok(Some(mut best_model)) =
-                            liluo.load_model(&assets[best].id).await
+                            guizang.load_model(&assets[best].id).await
                         {
-                            match liluo.load_model(&assets[candidate].id).await {
+                            match guizang.load_model(&assets[candidate].id).await {
                                 Ok(Some(cand_model)) => {
                                     best_model.alpha +=
                                         cand_model.alpha - cand_prior_alpha;
                                     best_model.beta += cand_model.beta - cand_prior_beta;
                                     if let Err(e) =
-                                        liluo.save_model(&mut best_model).await
+                                        guizang.save_model(&mut best_model).await
                                     {
                                         tracing::warn!(
                                             asset_id = %assets[best].id,
@@ -1033,7 +1044,7 @@ impl CognitionEvolver {
         }
         if !changed.is_empty() {
             for i in changed {
-                liluo.save_verification(&mut assets[i]).await?;
+                guizang.save_verification(&mut assets[i]).await?;
             }
         }
         if merged > 0 {
@@ -1046,11 +1057,11 @@ impl CognitionEvolver {
     /// （σ = 组内通过率标准差）→ `status = "pruned"`（保留文件供审计，不再加载/回传）。
     async fn prune_variants(
         &self,
-        liluo: &LiluoClient,
-        config: &DmnConfig,
+        guizang: &GuizangClient,
+        config: &LianshanConfig,
         posterior: &BTreeMap<String, (f64, f64)>,
     ) -> Result<u64, TaijiError> {
-        let mut assets = liluo.load_all_verifications().await?;
+        let mut assets = guizang.load_all_verifications().await?;
         let groups = Self::group_variants(&assets);
         let mut pruned = 0u64;
         // V33/MVP-3.5: 决策值 = 后验均值（空 map → 频率回退）
@@ -1119,7 +1130,7 @@ impl CognitionEvolver {
         }
         if pruned > 0 {
             for asset in assets.iter_mut().filter(|a| a.status == "pruned") {
-                liluo.save_verification(asset).await?;
+                guizang.save_verification(asset).await?;
             }
         }
         Ok(pruned)
@@ -1173,7 +1184,7 @@ mod tests {
     use super::*;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
-    use crate::infra::knowledge::LiluoClient;
+    use crate::infra::knowledge::GuizangClient;
 
     /// Create a unique temporary directory for test isolation.
     async fn test_knowledge_dir() -> std::path::PathBuf {
@@ -1184,13 +1195,13 @@ mod tests {
         std::env::temp_dir().join(format!("taiji_evolver_test_{ts}"))
     }
 
-    /// Helper to build a CognitionEvolver backed by a file-system LiluoClient.
+    /// Helper to build a CognitionEvolver backed by a file-system GuizangClient.
     async fn test_evolver() -> (CognitionEvolver, std::path::PathBuf) {
         let dir = test_knowledge_dir().await;
         let client = Arc::new(
-            LiluoClient::new(&dir)
+            GuizangClient::new(&dir)
                 .await
-                .expect("LiluoClient should initialise"),
+                .expect("GuizangClient should initialise"),
         );
         let evolver = CognitionEvolver::new(client);
         (evolver, dir)
@@ -1215,7 +1226,7 @@ mod tests {
     #[tokio::test]
     async fn test_bayesian_update_persists_posterior() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         let evolver = CognitionEvolver::new(client.clone());
 
         // 首次：先验映射 confidence=0.8, k=10 → α=1+8=9, β=1+2=3 → μ=0.75
@@ -1305,9 +1316,11 @@ mod tests {
         assert!(
             assets.iter().all(|n| {
                 // V44：不再创建 truths/ 与 index.yaml；不再有 {model_key}/ 分区
+                // V46：.history 由 GitBackend::init 创建（归藏版本控制，BCP §10.0）
                 n == "models"
                     || n == "yang"
                     || n == "yin"
+                    || n == ".history"
             }),
             "unexpected files written during evolve: {assets:?}"
         );
@@ -1341,7 +1354,7 @@ mod tests {
         };
 
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
 
         // 种一棵带两个检查项的契约资产
         let mut v = VerificationAsset::new(
@@ -1410,7 +1423,7 @@ mod tests {
                 quality: 0.0,
             },
         ];
-        let updated = evolver.backprop_checks("task-1", &checks_task1, &DmnConfig::default(), None).await.unwrap();
+        let updated = evolver.backprop_checks("task-1", &checks_task1, &LianshanConfig::default(), None).await.unwrap();
         assert_eq!(updated, 2, "ghost check must be skipped");
 
         // 任务 2：check-a 失败（跨任务累加）
@@ -1424,7 +1437,7 @@ mod tests {
             verify_rounds: 0,
             quality: 0.0,
         }];
-        let updated = evolver.backprop_checks("task-2", &checks_task2, &DmnConfig::default(), None).await.unwrap();
+        let updated = evolver.backprop_checks("task-2", &checks_task2, &LianshanConfig::default(), None).await.unwrap();
         assert_eq!(updated, 1);
 
         // 持久化断言：stats 跨任务累加 + version++
@@ -1443,7 +1456,7 @@ mod tests {
         assert_eq!(b.stats.pass_count, 1);
 
         // 空 checks：no-op
-        let updated = evolver.backprop_checks("task-2", &[], &DmnConfig::default(), None).await.unwrap();
+        let updated = evolver.backprop_checks("task-2", &[], &LianshanConfig::default(), None).await.unwrap();
         assert_eq!(updated, 0);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -1486,7 +1499,7 @@ mod tests {
     #[tokio::test]
     async fn test_evolve_contracts_activation_gate_blocks() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         // 仅 4 资产（<5）：门槛不过，零演化
         for i in 0..4 {
             let mut a = mk_asset(
@@ -1499,7 +1512,7 @@ mod tests {
             client.save_verification(&mut a).await.unwrap();
         }
         let evolver = CognitionEvolver::new(client.clone());
-        let config = DmnConfig::default();
+        let config = LianshanConfig::default();
         let report = evolver.evolve_contracts(&config, None).await.unwrap();
         assert_eq!(report.forked, 0);
         assert_eq!(report.merged, 0);
@@ -1512,7 +1525,7 @@ mod tests {
     #[tokio::test]
     async fn test_fork_variants_creates_strict_variant() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         // 5 资产、总采样 50：低回报根（0.4）+ 4 陪衬
         let mut low = mk_asset("root-low", 10, 4, CheckKind::LlmJudgement, None);
         client.save_verification(&mut low).await.unwrap();
@@ -1521,7 +1534,7 @@ mod tests {
             client.save_verification(&mut a).await.unwrap();
         }
         let evolver = CognitionEvolver::new(client.clone());
-        let report = evolver.evolve_contracts(&DmnConfig::default(), None).await.unwrap();
+        let report = evolver.evolve_contracts(&LianshanConfig::default(), None).await.unwrap();
         assert_eq!(report.forked, 1, "one low-reward root should fork");
 
         let loaded = client.load_all_verifications().await.unwrap();
@@ -1536,7 +1549,7 @@ mod tests {
         assert!((variant.confidence - low.confidence * 0.8).abs() < 1e-9);
 
         // 幂等：再跑一轮不再 fork（已有变体）
-        let report2 = evolver.evolve_contracts(&DmnConfig::default(), None).await.unwrap();
+        let report2 = evolver.evolve_contracts(&LianshanConfig::default(), None).await.unwrap();
         assert_eq!(report2.forked, 0, "no duplicate fork");
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -1544,7 +1557,7 @@ mod tests {
     #[tokio::test]
     async fn test_merge_variants_merges_similar_and_prunes() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         // 组 A：根 0.8 + v1 0.8（差 0 → 合并）+ v2 0.5（差 0.3 → 保留）；陪衬 B/C 自成组
         let mut a = mk_asset("grp-a", 10, 8, CheckKind::FileExists, None);
         client.save_verification(&mut a).await.unwrap();
@@ -1558,7 +1571,7 @@ mod tests {
         client.save_verification(&mut c).await.unwrap();
         let evolver = CognitionEvolver::new(client.clone());
         // 频率路径（MVP-3 断言基线）：贝叶斯关闭
-        let mut freq_cfg = DmnConfig::default();
+        let mut freq_cfg = LianshanConfig::default();
         freq_cfg.bayesian_enabled = false;
         let report = evolver.evolve_contracts(&freq_cfg, None).await.unwrap();
         assert_eq!(report.merged, 1, "v1 (same rate) merged into root");
@@ -1579,7 +1592,7 @@ mod tests {
     #[tokio::test]
     async fn test_prune_variants_below_two_sigma() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         // 组 A：0.9 / 0.25（< best−2σ → prune）/ 0.8；陪衬 B/C 单成员组
         let mut a = mk_asset("sig-a", 10, 9, CheckKind::FileExists, None);
         client.save_verification(&mut a).await.unwrap();
@@ -1594,7 +1607,7 @@ mod tests {
         client.save_verification(&mut c).await.unwrap();
         let evolver = CognitionEvolver::new(client.clone());
         // 频率路径（MVP-3 断言基线）：贝叶斯关闭
-        let mut freq_cfg = DmnConfig::default();
+        let mut freq_cfg = LianshanConfig::default();
         freq_cfg.bayesian_enabled = false;
         let report = evolver.evolve_contracts(&freq_cfg, None).await.unwrap();
         assert_eq!(report.pruned, 1, "worst variant pruned below 2σ");
@@ -1612,7 +1625,7 @@ mod tests {
     #[tokio::test]
     async fn test_backprop_variant_check_id_targets_variant_only() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         // 根 + 变体（check id 重命名 `{base}@{variant}`）
         let mut a = mk_asset("vp-a", 5, 4, CheckKind::FileExists, None);
         client.save_verification(&mut a).await.unwrap();
@@ -1632,7 +1645,7 @@ mod tests {
             verify_rounds: 2,
             quality: 0.9,
         }];
-        let updated = evolver.backprop_checks("task-v", &checks, &DmnConfig::default(), None).await.unwrap();
+        let updated = evolver.backprop_checks("task-v", &checks, &LianshanConfig::default(), None).await.unwrap();
         assert_eq!(updated, 1);
         let loaded = client.load_all_verifications().await.unwrap();
         let root = loaded.iter().find(|a| a.id == "vp-a").unwrap();
@@ -1650,7 +1663,7 @@ mod tests {
 #[cfg(test)]
 mod bayesian_tests {
     use super::*;
-    use crate::infra::knowledge::LiluoClient;
+    use crate::infra::knowledge::GuizangClient;
     use crate::types::verification::{CheckSeverity, CheckSpec};
 
     /// 临时目录唯一性（§16：pid + 时间戳 + 模块前缀）。
@@ -1691,11 +1704,11 @@ mod bayesian_tests {
     #[tokio::test]
     async fn backprop_writes_frequency_and_bayesian_dual_track() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         let mut a = mk_b("dual-a", 0, 0, 0.8, None);
         client.save_verification(&mut a).await.unwrap();
         let evolver = CognitionEvolver::new(client.clone());
-        let config = DmnConfig::default(); // bayesian_enabled = true
+        let config = LianshanConfig::default(); // bayesian_enabled = true
 
         let checks = vec![CheckResult {
             check_id: "check-dual-a".into(),
@@ -1719,7 +1732,7 @@ mod bayesian_tests {
         assert!((m.posterior_mean() - 10.0 / 13.0).abs() < 1e-9);
 
         // 开关关：仅频率（模型不被第二次更新）
-        let mut off = DmnConfig::default();
+        let mut off = LianshanConfig::default();
         off.bayesian_enabled = false;
         let checks2 = vec![CheckResult {
             check_id: "check-dual-a".into(),
@@ -1741,7 +1754,7 @@ mod bayesian_tests {
     }
 
     /// 模拟 backprop 双轨后的状态：stats（频率）+ ModelAsset（贝叶斯）同时存在。
-    async fn seed_model(client: &crate::infra::knowledge::LiluoClient, id: &str, n: u64, pass: u64, confidence: f64) {
+    async fn seed_model(client: &crate::infra::knowledge::GuizangClient, id: &str, n: u64, pass: u64, confidence: f64) {
         let mut m = crate::infra::knowledge::ModelAsset::from_prior(id, id, confidence, 10.0);
         m.alpha += pass as f64;
         m.beta += (n - pass) as f64;
@@ -1752,7 +1765,7 @@ mod bayesian_tests {
     #[tokio::test]
     async fn bayesian_prune_keeps_low_sample_variant_frequency_prunes_it() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         // 组 b-root：root(30/28, c=0.5) + v1(2/0, c=0.9 高先验) + v2(8/7, c=0.5)；陪衬 ×2 凑门槛
         let mut root = mk_b("b-root", 30, 28, 0.5, None);
         client.save_verification(&mut root).await.unwrap();
@@ -1767,14 +1780,14 @@ mod bayesian_tests {
         let evolver = CognitionEvolver::new(client.clone());
 
         // 频率版（bayesian_enabled=false）：v1 rate=0.0 低于 best−2σ_group → 淘汰
-        let mut freq_cfg = DmnConfig::default();
+        let mut freq_cfg = LianshanConfig::default();
         freq_cfg.bayesian_enabled = false;
         let freq_report = evolver.evolve_contracts(&freq_cfg, None).await.unwrap();
         assert_eq!(freq_report.pruned, 1, "frequency: low-sample zero-rate variant pruned");
 
         // 重跑知识库（v1 已被 pruned——重建）
         let _ = tokio::fs::remove_dir_all(&dir).await;
-        let client2 = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client2 = Arc::new(GuizangClient::new(&dir).await.unwrap());
         let mut root2 = mk_b("b-root", 30, 28, 0.5, None);
         client2.save_verification(&mut root2).await.unwrap();
         let mut v1b = mk_b("b-root-v1", 3, 0, 0.9, Some("b-root"));
@@ -1795,7 +1808,7 @@ mod bayesian_tests {
         let evolver2 = CognitionEvolver::new(client2.clone());
 
         // 贝叶斯版（默认开）：v1 μ=0.714（高先验收缩）> best−2·σ_beta(0.117) → 保留
-        let bayes_report = evolver2.evolve_contracts(&DmnConfig::default(), None).await.unwrap();
+        let bayes_report = evolver2.evolve_contracts(&LianshanConfig::default(), None).await.unwrap();
         assert_eq!(bayes_report.pruned, 0, "bayesian: low-sample variant protected by prior+σ_beta");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
@@ -1805,7 +1818,7 @@ mod bayesian_tests {
 #[cfg(test)]
 mod prompt_evolution_tests {
     use super::*;
-    use crate::infra::knowledge::LiluoClient;
+    use crate::infra::knowledge::GuizangClient;
     use crate::types::agent::{AssetRef, PromptAsset};
 
     async fn test_knowledge_dir() -> std::path::PathBuf {
@@ -1821,8 +1834,8 @@ mod prompt_evolution_tests {
         dir
     }
 
-    async fn mk_p_async(client: &LiluoClient, id: &str, confidence: f64, n: u64, pass: u64) {
-        let mut p = PromptAsset::new(id, id, "t", "t", "FittingAgent", vec!["x".into()]);
+    async fn mk_p_async(client: &GuizangClient, id: &str, confidence: f64, n: u64, pass: u64) {
+        let mut p = PromptAsset::new(id, id, "t", "t", "YangAgent", vec!["x".into()]);
         p.confidence = confidence;
         p.stats.n = n;
         p.stats.pass_count = pass;
@@ -1833,10 +1846,10 @@ mod prompt_evolution_tests {
     #[tokio::test]
     async fn backprop_prompts_updates_task_level_stats_and_bayes() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         mk_p_async(&client, "pp-a", 0.8, 0, 0).await;
         let evolver = CognitionEvolver::new(client.clone());
-        let config = DmnConfig::default(); // bayesian_enabled = true
+        let config = LianshanConfig::default(); // bayesian_enabled = true
 
         let checks = vec![CheckResult {
             check_id: "check-x".into(),
@@ -1889,15 +1902,15 @@ mod prompt_evolution_tests {
     #[tokio::test]
     async fn fork_prompts_creates_variant_on_low_mu() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         // 根：n=5 pass=1（频率 0.2 < 0.6）→ fork；陪衬根：高通过 → 不 fork
         mk_p_async(&client, "pf-low", 0.5, 5, 1).await;
         mk_p_async(&client, "pf-high", 0.5, 5, 5).await;
         let evolver = CognitionEvolver::new(client.clone());
-        let config = DmnConfig::default();
+        let config = LianshanConfig::default();
         let posterior = BTreeMap::new(); // 频率回退
 
-        let forked = evolver.fork_prompts(&client, &config, &posterior).await.unwrap();
+        let forked = evolver.fork_prompts(&client, &config, &posterior, None).await.unwrap();
         assert_eq!(forked, 1);
 
         let v = client.load_prompt("pf-low-v1").await.unwrap().expect("variant written");
@@ -1908,8 +1921,29 @@ mod prompt_evolution_tests {
         let m = client.load_model("pf-low-v1").await.unwrap().unwrap();
         assert!((m.posterior_mean() - 5.0 / 12.0).abs() < 1e-9);
         // 防重复：再跑一次不产生新变体
-        let again = evolver.fork_prompts(&client, &config, &posterior).await.unwrap();
+        let again = evolver.fork_prompts(&client, &config, &posterior, None).await.unwrap();
         assert_eq!(again, 0);
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// V50 环境维度轴（§6.3.1）：fork 时变体打触发模型类 env_tags。
+    #[tokio::test]
+    async fn fork_prompts_tags_variant_with_model_class() {
+        let dir = test_knowledge_dir().await;
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
+        mk_p_async(&client, "pf-low", 0.5, 5, 1).await;
+        let evolver = CognitionEvolver::new(client.clone());
+        let config = LianshanConfig::default();
+        let posterior = BTreeMap::new();
+
+        let forked = evolver
+            .fork_prompts(&client, &config, &posterior, Some("flash"))
+            .await
+            .unwrap();
+        assert_eq!(forked, 1);
+        let v = client.load_prompt("pf-low-v1").await.unwrap().unwrap();
+        assert_eq!(v.env_tags, vec!["flash".to_string()], "variant tagged with model class");
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
@@ -1919,10 +1953,10 @@ mod prompt_evolution_tests {
     #[tokio::test]
     async fn merge_and_prune_prompts_symmetric() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         // 组 pv-root：root(n=10 pass=9) + v1(n=3 pass=3, 差 0.1 → 合并)
         mk_p_async(&client, "pv-root", 0.5, 10, 9).await;
-        let mut v1 = PromptAsset::new("pv-root-v1", "pv-root-v1", "t", "t", "FittingAgent", vec!["x".into()]);
+        let mut v1 = PromptAsset::new("pv-root-v1", "pv-root-v1", "t", "t", "YangAgent", vec!["x".into()]);
         v1.variant_of = Some("pv-root".into());
         v1.confidence = 0.4;
         v1.stats.n = 3;
@@ -1931,7 +1965,7 @@ mod prompt_evolution_tests {
         // 组独立根（门槛陪衬）
         mk_p_async(&client, "pv-other", 0.5, 5, 4).await;
         let evolver = CognitionEvolver::new(client.clone());
-        let config = DmnConfig::default();
+        let config = LianshanConfig::default();
         let posterior = BTreeMap::new(); // 频率路径（远离浮点边界：9/10=0.9 vs 1.0 差 0.1——用 < 0.1 判定，0.1 不触发）
         let _ = evolver;
 
@@ -1940,9 +1974,9 @@ mod prompt_evolution_tests {
         // 调整：v1 与 root 差必须 < 0.1——root n=10 pass=9=0.9，v1 n=1 pass=1=1.0 差 0.1 不触发。
         // 构造：root n=10 pass=10=1.0，v1 n=2 pass=2=1.0 → 差 0 → 合并。
         let _ = tokio::fs::remove_dir_all(&dir).await;
-        let client2 = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client2 = Arc::new(GuizangClient::new(&dir).await.unwrap());
         mk_p_async(&client2, "pv-root", 0.5, 10, 10).await;
-        let mut v1b = PromptAsset::new("pv-root-v1", "pv-root-v1", "t", "t", "FittingAgent", vec!["x".into()]);
+        let mut v1b = PromptAsset::new("pv-root-v1", "pv-root-v1", "t", "t", "YangAgent", vec!["x".into()]);
         v1b.variant_of = Some("pv-root".into());
         v1b.confidence = 0.4;
         v1b.stats.n = 3;
@@ -1959,7 +1993,7 @@ mod prompt_evolution_tests {
         assert_eq!(v1_after.status, "pruned", "candidate pruned (kept on disk)");
 
         // prune：v2 低采样全败 + 低先验 → 贝叶斯版 μ 低于 root − 2σ → 淘汰
-        let mut v2 = PromptAsset::new("pv-root-v2", "pv-root-v2", "t", "t", "FittingAgent", vec!["x".into()]);
+        let mut v2 = PromptAsset::new("pv-root-v2", "pv-root-v2", "t", "t", "YangAgent", vec!["x".into()]);
         v2.variant_of = Some("pv-root".into());
         v2.confidence = 0.1; // 低先验：μ=(1+1)/(2+10)=2/12≈0.167
         v2.stats.n = 3;
@@ -1988,10 +2022,10 @@ mod prompt_evolution_tests {
     #[tokio::test]
     async fn backprop_prompts_bayesian_disabled_frequency_only() {
         let dir = test_knowledge_dir().await;
-        let client = Arc::new(LiluoClient::new(&dir).await.unwrap());
+        let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
         mk_p_async(&client, "pf-a", 0.8, 0, 0).await;
         let evolver = CognitionEvolver::new(client.clone());
-        let mut config = DmnConfig::default();
+        let mut config = LianshanConfig::default();
         config.bayesian_enabled = false;
 
         let assets = vec![AssetRef::new("prompt", "pf-a")];

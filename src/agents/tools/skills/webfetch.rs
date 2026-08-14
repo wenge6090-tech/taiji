@@ -5,6 +5,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::path::Path;
 
 use super::BuiltinSkill;
 use crate::infra::error::TaijiError;
@@ -82,7 +83,7 @@ impl BuiltinSkill for WebfetchTool {
         "webfetch"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+    async fn call(&self, _task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let url_str = args
             .get("url")
             .and_then(JsonValue::as_str)
@@ -168,7 +169,7 @@ mod tests {
     async fn test_webfetch_missing_url() {
         let tool = WebfetchTool;
         let args = serde_json::json!({});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
     }
 
@@ -176,7 +177,7 @@ mod tests {
     async fn test_webfetch_ssrf_localhost() {
         let tool = WebfetchTool;
         let args = serde_json::json!({"url": "http://127.0.0.1:8080/"});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("SSRF"));
     }
@@ -185,7 +186,7 @@ mod tests {
     async fn test_webfetch_ssrf_localhost_name() {
         let tool = WebfetchTool;
         let args = serde_json::json!({"url": "http://localhost:8080/"});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
     }
 
@@ -193,7 +194,7 @@ mod tests {
     async fn test_webfetch_invalid_url() {
         let tool = WebfetchTool;
         let args = serde_json::json!({"url": "not a url"});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
     }
 
@@ -202,7 +203,7 @@ mod tests {
     async fn test_webfetch_real_url() {
         let tool = WebfetchTool;
         let args = serde_json::json!({"url": "https://httpbin.org/get"});
-        let result = tool.call(&args).await.unwrap();
+        let result = tool.call(std::path::Path::new("."), &args).await.unwrap();
         assert_eq!(result["status"], "ok");
         assert_eq!(result["status_code"], 200);
     }

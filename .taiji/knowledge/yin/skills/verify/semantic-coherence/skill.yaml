@@ -11,14 +11,14 @@ input_modes:
 output_modes:
 - text
 category: verify
-dual: causal-verify
+dual: yin-verify
 implementations:
 - kind: llm_judgement
   target: deliverables
   params: {}
   severity: hard
   pass_condition: 综合报告/任务输出必须与 deliverables/ 文件内容一致；引用的每个产物必须真实存在
-agent_target: CausalAgent
+agent_target: YinAgent
 confidence: 0.7
 version: 1
 status: active

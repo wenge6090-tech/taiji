@@ -1,6 +1,6 @@
 //! V45 元层 Skill 注册表 — Rust 硬编码保底（BCP §10.1 双轨原则）。
 //!
-//! 阳阴元工具/元 skill 全部在此硬编码：知识库为空/损坏时，基础 TPN 闭环
+//! 阳阴元工具/元 skill 全部在此硬编码：知识库为空/损坏时，基础 Zhouyi 闭环
 //! 照常运行（零资产依赖）。资产层（`skills/{cat}/{id}/skill.yaml`）是
 //! 可演化覆盖层——同 id 资产优先（见 [`crate::infra::skill_catalog`]）。
 //!
@@ -14,7 +14,7 @@
 //! | webfetch | trace-consistency |
 //! | read | schema-valid |
 //! | recursive-decompose | mece-check / cross-consistency / granularity-check |
-//! | causal-verify（跨阴阳桥） | semantic-coherence |
+//! | yin-verify（跨阴阳桥） | semantic-coherence |
 
 use crate::types::verification::{
     CheckSeverity, CheckStats, SkillAsset, SkillCategory, SkillImpl, SkillKind,
@@ -105,7 +105,9 @@ fn asset(
     SkillAsset {
         id: id.to_string(),
         name: name.to_string(),
+        summary: String::new(),
         description: description.to_string(),
+        detail: None,
         tags: tags.iter().map(|s| s.to_string()).collect(),
         examples: examples.iter().map(|s| s.to_string()).collect(),
         input_modes: input_modes.iter().map(|s| s.to_string()).collect(),
@@ -121,6 +123,7 @@ fn asset(
         env_tags: Vec::new(),
         parent_id: None,
         variant_of: None,
+        safe_for_exploration: false,
     }
 }
 
@@ -149,8 +152,8 @@ pub fn meta_skill(id: &str) -> Option<SkillAsset> {
 }
 
 // ---------------------------------------------------------------------------
-// 阳·元工具（执行体 = Rust builtin；recursive_decompose / causal_verify 为
-// 独立 rig Tool 注册的 TPN 机械节点）
+// 阳·元工具（执行体 = Rust builtin；recursive_decompose / yin_verify 为
+// 独立 rig Tool 注册的 Zhouyi 机械节点）
 // ---------------------------------------------------------------------------
 
 /// 阳 7 元工具元数据。
@@ -214,7 +217,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
         yang(
             "recursive-decompose",
             "递归分解",
-            "把复杂任务分解为子任务并行执行（每个子任务跑完整 TPN 循环）。JSON 模式参数：{\"subtasks\": [{\"description\": ..., \"verification_spec\": ..., \"mode\": \"Orchestration\"|\"Execution\"}]}。仅编排模式可用。",
+            "把复杂任务分解为子任务并行执行（每个子任务跑完整 Zhouyi 循环）。JSON 模式参数：{\"subtasks\": [{\"description\": ..., \"verification_spec\": ..., \"mode\": \"Orchestration\"|\"Execution\"}]}。仅编排模式可用。",
             SkillKind::RecursiveDecompose,
             "mece-check",
             &["json"],
@@ -223,7 +226,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
             0.8,
         ),
         yang(
-            "causal-verify",
+            "yin-verify",
             "触发验证",
             "任务产出完成后触发因果验证（ConstraintEngine + SkillEngine 机械检查 + LLM 裁决）。JSON 模式参数：{\"task_output\": \"完整任务产出\"}。",
             SkillKind::LlmJudgement,
@@ -317,7 +320,7 @@ pub fn yin_meta_skills() -> Vec<SkillAsset> {
             "语义一致性裁决",
             "综合产出与 deliverables 文件内容必须一致，不得虚构产物（LLM 裁决项，L2）。",
             SkillKind::LlmJudgement,
-            "causal-verify",
+            "yin-verify",
             "deliverables",
             serde_json::json!({}),
             CheckSeverity::Hard,
@@ -411,7 +414,7 @@ mod tests {
     /// 类别过滤。
     #[test]
     fn test_meta_skills_by_category() {
-        assert_eq!(meta_skills(SkillCategory::Exec).len(), 6); // 5 L1 + causal-verify 桥
+        assert_eq!(meta_skills(SkillCategory::Exec).len(), 6); // 5 L1 + yin-verify 桥
         assert_eq!(meta_skills(SkillCategory::Orch).len(), 1);
         assert_eq!(meta_skills(SkillCategory::Verify).len(), 6);
         assert_eq!(meta_skills(SkillCategory::Converge).len(), 3);

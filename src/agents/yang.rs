@@ -1,14 +1,14 @@
-//! FittingAgent builder (概率拟合·阳) — "probability fitting, the yang phase".
+//! YangAgent builder (概率拟合·阳) — "probability yang, the yang phase".
 //!
-//! The FittingAgent is the **second** agent in the TPN cycle.  It receives the
+//! The YangAgent is the **second** agent in the Zhouyi cycle.  It receives the
 //! [`MetaContext`] produced by the MetaAgent (权重更新·元) as a reasoning bias
 //! and executes along the extracted reasoning paths, either solving the task
 //! directly or recursively decomposing it into subtasks.
 //!
 //! # Toolset
-//! The FittingAgent's transient Rig agent is wired with:
-//! - **`recursive_decompose`**: spawns child FittingAgents for subtasks.
-//! - **`causal_verify`**: invokes CausalAgent.verify() on intermediate outputs.
+//! The YangAgent's transient Rig agent is wired with:
+//! - **`recursive_decompose`**: spawns child YangAgents for subtasks.
+//! - **`yin_verify`**: invokes YinAgent.verify() on intermediate outputs.
 //! - **5 L1 Skills**: `read`, `write`, `bash`, `search`, `webfetch`.
 //! - **`SafetyHook`** and **`TraceHook`**: registered as Rig `PromptHook`s.
 //!
@@ -20,10 +20,10 @@
 //! - System prompt is built from `meta_ctx.yang_prompt`.
 //!
 //! # Lifecycle
-//! 1. [`AgentFactory::create_fitting_agent`] creates this builder.
-//! 2. The runner calls [`FittingAgentBuilder::run`] with the task description.
+//! 1. [`AgentFactory::create_yang_agent`] creates this builder.
+//! 2. The runner calls [`YangAgentBuilder::run`] with the task description.
 //! 3. The internal Rig agent executes, calling tools and possibly recursing.
-//! 4. Returns a [`TPNResult`] with the final content and tool usage summary.
+//! 4. Returns a [`ZhouyiResult`] with the final content and tool usage summary.
 
 use std::sync::Arc;
 
@@ -34,7 +34,7 @@ use rig::tool::ToolDyn;
 use tokio_util::sync::CancellationToken;
 
 use crate::agents::factory::AgentFactory;
-use crate::agents::tools::causal_verify::CausalVerifyTool;
+use crate::agents::tools::yin_verify::YinVerifyTool;
 use crate::agents::tools::recursive_decompose::RecursiveDecomposeTool;
 use crate::agents::tools::skills::SkillRegistry;
 use crate::hooks::trace::TraceHook;
@@ -42,11 +42,11 @@ use crate::infra::error::TaijiError;
 use crate::infra::trace::save_json_atomic;
 use crate::types::agent::{AgentMode, MetaContext};
 use crate::types::execution::EngineContext;
-use crate::types::task::{Task, TPNResult};
+use crate::types::task::{Task, ZhouyiResult};
 
-/// Builder for the FittingAgent (概率拟合·阳).
+/// Builder for the YangAgent (概率拟合·阳).
 ///
-/// Created by [`AgentFactory::create_fitting_agent`].  Encapsulates the
+/// Created by [`AgentFactory::create_yang_agent`].  Encapsulates the
 /// reasoning bias ([`MetaContext`]), engine context (depth, cycle, round),
 /// cancellation token, and a handle to the factory for spawning sub-agents
 /// during recursion.
@@ -54,7 +54,7 @@ use crate::types::task::{Task, TPNResult};
 /// V27 起按阴阳配对模式分化（用户框架要求，V26 单模式融合已撤销）：
 /// - Orchestration：编排模板（recursive_decompose 拆解 + 综合），注册拆解工具
 /// - Execution：执行模板（L1 工具直接产出），不注册 recursive_decompose
-pub struct FittingAgentBuilder {
+pub struct YangAgentBuilder {
     depth: u32,
     /// 阴阳配对模式（Orchestration | Execution），由 MetaAgent 权重更新决策，
     /// 经 MetaContext.mode 传递（V27）。决定 system prompt 模板与工具注册面。
@@ -70,10 +70,10 @@ pub struct FittingAgentBuilder {
     cancel: CancellationToken,
 }
 
-impl FittingAgentBuilder {
-    /// Create a new `FittingAgentBuilder`.
+impl YangAgentBuilder {
+    /// Create a new `YangAgentBuilder`.
     ///
-    /// Normally called from [`AgentFactory::create_fitting_agent`] — external
+    /// Normally called from [`AgentFactory::create_yang_agent`] — external
     /// callers should use the factory rather than constructing this directly.
     pub fn new(
         depth: u32,
@@ -102,7 +102,7 @@ impl FittingAgentBuilder {
         self
     }
 
-    /// Run the FittingAgent: execute the task along reasoning paths.
+    /// Run the YangAgent: execute the task along reasoning paths.
     ///
     /// This method constructs a transient Rig agent equipped with:
     /// - `System prompt`: composed from [`MetaContext::yang_prompt`], which
@@ -110,7 +110,7 @@ impl FittingAgentBuilder {
     ///   constraint summaries.
     /// - `max_turns`: set to `factory.config.runtime.max_rounds`.
     /// - `Tools`: L1 skills matched by [`SkillTriggerEngine`], plus
-    ///   `recursive_decompose` and `causal_verify`.
+    ///   `recursive_decompose` and `yin_verify`.
     /// - `Hooks`: [`SafetyHook`] and [`TraceHook`] for security and tracing.
     ///
     /// # Production wiring (pinned for Rig API verification)
@@ -121,7 +121,7 @@ impl FittingAgentBuilder {
     /// use crate::hooks::safety::SafetyHook;
     /// use crate::hooks::trace::TraceHook;
     /// use crate::agents::tools::recursive_decompose::RecursiveDecompose;
-    /// use crate::agents::tools::causal_verify::CausalVerifyTool;
+    /// use crate::agents::tools::yin_verify::YinVerifyTool;
     ///
     /// let client = self.factory.providers.client("deepseek")?;
     ///
@@ -143,9 +143,9 @@ impl FittingAgentBuilder {
     /// let safety_hook = self.factory.safety_hook.clone();
     ///
     /// // Wire hooks via one .hook() call — Rig 0.39 AgentBuilder::hook() is a
-    /// // SINGLE slot, so multiple hooks must be composed via FittingHookSet
+    /// // SINGLE slot, so multiple hooks must be composed via YangHookSet
     /// // (safety → trace → snapshot) instead of chaining .hook().hook().
-    /// // agent = agent.hook(FittingHookSet::new(safety_hook, trace_hook, snapshot_hook));
+    /// // agent = agent.hook(YangHookSet::new(safety_hook, trace_hook, snapshot_hook));
     ///
     /// let agent = agent.build();
     ///
@@ -153,10 +153,10 @@ impl FittingAgentBuilder {
     ///     .prompt(task_description)
     ///     .await
     ///     .map_err(|e| TaijiError::LLMCallFailed {
-    ///         context: format!("FittingAgent LLM call failed: {e}"),
+    ///         context: format!("YangAgent LLM call failed: {e}"),
     ///     })?;
     ///
-    /// Ok(TPNResult {
+    /// Ok(ZhouyiResult {
     ///     task_id: self.engine_ctx.task_id.clone(),
     ///     content: response.as_ref().to_string(),
     ///     tools_used: vec![],
@@ -173,14 +173,14 @@ impl FittingAgentBuilder {
     /// Rig 0.39 API surface is finalised.
     ///
     /// # Returns
-    /// - `Ok(TPNResult)` on successful execution.
+    /// - `Ok(ZhouyiResult)` on successful execution.
     /// - `Err(TaijiError::LLMCallFailed)` if the underlying LLM call fails
     ///   (after retries).
     pub async fn run(
         &self,
         task_description: &str,
         chat_history: Option<Vec<Message>>,
-    ) -> Result<TPNResult, TaijiError> {
+    ) -> Result<ZhouyiResult, TaijiError> {
         // ── Guard against runaway recursion ──
         let max_depth = self.factory.config.runtime.max_depth;
         if self.depth > max_depth {
@@ -223,17 +223,17 @@ impl FittingAgentBuilder {
         // 防工具死循环的防御性兜底（200 轮），真正的窗口管理由 ContextLimiter
         // 按 usage.input_tokens 精准控制（250k 交接 / 300k 硬截止）。
         let max_turns = self.factory.config.llm.agent_overrides
-            .get("fitting")
+            .get("yang")
             .and_then(|o| o.max_turns)
             .unwrap_or(200) as usize;
         #[allow(unused)]
         let max_tokens = self.factory.config.llm.agent_overrides
-            .get("fitting")
+            .get("yang")
             .and_then(|o| o.max_tokens)
             .map(|v| v as u64);
         #[allow(unused)]
         let temperature = self.factory.config.llm.agent_overrides
-            .get("fitting")
+            .get("yang")
             .and_then(|o| o.temperature);
         let mut agent_builder = client
             .agent(&self.model)
@@ -251,9 +251,9 @@ impl FittingAgentBuilder {
         // Rig 0.39 AgentBuilder::hook() is a SINGLE slot — each call replaces
         // the previous hook, so chaining .hook(a).hook(b).hook(c) keeps only c.
         // V26.1-3 E2E smoke caught this: missing trace.jsonl + empty tools_used
-        // (and, retroactively, the FittingAgent SafetyHook had never actually
+        // (and, retroactively, the YangAgent SafetyHook had never actually
         // been mounted since V25). All three hooks must go through
-        // FittingHookSet and be mounted in ONE .hook() call.
+        // YangHookSet and be mounted in ONE .hook() call.
         let trace_hook = TraceHook::new(&self.engine_ctx, &self.model);
         let safety_hook = self.factory.safety_hook.as_ref().clone();
         let snapshot_hook = crate::hooks::chat_history_snapshot::ChatHistorySnapshotHook::new(
@@ -261,21 +261,17 @@ impl FittingAgentBuilder {
         );
         // V29 上下文窗口预算：精确 token 统计替换 max_turns（BCP §8.19）。
         let limits = self.factory.config.runtime.context_limits;
-        // V32 第一性原理：编排节点的职责是「快拆」，不是「大干」——信息收集是
-        // 子任务的职责。编排节点 handoff 阈值远小于执行节点（60k）：超限 =
-        // 任务粒度错误 = 编排失败的硬证据 → BACK_TO_TPN → 带交接重入拆解。
-        // 执行节点保持配置阈值（250k）。教学层（模板“先拆解后收集”）已实测
-        // 拦不住 LLM 的“先理解再拆解”心理模型，必须注册面强制。
-        const ORCH_HANDOFF_TOKENS: u64 = 60_000;
-        let handoff = match self.mode {
-            AgentMode::Orchestration => limits.handoff_tokens.min(ORCH_HANDOFF_TOKENS),
-            AgentMode::Execution => limits.handoff_tokens,
-        };
+        // V48：编排/执行统一窗口比例阈值（BCP §8.19）。V32 的编排 60k 快拆
+        // 特例已废除——编排节点生命周期含「拆解 + 综合」两个阶段，静态低
+        // 预算导致综合阶段（读子任务产出、写最终 deliverable）即超限，反噬
+        // 制造「纯信息收集子任务」失焦。预算语义已改为单次窗口占用，无需
+        // 再靠极低阈值强制快拆。
+        let handoff = limits.effective_handoff();
         let limiter = crate::hooks::context_limiter::ContextLimiter::new(
             handoff,
-            limits.hard_cutoff_tokens,
+            limits.effective_hard_cutoff(),
         );
-        let hook_set = crate::hooks::fitting_hook_set::FittingHookSet::new(
+        let hook_set = crate::hooks::yang_hook_set::YangHookSet::new(
             safety_hook,
             trace_hook.clone(),
             snapshot_hook,
@@ -287,7 +283,7 @@ impl FittingAgentBuilder {
 
         // ── Register built-in composite tools ──
         // V27 阴阳配对：recursive_decompose 仅编排模式注册（执行模式 LLM 不可
-        // 见拆解工具，专注直接产出）；causal_verify + 5 L1 Skills 两模式均注册。
+        // 见拆解工具，专注直接产出）；yin_verify + 5 L1 Skills 两模式均注册。
         // 工具内部另有 mode guard 兜底（belt-and-suspenders）。permit 语义 =
         // 并行分解节点上限：decompose 工具入口自行 acquire，spawn 闭包不持
         // permit，无嵌套持有 → 无死锁。
@@ -299,7 +295,7 @@ impl FittingAgentBuilder {
             self.cancel.clone(),
             self.meta_ctx.clone(),
         );
-        let causal_verify = CausalVerifyTool::new(
+        let yin_verify = YinVerifyTool::new(
             self.factory.clone(),
             self.engine_ctx.clone(),
             self.meta_ctx.clone(),
@@ -307,11 +303,11 @@ impl FittingAgentBuilder {
 
         // ── Register L1 Skills (V45 profile 路由 §8.14) ──
         // SkillRegistry 硬编码 5 builtin（read/write/bash/search/webfetch）；
-        // recursive_decompose / causal_verify 是独立 rig Tool，不在 registry 内。
+        // recursive_decompose / yin_verify 是独立 rig Tool，不在 registry 内。
         let profile = crate::agents::factory::profile_for_model(
             self.meta_ctx.model.as_ref().unwrap_or(&crate::types::agent::ModelKey("default".into())),
         );
-        let skill_registry = SkillRegistry::new();
+        let skill_registry = SkillRegistry::new(&self.engine_ctx.task_dir);
         let skill_tools: Vec<Box<dyn ToolDyn>> = skill_registry
             .tools()
             .iter()
@@ -326,18 +322,18 @@ impl FittingAgentBuilder {
             .map(|t| Box::new(t.clone()) as Box<dyn ToolDyn>)
             .collect();
 
-        // recursive_decompose：仅 Orchestration + Full profile 注册（独立 Tool，非 registry）。
-        let agent = if self.mode == AgentMode::Orchestration
-            && !matches!(profile, crate::infra::skill_catalog::ToolProfile::Minimal)
-        {
+        // recursive_decompose：仅 Orchestration 模式注册（独立 Tool，非 registry）。
+        // V47（BCP §8.14）：Minimal profile 不再隐藏 recursive_decompose——
+        // 拆解正是弱模型（小上下文）规避上下文超限的核心手段。
+        let agent = if self.mode == AgentMode::Orchestration {
             agent_builder
                 .tool(recursive_decompose)
-                .tool(causal_verify)
+                .tool(yin_verify)
                 .tools(skill_tools)
                 .build()
         } else {
             agent_builder
-                .tool(causal_verify)
+                .tool(yin_verify)
                 .tools(skill_tools)
                 .build()
         };
@@ -357,12 +353,12 @@ impl FittingAgentBuilder {
             };
 
             // Chat::chat appends all new messages (user prompt + assistant + tool calls)
-            // to `history`, so BACK_TO_TPN naturally carries forward context.
+            // to `history`, so BACK_TO_ZHOUYI naturally carries forward context.
             let result = agent
                 .chat(Message::user(task_description), &mut history)
                 .await
                 .map_err(|e| TaijiError::LLMCallFailed {
-                    context: format!("FittingAgent LLM call failed: {e}"),
+                    context: format!("YangAgent LLM call failed: {e}"),
                 });
 
             // Save chat_history to disk even on error (partial history is better than none).
@@ -384,7 +380,7 @@ impl FittingAgentBuilder {
             // 禁止裸 LLMCallFailed 上抛（残缺产出 > 无产出，BCP §8.18）。
             if let Some(kind) = limiter.triggered() {
                 let info = crate::infra::handoff::HandoffInfo {
-                    phase: "fitting".into(),
+                    phase: "yang".into(),
                     failure_reason: match kind {
                         crate::hooks::context_limiter::LimitKind::Handoff => {
                             "context_overflow".into()
@@ -423,12 +419,12 @@ impl FittingAgentBuilder {
                 return Err(match kind {
                     crate::hooks::context_limiter::LimitKind::Handoff => {
                         TaijiError::ContextOverflow {
-                            threshold: limits.handoff_tokens,
+                            threshold: limits.effective_handoff(),
                         }
                     }
                     crate::hooks::context_limiter::LimitKind::HardCutoff => {
                         TaijiError::HardCutoff {
-                            threshold: limits.hard_cutoff_tokens,
+                            threshold: limits.effective_hard_cutoff(),
                         }
                     }
                 });
@@ -445,7 +441,7 @@ impl FittingAgentBuilder {
                 // 同样失败（白费 30s 超时）；llm_failed 时对话通常短，静态正文 +
                 // output_refs 已足够恢复。
                 let info = crate::infra::handoff::HandoffInfo {
-                    phase: "fitting".into(),
+                    phase: "yang".into(),
                     failure_reason: "llm_failed".into(),
                     degraded: true,
                     output_refs: crate::infra::handoff::list_deliverables(
@@ -469,7 +465,7 @@ impl FittingAgentBuilder {
 
         // ── Extract tool call info from real TraceHook records ──
         // tools_used comes from TraceHook::on_tool_call, which captures every
-        // actual invocation (L1 Skills + recursive_decompose + causal_verify),
+        // actual invocation (L1 Skills + recursive_decompose + yin_verify),
         // instead of text-matching the LLM response (which caused false
         // positives when the report merely mentioned a tool name).
         let tools_used = trace_hook.tools_called();
@@ -477,7 +473,7 @@ impl FittingAgentBuilder {
         // Deliverables directory exists per BCP — list files if any
         let deliverables = crate::infra::handoff::list_deliverables(&self.engine_ctx.task_dir);
 
-        Ok(TPNResult {
+        Ok(ZhouyiResult {
             task_id: self.engine_ctx.task_id.clone(),
             content: response,
             tools_used,
@@ -500,7 +496,7 @@ impl FittingAgentBuilder {
 
 // ── Internal helpers ──────────────────────────────────────────────────────
 
-/// Build the system prompt for the FittingAgent from the MetaContext and mode.
+/// Build the system prompt for the YangAgent from the MetaContext and mode.
 ///
 /// V27 起按阴阳配对模式分化（用户框架要求：不再把编排与执行混在一起）：
 ///
@@ -518,7 +514,7 @@ fn build_system_prompt(
     mode: AgentMode,
 ) -> String {
     // Prefer MetaAgent-composed prompt if available.
-    if let Some(ref composed) = meta_ctx.fitting_system_prompt {
+    if let Some(ref composed) = meta_ctx.yang_system_prompt {
         // V32：MetaAgent 编排的 prompt 不含 task_dir 上下文——产物路径以
         // 占位符 {deliverables_dir} 表示。必须替换为真实绝对路径，否则 LLM
         // 会猜测产出目录（实测：编排查 761 字符，LLM 写到项目根 deliverables/）。
@@ -557,7 +553,7 @@ fn build_budget_discipline(limits: crate::infra::config::ContextLimits) -> Strin
          - 避免重复读取 / 重复验证——工具结果会占用上下文；\n\
          - 完成即止：达到任务要求立即收尾，不要额外扩展；\n\
          - 预算紧张时宁可提前交出残缺产出（交接文件），不要耗尽预算空手而归。\n",
-        limits.handoff_tokens, limits.hard_cutoff_tokens
+        limits.effective_handoff(), limits.effective_hard_cutoff()
     )
 }
 
@@ -565,7 +561,7 @@ fn build_budget_discipline(limits: crate::infra::config::ContextLimits) -> Strin
 /// 轨迹绑定——证据断言附 `[证据: 工具名]`（引用真实工具调用）、推测断言
 /// 标 `(推测)`、禁止编造证据引用。教学层与 SkillEngine TraceConsistency
 /// 检查构成双保险：教学层降低违规频率，检查层独立判定（LLM 不遵循时
-/// 检查退化为空转——推测计数作为质量信号进 DMN 演化）。
+/// 检查退化为空转——推测计数作为质量信号进 Lianshan 演化）。
 fn build_assertion_discipline_prompt() -> String {
     "\n\n## 断言分级 (Assertion Discipline)\n\
      产出中的事实性断言必须与你的真实执行轨迹绑定：\n\
@@ -828,7 +824,7 @@ fn build_orchestration_prompt(
     task_dir: &std::path::Path,
     context_dir: Option<&std::path::Path>,
 ) {
-    prompt.push_str("你是概率拟合专家 · 编排模式 (Probability Fitting · Orchestration).\n\n");
+    prompt.push_str("你是概率拟合专家 · 编排模式 (Probability Yang · Orchestration).\n\n");
 
     build_prompt_common(prompt, meta_ctx, task_dir, context_dir);
 
@@ -844,7 +840,7 @@ fn build_orchestration_prompt(
          ### 综合 (Synthesis)\n\
          收集子任务结果（含可能的失败条目），产出综合报告或聚合产物。\n\
          失败子任务的交接产物（handoff.md）可读取后针对性再指导（rerun_of）。\n\
-         综合完成后用 `causal_verify` 自检。\n\n\
+         综合完成后用 `yin_verify` 自检。\n\n\
          ### 协作\n\
          兄弟子任务封地自治——不能互相写入，但可读取兄弟 deliverables 目录。\n\
          拆解优先弱耦合；强依赖通过父层下一轮协调注入。\n\
@@ -864,7 +860,7 @@ fn build_execution_prompt(
     task_dir: &std::path::Path,
     context_dir: Option<&std::path::Path>,
 ) {
-    prompt.push_str("你是概率拟合专家 · 执行模式 (Probability Fitting · Execution).\n\n");
+    prompt.push_str("你是概率拟合专家 · 执行模式 (Probability Yang · Execution).\n\n");
 
     build_prompt_common(prompt, meta_ctx, task_dir, context_dir);
 
@@ -875,7 +871,7 @@ fn build_execution_prompt(
          ### 核心要求\n\
          1. 使用 read / write / bash / search / webfetch 直接完成任务。\n\
          2. 在单次执行中完整覆盖任务全部要求，不遗漏维度。\n\
-         3. 产出后用 `causal_verify` 自检。\n\
+         3. 产出后用 `yin_verify` 自检。\n\
          4. 在 deliverables 目录产出具体产物（绝对路径），输出完整、可直接使用。\n"
     );
 }
@@ -925,7 +921,7 @@ mod tests {
     /// Build an Arc<AgentFactory> for testing.
     async fn build_factory_arc(config: TaijiConfig) -> (Arc<AgentFactory>, std::path::PathBuf) {
         let tmp_dir = std::env::temp_dir().join(format!(
-            "taiji_fitting_test_{}",
+            "taiji_yang_test_{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -964,6 +960,7 @@ mod tests {
                 name: "文件读取".into(),
                 tool_name: "read".into(),
                 match_weight: 0.9,
+summary: String::new(),
             }],
             yang_prompt: YangPrompt {
                 task_description: "Refactor the logging module.".into(),
@@ -978,7 +975,7 @@ mod tests {
             assets_used: vec![],
             model: None,
             verify_model: None,
-            fitting_system_prompt: None,
+            yang_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
         }
@@ -1024,7 +1021,7 @@ mod tests {
         assert!(prompt.contains("没有"));
         assert!(prompt.contains("直接用 L1 工具"));
         // 执行模式含核心工具 + 自检指令。
-        assert!(prompt.contains("causal_verify"));
+        assert!(prompt.contains("yin_verify"));
     }
 
     #[test]
@@ -1045,13 +1042,9 @@ mod tests {
     #[test]
     fn test_budget_discipline_mentions_thresholds_and_efficiency() {
         // V29：预算纪律段必须包含阈值数字 + 高效引导（上限是保险丝不是配额）。
-        let s = build_budget_discipline(crate::infra::config::ContextLimits {
-            handoff_tokens: 250_000,
-            hard_cutoff_tokens: 300_000,
-            compress_input_tokens: 20_000,
-        });
-        assert!(s.contains("250000"), "handoff 阈值必须可见: {s}");
-        assert!(s.contains("300000"), "hard cutoff 阈值必须可见: {s}");
+        let s = build_budget_discipline(crate::infra::config::ContextLimits::default());
+        assert!(s.contains("300000"), "handoff 阈值（30% × 1M 窗口）必须可见: {s}");
+        assert!(s.contains("350000"), "hard cutoff 阈值（35% × 1M 窗口）必须可见: {s}");
         assert!(s.contains("不是可自由消耗的配额"), "必须强调护栏语义");
         assert!(s.contains("远低于预算"), "必须引导尽快收敛");
         assert!(s.contains("残缺产出"), "必须保留残缺产出 > 无产出");
@@ -1071,7 +1064,7 @@ mod tests {
                 "task_description": "legacy",
                 "constraint_summaries": []
             },
-            "fitting_system_prompt": null,
+            "yang_system_prompt": null,
             "verify_system_prompt": null,
             "converge_system_prompt": null
         });
@@ -1083,7 +1076,7 @@ mod tests {
     fn test_identity_section_root_task() {
         // V30：根任务身份段——无父（天子）、无兄弟、类别来自 mode。
         let tmp = std::env::temp_dir().join(format!(
-            "fitting_identity_root_{}_{}",
+            "yang_identity_root_{}_{}",
             std::process::id(),
             IDENTITY_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
@@ -1127,7 +1120,7 @@ mod tests {
     fn test_identity_section_child_with_parent_and_siblings() {
         // V30：子任务身份段——父册注入 + 会盟索引。
         let tmp = std::env::temp_dir().join(format!(
-            "fitting_identity_child_{}_{}",
+            "yang_identity_child_{}_{}",
             std::process::id(),
             IDENTITY_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
@@ -1194,7 +1187,7 @@ mod tests {
     fn test_identity_section_missing_roll_is_hard_error() {
         // V30 无降级：身份册缺失 → Err 上抛，不静默降级。
         let tmp = std::env::temp_dir().join(format!(
-            "fitting_identity_missing_{}_{}",
+            "yang_identity_missing_{}_{}",
             std::process::id(),
             IDENTITY_TEST_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
         ));
@@ -1214,7 +1207,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fitting_agent_builder_construction() {
+    async fn test_yang_agent_builder_construction() {
         let config = make_config();
         let (factory, tmp_dir) = build_factory_arc(config).await;
         let meta_ctx = sample_meta_context();
@@ -1228,7 +1221,7 @@ mod tests {
         };
 
         let cancel = tokio_util::sync::CancellationToken::new();
-        let builder = factory.create_fitting_agent(0, &meta_ctx, &engine_ctx, cancel);
+        let builder = factory.create_yang_agent(0, &meta_ctx, &engine_ctx, cancel);
         assert!(builder.is_ok());
         let builder = builder.unwrap();
         assert_eq!(builder.engine_ctx().task_id, "test-task-1");
@@ -1239,7 +1232,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires LLM API key (DEEPSEEK_API_KEY)"]
-    async fn test_fitting_agent_run_integration() {
+    async fn test_yang_agent_run_integration() {
         // Integration test: runs the full Rig agent pipeline.
         // Requires a valid DEEPSEEK_API_KEY.
         let config = make_config();
@@ -1256,16 +1249,16 @@ mod tests {
 
         let cancel = tokio_util::sync::CancellationToken::new();
         let builder = factory
-            .create_fitting_agent(1, &meta_ctx, &engine_ctx, cancel)
+            .create_yang_agent(1, &meta_ctx, &engine_ctx, cancel)
             .expect("builder");
 
         let result = builder.run("Write a test for the logging module", None).await;
         // In an environment without LLM access, expect LLMCallFailed.
-        // With a valid API key + Qdrant, this should return Ok(TPNResult).
+        // With a valid API key + Qdrant, this should return Ok(ZhouyiResult).
         match result {
-            Ok(tpn) => {
-                assert!(!tpn.content.is_empty());
-                assert_eq!(tpn.depth, 1);
+            Ok(zhouyi) => {
+                assert!(!zhouyi.content.is_empty());
+                assert_eq!(zhouyi.depth, 1);
             }
             Err(e) => {
                 // Expected: provider client or LLM call failure.
@@ -1283,7 +1276,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fitting_agent_depth_check() {
+    async fn test_yang_agent_depth_check() {
         let config = make_config();
         let (factory, tmp_dir) = build_factory_arc(config).await;
         let meta_ctx = sample_meta_context();
@@ -1302,7 +1295,7 @@ mod tests {
         };
         let cancel = tokio_util::sync::CancellationToken::new();
         let builder = factory
-            .create_fitting_agent(1, &meta_ctx, &engine_ctx, cancel)
+            .create_yang_agent(1, &meta_ctx, &engine_ctx, cancel)
             .expect("builder");
 
         // run() should NOT return MaxDepthExceeded because 1 <= 2.

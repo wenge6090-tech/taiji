@@ -8,7 +8,7 @@ export type ClientMessageType =
   | "SubmitReview"
   | "ListTasks"
   | "GetTaskTree"
-  | "GetTpnState"
+  | "GetZhouyiState"
   | "ChatMessage";
 
 interface PendingRequest {

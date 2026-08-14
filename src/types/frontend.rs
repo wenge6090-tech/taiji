@@ -8,7 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 // ---------------------------------------------------------------------------
-// Node status & TPN phase
+// Node status & Zhouyi phase
 // ---------------------------------------------------------------------------
 
 /// Visual status of a task node on the spindle tree.
@@ -16,27 +16,27 @@ use serde::{Deserialize, Serialize};
 pub enum NodeStatus {
     /// Created but not yet started (yellow).
     Pending,
-    /// Actively executing a TPN phase (yellow + pulse).
+    /// Actively executing a Zhouyi phase (yellow + pulse).
     Running,
     /// Verified & converged — PASS (green).
     Converged,
-    /// Diverged — routed BACK_TO_TPN / BACK_TO_META (red).
+    /// Diverged — routed BACK_TO_ZHOUYI / BACK_TO_META (red).
     Diverged,
     /// Task failed after exhausting rounds/cycles (red).
     Failed,
     /// Task cancelled (gray).
     Cancelled,
-    /// Blocked waiting for human review in the TPN popup (orange).
+    /// Blocked waiting for human review in the Zhouyi popup (orange).
     AwaitingHumanReview,
 }
 
-/// Current TPN phase of a task node.
+/// Current Zhouyi phase of a task node.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-pub enum TpnPhase {
+pub enum ZhouyiPhase {
     Idle,
     Meta,
-    Fitting,
-    Causal,
+    Yang,
+    Yin,
     Converged,
 }
 
@@ -54,7 +54,7 @@ pub struct SpindleNode {
     pub sibling_index: u32,
     pub total_siblings: u32,
     pub status: NodeStatus,
-    pub phase: TpnPhase,
+    pub phase: ZhouyiPhase,
     pub round: u32,
     pub cycle: u32,
     pub parent_id: Option<String>,
@@ -72,7 +72,7 @@ pub struct SpindleEdge {
     pub status: NodeStatus,
 }
 
-/// Single DMN evolution entry (δ₁ skill tuning, δ₂ bayesian, δ₃ grid rewire).
+/// Single Lianshan evolution entry (δ₁ skill tuning, δ₂ bayesian, δ₃ grid rewire).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct EvolutionSummary {
@@ -82,10 +82,10 @@ pub struct EvolutionSummary {
     pub timestamp: String,
 }
 
-/// DMN background activity summary for the right-hand panel.
+/// Lianshan background activity summary for the right-hand panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DmnActivity {
+pub struct LianshanActivity {
     pub active_nodes: u32,
     pub recent_evolutions: Vec<EvolutionSummary>,
 }
@@ -99,14 +99,14 @@ pub struct TaskTreeSnapshot {
     pub root_description: String,
     pub nodes: Vec<SpindleNode>,
     pub edges: Vec<SpindleEdge>,
-    pub dmn_activity: Option<DmnActivity>,
+    pub lianshan_activity: Option<LianshanActivity>,
 }
 
 // ---------------------------------------------------------------------------
-// TPN popup state
+// Zhouyi popup state
 // ---------------------------------------------------------------------------
 
-/// One trace record previewed in the TPN popup detail panel.
+/// One trace record previewed in the Zhouyi popup detail panel.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TraceRecordPreview {
@@ -118,25 +118,25 @@ pub struct TraceRecordPreview {
     pub summary: String,
 }
 
-/// Causal verification verdict shown in the popup.
+/// Yin verification verdict shown in the popup.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CausalVerdict {
+pub struct YinVerdict {
     pub route: String,
     pub confidence: f64,
     pub summary: String,
     pub violations: Vec<String>,
 }
 
-/// State of one node's TPN tri-phase flow, pushed to the popup on demand.
+/// State of one node's Zhouyi tri-phase flow, pushed to the popup on demand.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct TpnPhaseState {
+pub struct ZhouyiPhaseState {
     pub task_id: String,
-    pub current_phase: TpnPhase,
+    pub current_phase: ZhouyiPhase,
     pub meta_summary: Option<String>,
-    pub fitting_summary: Option<String>,
-    pub causal_verdict: Option<CausalVerdict>,
+    pub yang_summary: Option<String>,
+    pub yin_verdict: Option<YinVerdict>,
     pub deliverables: Vec<String>,
     pub trace_preview: Vec<TraceRecordPreview>,
 }
@@ -145,12 +145,12 @@ pub struct TpnPhaseState {
 // Human intervention (yin approval)
 // ---------------------------------------------------------------------------
 
-/// Action the human takes in the TPN popup's yin intervention area.
+/// Action the human takes in the Zhouyi popup's yin intervention area.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InterventionAction {
     /// Approve convergence — route PASS.
     Approve,
-    /// Reject and retry the TPN loop — route BACK_TO_TPN.
+    /// Reject and retry the Zhouyi loop — route BACK_TO_ZHOUYI.
     RejectRetry,
     /// Reject and reroute back to MetaAgent — route BACK_TO_META.
     RejectReroute,

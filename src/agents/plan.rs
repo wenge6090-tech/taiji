@@ -2,7 +2,7 @@
 //!
 //! Produces a [`PlanSummary`] by running the MetaAgent (权重更新·元) to obtain
 //! cognitive context from 归藏, then asking an LLM to compose a structured
-//! execution plan **without** entering the TPN loop.
+//! execution plan **without** entering the Zhouyi loop.
 //!
 //! # Lifecycle
 //! 1. [`AgentFactory::create_plan_agent`] resolves LLM config and creates
@@ -14,7 +14,7 @@
 //! # No side effects
 //! `plan()` is read-only (reads 归藏, calls LLMs).  It does NOT create a
 //! task directory, does NOT materialise external context, and does NOT
-//! enter the TPN cycle.
+//! enter the Zhouyi cycle.
 
 use std::sync::Arc;
 
@@ -25,7 +25,7 @@ use crate::infra::error::TaijiError;
 use crate::infra::json_util::parse_llm_json;
 use crate::infra::knowledge::GuizangClient;
 use crate::infra::provider::ProviderRegistry;
-use crate::types::agent::MetaContext;
+use crate::types::agent::{MetaContext, MetaOutcome};
 use crate::types::plan::PlanSummary;
 
 /// Builder for producing a pre-execution plan summary.
@@ -74,12 +74,22 @@ impl PlanBuilder {
         task_type_tags: &[&str],
     ) -> Result<PlanSummary, TaijiError> {
         // ── Step 1: Run MetaAgent ──────────────────────────────────────
-        let meta_ctx = self.run_meta_agent(description, task_type_tags).await?;
-
-        // ── Step 2: Compose PlanSummary via LLM ────────────────────────
-        let plan = self.compose_plan(description, &meta_ctx).await?;
-
-        Ok(plan)
+        match self.run_meta_agent(description, task_type_tags).await? {
+            // V46 短路：元直接回答（应答类），跳过 plan 编排 LLM。
+            MetaOutcome::Answer(answer) => Ok(PlanSummary {
+                task_analysis: answer,
+                estimated_subtasks: vec![],
+                recommended_skills: vec![],
+                expected_deliverables: vec![],
+                estimated_complexity: "simple".into(),
+                matched_prompts_summary: String::new(),
+                relevant_constraints: vec![],
+            }),
+            MetaOutcome::Context(meta_ctx) => {
+                // ── Step 2: Compose PlanSummary via LLM ────────────────────
+                self.compose_plan(description, &meta_ctx).await
+            }
+        }
     }
 
     /// Run the MetaAgent (权重更新·元) to obtain cognitive context.
@@ -91,7 +101,7 @@ impl PlanBuilder {
         &self,
         description: &str,
         task_type_tags: &[&str],
-    ) -> Result<MetaContext, TaijiError> {
+    ) -> Result<MetaOutcome, TaijiError> {
         let meta_agent = crate::agents::meta::MetaAgentBuilder::new(
             &self.task_id,
             self.guizang.clone(),
@@ -245,8 +255,8 @@ fn build_plan_prompt(description: &str, meta_ctx: &MetaContext) -> String {
         ));
     }
 
-    // Fitting system prompt (summary)
-    if let Some(prompt) = &meta_ctx.fitting_system_prompt {
+    // Yang system prompt (summary)
+    if let Some(prompt) = &meta_ctx.yang_system_prompt {
         // Truncate to first 200 chars for the prompt
         let max_chars = 200usize;
         let snippet = if prompt.len() > max_chars {
@@ -255,7 +265,7 @@ fn build_plan_prompt(description: &str, meta_ctx: &MetaContext) -> String {
             prompt.clone()
         };
         parts.push(format!(
-            "- Fitting system prompt (first {max_chars} chars): {snippet}"
+            "- Yang system prompt (first {max_chars} chars): {snippet}"
         ));
     }
 

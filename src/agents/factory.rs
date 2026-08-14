@@ -26,7 +26,7 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::agents::causal::{CausalConvergeAgentBuilder, CausalVerifyAgentBuilder};
+use crate::agents::yin::{YinConvergeAgentBuilder, YinVerifyAgentBuilder};
 use crate::agents::chat::ChatAgentBuilder;
 
 /// V45 工具集路由画像（BCP §8.14 双通道——弱模型最小集）。
@@ -35,18 +35,35 @@ use crate::agents::chat::ChatAgentBuilder;
 /// → [`ToolProfile::Minimal`]（隐藏 recursive-decompose/webfetch 等高代价工具）；
 /// 其余 [`ToolProfile::Full`]。弱模型基础执行与验证闭环仍可用（元层判据保底）。
 pub fn profile_for_model(model: &crate::types::agent::ModelKey) -> crate::infra::skill_catalog::ToolProfile {
-    let key = model.0.to_lowercase();
-    if key.contains("flash")
-        || key.contains("lite")
-        || key.contains("mini")
-        || key.contains("small")
-    {
+    if model_class(model) == "flash" {
         crate::infra::skill_catalog::ToolProfile::Minimal
     } else {
         crate::infra::skill_catalog::ToolProfile::Full
     }
 }
-use crate::agents::fitting::FittingAgentBuilder;
+
+/// V50 环境维度轴（§6.3.1）：模型类指纹——key 含 flash/lite/mini/small → "flash"，
+/// 其余 → "strong"。与 `profile_for_model` 同一检测源（零新判定逻辑），
+/// 产出 `current_env_tags` 的源：检索/演化/主动学习按此维度隔离资产变体。
+pub fn model_class(model: &crate::types::agent::ModelKey) -> &'static str {
+    model_class_from_str(&model.0)
+}
+
+/// `model_class` 的字符串版——供只持有 `Option<&str>` 模型键的连山演化层调用
+/// （不构造 `ModelKey`）。
+pub fn model_class_from_str(key: &str) -> &'static str {
+    let k = key.to_lowercase();
+    if k.contains("flash")
+        || k.contains("lite")
+        || k.contains("mini")
+        || k.contains("small")
+    {
+        "flash"
+    } else {
+        "strong"
+    }
+}
+use crate::agents::yang::YangAgentBuilder;
 use crate::agents::meta::MetaAgentBuilder;
 use crate::agents::plan::PlanBuilder;
 use crate::hooks::safety::SafetyHook;
@@ -63,7 +80,7 @@ use crate::types::execution::EngineContext;
 /// Central hub for creating transient Rig agents.
 ///
 /// Each factory method returns a builder (e.g. [`MetaAgentBuilder`],
-/// [`FittingAgentBuilder`]) that encapsulates the agent configuration without
+/// [`YangAgentBuilder`]) that encapsulates the agent configuration without
 /// exposing Rig internals.  The caller invokes `.run()` on the builder to
 /// instantiate and execute the Rig agent.
 pub struct AgentFactory {
@@ -154,7 +171,7 @@ impl AgentFactory {
         .depth(depth)
         .max_depth(max_depth)
         // V37 异源裁判开关（BCP §8.8 相位级）：从 runtime 配置注入——true 且
-        // 路由候选 ≥2 时决策 MetaContext.verify_model（Causal 专用验证模型）。
+        // 路由候选 ≥2 时决策 MetaContext.verify_model（Yin 专用验证模型）。
         .heterogeneous_verifier(self.config.runtime.model_routing.heterogeneous_verifier)
         .safety_hook(self.safety_hook.clone()))
     }
@@ -163,7 +180,7 @@ impl AgentFactory {
     ///
     /// The PlanBuilder runs the MetaAgent to obtain cognitive context, then
     /// calls the LLM to compose a structured [`PlanSummary`] **without**
-    /// entering the TPN loop.  This is a read-only planning operation.
+    /// entering the Zhouyi loop.  This is a read-only planning operation.
     ///
     /// **LLM config**: resolved from `agent_overrides["plan"]`, falling back
     /// to the default provider + model.
@@ -182,13 +199,13 @@ impl AgentFactory {
         ))
     }
 
-    /// Create a [`FittingAgentBuilder`] (概率拟合·阳) seeded with a
+    /// Create a [`YangAgentBuilder`] (概率拟合·阳) seeded with a
     /// [`MetaContext`] reasoning bias.
     ///
-    /// The FittingAgent is configured with the task's `depth` and engine
+    /// The YangAgent is configured with the task's `depth` and engine
     /// context.  Its Rig agent receives:
     /// - tools matched by [`SkillTriggerEngine`]
-    /// - built-in `recursive_decompose`（仅编排模式注册）and `causal_verify` tools
+    /// - built-in `recursive_decompose`（仅编排模式注册）and `yin_verify` tools
     /// - [`SafetyHook`] and [`TraceHook`] registered as prompt hooks
     ///
     /// **V27 阴阳配对模式**：`mode` 取自 `meta_ctx.mode`（由 MetaAgent 权重更新
@@ -198,23 +215,23 @@ impl AgentFactory {
     /// **Note**: this method takes `self: &Arc<Self>` because the returned
     /// builder retains a clone of the factory for spawning sub-agents during
     /// recursive decomposition.
-    pub fn create_fitting_agent(
+    pub fn create_yang_agent(
         self: &Arc<Self>,
         depth: u32,
         meta_ctx: &MetaContext,
         engine_ctx: &EngineContext,
         cancel: CancellationToken,
-    ) -> Result<FittingAgentBuilder, TaijiError> {
-        let (provider, model) = self.agent_llm_config_with("fitting", meta_ctx.model.as_ref());
+    ) -> Result<YangAgentBuilder, TaijiError> {
+        let (provider, model) = self.agent_llm_config_with("yang", meta_ctx.model.as_ref());
         tracing::debug!(
             task_id = %engine_ctx.task_id,
             depth,
             mode = ?meta_ctx.mode,
             provider = %provider,
             model = %model,
-            "Creating FittingAgent"
+            "Creating YangAgent"
         );
-        Ok(FittingAgentBuilder::new(
+        Ok(YangAgentBuilder::new(
             depth,
             meta_ctx.mode,
             meta_ctx.clone(),
@@ -226,69 +243,71 @@ impl AgentFactory {
         .provider_name(&provider))
     }
 
-    /// Create a [`CausalVerifyAgentBuilder`] (因果验证·阴, verify mode).
+    /// Create a [`YinVerifyAgentBuilder`] (因果验证·阴, verify mode).
     ///
-    /// The CausalAgent in verify mode checks task outputs against L4 Truth
+    /// The YinAgent in verify mode checks task outputs against L4 Truth
     /// constraints loaded by [`ConstraintEngine`] and produces a
     /// [`VerificationReport`].  Constraint pre-checks run **before** the
     /// LLM call (see AGENTS.md §4).
     ///
-    /// **LLM config**: resolved from `agent_overrides["causal"]` (verify and
+    /// **LLM config**: resolved from `agent_overrides["yin"]` (verify and
     /// converge share the same config key).
-    pub fn create_causal_verify_agent(
+    pub fn create_yin_verify_agent(
         &self,
         engine_ctx: &EngineContext,
         meta_ctx: &MetaContext,
-    ) -> Result<CausalVerifyAgentBuilder, TaijiError> {
-        // V37 异源裁判（BCP §8.8 相位级）：verify_model 优先（Causal 用独立
+    ) -> Result<YinVerifyAgentBuilder, TaijiError> {
+        // V37 异源裁判（BCP §8.8 相位级）：verify_model 优先（Yin 用独立
         // 验证模型，裁判 ≠ 运动员）；None = 继承执行模型（主模型）。
-        let causal_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
-        let (provider, model) = self.agent_llm_config_with("causal", causal_key);
+        let yin_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
+        let (provider, model) = self.agent_llm_config_with("yin", yin_key);
         tracing::debug!(
             task_id = %engine_ctx.task_id,
             provider = %provider,
             model = %model,
-            "Creating CausalVerifyAgent"
+            "Creating YinVerifyAgent"
         );
-        Ok(CausalVerifyAgentBuilder::new(
+        Ok(YinVerifyAgentBuilder::new(
             engine_ctx.clone(),
             self.providers.clone(),
             &model,
         )
         .provider_name(&provider)
         .safety_hook(self.safety_hook.clone())
+        .context_limits(self.config.runtime.context_limits)
         .guizang(self.guizang.clone()))
     }
 
-    /// Create a [`CausalConvergeAgentBuilder`] (收敛判定, converge mode).
+    /// Create a [`YinConvergeAgentBuilder`] (收敛判定, converge mode).
     ///
-    /// The CausalAgent in converge mode aggregates subtask results from
+    /// The YinAgent in converge mode aggregates subtask results from
     /// recursive decomposition and decides whether the overall task has
     /// converged, partially converged, or diverged.
     ///
-    /// **LLM config**: resolved from `agent_overrides["causal"]` (same key
+    /// **LLM config**: resolved from `agent_overrides["yin"]` (same key
     /// as verify mode).
-    pub fn create_causal_converge_agent(
+    pub fn create_yin_converge_agent(
         &self,
         engine_ctx: &EngineContext,
         meta_ctx: &MetaContext,
-    ) -> Result<CausalConvergeAgentBuilder, TaijiError> {
+    ) -> Result<YinConvergeAgentBuilder, TaijiError> {
         // V37 异源裁判：verify_model 优先（与 verify 同语义——收敛判定也是裁判）。
-        let causal_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
-        let (provider, model) = self.agent_llm_config_with("causal", causal_key);
+        let yin_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
+        let (provider, model) = self.agent_llm_config_with("yin", yin_key);
         tracing::debug!(
             task_id = %engine_ctx.task_id,
             provider = %provider,
             model = %model,
-            "Creating CausalConvergeAgent"
+            "Creating YinConvergeAgent"
         );
-        Ok(CausalConvergeAgentBuilder::new(
+        Ok(YinConvergeAgentBuilder::new(
             engine_ctx.clone(),
             self.providers.clone(),
             &model,
         )
         .provider_name(&provider)
         .safety_hook(self.safety_hook.clone())
+        .context_limits(self.config.runtime.context_limits)
         .guizang(self.guizang.clone()))
     }
 
@@ -298,7 +317,7 @@ impl AgentFactory {
     ///
     /// The ChatAgent is a full conversational Rig agent: 5 built-in L1 Skills
     /// + SafetyHook + streaming multi-turn output + session history
-    /// persistence. It lives outside the TPN cycle.
+    /// persistence. It lives outside the Zhouyi cycle.
     ///
     /// **LLM config**: resolved from `agent_overrides["chat"]` (or defaults).
     pub fn create_chat_agent(
@@ -344,6 +363,14 @@ impl AgentFactory {
     /// // → ("deepseek", "deepseek-reasoner")   if overridden
     /// // → ("deepseek", "deepseek-chat")       if using defaults
     /// ```
+    /// Resolve an agent-specific LLM override.
+    fn agent_override<'a>(
+        &'a self,
+        agent_type: &str,
+    ) -> Option<&'a crate::infra::config::AgentLlmConfig> {
+        self.config.llm.agent_overrides.get(agent_type)
+    }
+
     pub fn agent_llm_config(&self, agent_type: &str) -> (String, String) {
         self.agent_llm_config_with(agent_type, None)
     }
@@ -392,7 +419,7 @@ impl AgentFactory {
             &self.config.llm.default_model
         };
 
-        if let Some(override_cfg) = self.config.llm.agent_overrides.get(agent_type) {
+        if let Some(override_cfg) = self.agent_override(agent_type) {
             let provider = override_cfg
                 .provider
                 .clone()
@@ -505,11 +532,18 @@ mod tests {
             .expect("MetaAgentBuilder creation");
         // Verify the builder is properly initialised by checking internal
         // fields through its public API (run returns a MetaContext).
-        let ctx = builder
+        let outcome = builder
             .run("test task", &[], None)
             .await
             .expect("MetaAgent run");
-        assert!(ctx.constraints.is_empty());
+        match outcome {
+            crate::types::agent::MetaOutcome::Context(ctx) => {
+                assert!(ctx.constraints.is_empty());
+            }
+            crate::types::agent::MetaOutcome::Answer(_) => {
+                panic!("empty tags must not short-circuit");
+            }
+        }
         // Cleanup
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
@@ -571,8 +605,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_causal_llm_config_prefers_verify_model() {
-        // V37 异源裁判：verify_model 优先于 model（Causal 用独立验证模型）。
+    async fn test_yin_llm_config_prefers_verify_model() {
+        // V37 异源裁判：verify_model 优先于 model（Yin 用独立验证模型）。
         use crate::infra::config::ProviderEntry;
         use crate::types::agent::{MetaContext, ModelKey};
         let mut config = make_config();
@@ -589,10 +623,10 @@ mod tests {
             verify_model: Some(ModelKey::from_parts("deepseek", "deepseek-reasoner")),
             ..MetaContext::empty()
         };
-        // 与 factory Causal 构造同式：verify_model 优先，None 继承 model。
-        let causal_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
+        // 与 factory Yin 构造同式：verify_model 优先，None 继承 model。
+        let yin_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
         let (_provider, model) =
-            factory.agent_llm_config_with("causal", causal_key);
+            factory.agent_llm_config_with("yin", yin_key);
         assert_eq!(model, "deepseek-reasoner");
 
         // None → 继承主模型。
@@ -600,9 +634,9 @@ mod tests {
             verify_model: None,
             ..meta_ctx
         };
-        let causal_key2 = no_vm.verify_model.as_ref().or(no_vm.model.as_ref());
+        let yin_key2 = no_vm.verify_model.as_ref().or(no_vm.model.as_ref());
         let (_provider, model2) =
-            factory.agent_llm_config_with("causal", causal_key2);
+            factory.agent_llm_config_with("yin", yin_key2);
         assert_eq!(model2, "deepseek-chat");
 
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
@@ -671,5 +705,17 @@ mod tests {
         assert_eq!(model, "deepseek-chat");
 
         let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
+    }
+
+    #[test]
+    fn model_class_detects_flash_vs_strong() {
+        for k in ["deepseek-deepseek-v4-flash", "qwen-lite", "mini-x", "small-m"] {
+            assert_eq!(model_class_from_str(k), "flash", "{k} → flash");
+        }
+        for k in ["deepseek-deepseek-chat", "gpt-4o", "claude-sonnet"] {
+            assert_eq!(model_class_from_str(k), "strong", "{k} → strong");
+        }
+        let mk = crate::types::agent::ModelKey("deepseek-deepseek-v4-flash".into());
+        assert_eq!(model_class(&mk), "flash", "ModelKey → flash");
     }
 }

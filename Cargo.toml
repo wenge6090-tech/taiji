@@ -2,7 +2,7 @@
 name = "taiji"
 version = "0.1.0"
 edition = "2024"
-description = "taiji — lightweight AGI cognitive kernel (TPN-DMN-NSKG)"
+description = "taiji — 周易-连山-归藏 (Zhouyi-Lianshan-Guizang) cognitive kernel"
 
 [dependencies]
 # LLM agent framework

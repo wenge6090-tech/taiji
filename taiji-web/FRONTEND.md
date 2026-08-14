@@ -1,16 +1,16 @@
 # taiji-web 前端架构
 
-> 本文档是 [`BCP-蓝图-完型协议.md`](../BCP-蓝图-完型协议.md) §9 的详细展开。
-> 架构决策（技术选型表）与 WS 接口契约以 BCP §9.1 / §9.2 为准。
-> 最后更新：跟随 BCP V36（2026-08）。
+> taiji-web 前端架构自包含文档：技术选型、WS 接口契约、前端消费逻辑全在此。
+> 后端接口实现以代码为准：`src/ws/types.rs` / `src/ws/server.rs` / `src/ws/handler.rs` / `src/types/frontend.rs`。
+> 最后更新：2026-08。
 
 ---
 
 ## 1. 设计哲学
 
-前端是 TPN-DMN 认知过程在拓扑学上的真实投影，而非独立看板。设计原则：
+前端是 Zhouyi-Lianshan 认知过程在拓扑学上的真实投影，而非独立看板。设计原则：
 
-- **宏观-中观-微观三层同构**：背景太极图（宏观系统态）→ 纺锤递归树（中观拓扑）→ TPN 弹窗（微观状态机）
+- **宏观-中观-微观三层同构**：背景太极图（宏观系统态）→ 纺锤递归树（中观拓扑）→ Zhouyi 弹窗（微观状态机）
 - **可视化即交互界面**：点击节点即操作，审批输入框直连因果验证路由
 - **数据驱动 UI**：`data/tasks/` 文件系统 = 天然状态机，WebSocket 双向通信即 UI 更新
 - **纯浏览器运行**：无桌面壳依赖，Rust 核心进程提供 HTTP 静态托管 + WS 双向通信，浏览器直连
@@ -28,7 +28,7 @@ taiji-web/                          ← 独立前端项目（与 taiji 核心平
 │   │   ├── TaijiBg.tsx             ← 背景太极图（CSS 动画 + 状态联动光晕）
 │   │   ├── SpindleTree.tsx         ← 纺锤状递归树（React Flow 自定义布局）
 │   │   ├── SpindleNode.tsx         ← 单个树节点（状态色 + 点击展开）
-│   │   ├── TpnPopup.tsx            ← TPN 三相流程弹窗
+│   │   ├── ZhouyiPopup.tsx            ← Zhouyi 三相流程弹窗
 │   │   ├── PhaseDetail.tsx         ← 弹窗内单相详情面板
 │   │   ├── YinIntervene.tsx        ← 阴极审批输入框（驳回 + 建议注入）
 │   │   ├── ChatPanel.tsx           ← 侧边栏前端 Agent 聊天面板
@@ -36,7 +36,7 @@ taiji-web/                          ← 独立前端项目（与 taiji 核心平
 │   ├── hooks/
 │   │   ├── useWebSocket.ts         ← WebSocket 连接 + 事件分发 + 请求/响应
 │   │   ├── useTaskTree.ts          ← 任务树状态管理（TaskTreeSnapshot → React Flow 节点）
-│   │   └── useTpnState.ts          ← TPN 三相状态订阅
+│   │   └── useZhouyiState.ts          ← Zhouyi 三相状态订阅
 │   ├── types/
 │   │   └── index.ts               ← TypeScript 类型（与 Rust ws/types + frontend 对应）
 │   ├── lib/
@@ -51,7 +51,7 @@ taiji-web/                          ← 独立前端项目（与 taiji 核心平
 ```
 ┌──────────┐  WebSocket 双向   ┌──────────────┐  React State   ┌──────────────┐
 │ taiji 核心│ ←──────────────→ │ useWebSocket  │ ────────────→ │ SpindleTree   │
-│ (Rust)   │ TaskEvent (广播)  │ hook          │               │ + TpnPopup    │
+│ (Rust)   │ TaskEvent (广播)  │ hook          │               │ + ZhouyiPopup    │
 │          │ ClientMessage →   │ + wsClient    │               │ + TaijiBg     │
 │          │ ← ServerResponse  │               │               │ ChatPanel     │
 │          │                   │               │               │ YinIntervene  │
@@ -85,8 +85,8 @@ pub enum ClientMessage {
     ListTasks { request_id: String },
     /// 获取指定根任务的任务树快照。
     GetTaskTree { request_id: String, root_task_id: String },
-    /// 获取指定任务的 TPN 相位详情。
-    GetTpnState { request_id: String, task_id: String },
+    /// 获取指定任务的 Zhouyi 相位详情。
+    GetZhouyiState { request_id: String, task_id: String },
     /// 内嵌 Agent 聊天（完整 Rig Agent + 流式输出）。
     ChatMessage { request_id: String, message: String, session_id: Option<String>, context_task_id: Option<String> },
 }
@@ -192,20 +192,20 @@ pub struct ServeState {
 
 ### 6.1 太极背景图（TaijiBg）
 - 极淡线框太极图，位于页面最底层，60 秒匀速旋转（CSS 动画）
-- 状态联动：Fitting 相 → 暖色光晕；Causal 相 → 冷色光晕；其余常态无光晕
+- 状态联动：Yang 相 → 暖色光晕；Yin 相 → 冷色光晕；其余常态无光晕
 - 纯 SVG/CSS 实现，无外部依赖
 
 ### 6.2 纺锤状递归树（SpindleTree）
 - **布局**：纺锤形——depth=0 顶部、中间深度最宽、max_depth 底部收窄（`spread = sin(π·depth/max_depth)`）
 - **节点**：圆角矩形卡片，status 决定颜色（绿/黄/红），Framer Motion 过渡动画
 - **连线**：父子贝塞尔曲线，颜色跟随子节点状态，新建连线有生长动画
-- **交互**：悬停放大+tooltip；点击弹出 TpnPopup；双击缩放归位
+- **交互**：悬停放大+tooltip；点击弹出 ZhouyiPopup；双击缩放归位
 
-### 6.3 TPN 三相流程弹窗（TpnPopup）
-- **布局**：左侧三相流程图（Meta→Fitting→Causal 垂直排列）+ 右侧详情面板（随选中相切换）+ 底部阴极干预区
+### 6.3 Zhouyi 三相流程弹窗（ZhouyiPopup）
+- **布局**：左侧三相流程图（Meta→Yang→Yin 垂直排列）+ 右侧详情面板（随选中相切换）+ 底部阴极干预区
 - **三相流程**：卡片间箭头连线，当前执行中相有脉冲动画，已完成/失败相用 ✅/❌ 标记
-- **详情面板**：根据选中相显示对应 trace 信息（Meta: prompt 预览；Fitting: 工具调用日志；Causal: 验证报告/约束违反列表）
-- **阴极干预区**：在 AwaitingHumanReview 或 Causal 相激活——输入建议（注入下一轮 TPN 循环）+ 三个按钮（批准收敛/驳回重试/驳回改道）
+- **详情面板**：根据选中相显示对应 trace 信息（Meta: prompt 预览；Yang: 工具调用日志；Yin: 验证报告/约束违反列表）
+- **阴极干预区**：在 AwaitingHumanReview 或 Yin 相激活——输入建议（注入下一轮 Zhouyi 循环）+ 三个按钮（批准收敛/驳回重试/驳回改道）
 
 ## 7. ChatAgent 聊天面板
 
@@ -234,7 +234,7 @@ pub struct ServeState {
 ## 8. MVP 范围
 
 - ✅ 纺锤状递归树可视化 + 节点状态颜色
-- ✅ TPN 三相流程弹窗（含详情面板 + 阴极审批输入框）
+- ✅ Zhouyi 三相流程弹窗（含详情面板 + 阴极审批输入框）
 - ✅ 背景太极图（静态旋转 + 状态联动光晕）
 - ✅ WebSocket 双向通信（事件广播 + 请求响应）
 - ✅ 纯浏览器运行（核心进程 `taiji serve` 启动 HTTP + WS + 自动开浏览器）

@@ -4,6 +4,7 @@
 
 use async_trait::async_trait;
 use serde_json::Value as JsonValue;
+use std::path::Path;
 
 use super::common::{GREP_DEFAULT_LIMIT, GREP_MAX_LINE_LENGTH};
 use super::BuiltinSkill;
@@ -91,7 +92,7 @@ impl BuiltinSkill for SearchTool {
         "search"
     }
 
-    async fn call(&self, args: &JsonValue) -> Result<JsonValue, TaijiError> {
+    async fn call(&self, _task_dir: &Path, args: &JsonValue) -> Result<JsonValue, TaijiError> {
         let query = args
             .get("query")
             .and_then(JsonValue::as_str)
@@ -196,7 +197,7 @@ mod tests {
     async fn test_search_tool_missing_query() {
         let tool = SearchTool;
         let args = serde_json::json!({});
-        let result = tool.call(&args).await;
+        let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
     }
 
@@ -210,7 +211,7 @@ mod tests {
             "path": "src/agents/tools/skills/search.rs",
             "limit": 5,
         });
-        let result = tool.call(&args).await.unwrap();
+        let result = tool.call(std::path::Path::new("."), &args).await.unwrap();
         assert_eq!(result["status"], "ok");
         assert!(result["total"].as_u64().unwrap_or(0) > 0);
     }

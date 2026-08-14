@@ -8,7 +8,7 @@
 //!   逐条机械执行 checks，产出 [`SkillReport`]。
 //!
 //! **确定性保证**：同一 Skill + 同一产出 → 同一结果（与 LLM 无关）。
-//! **裁决优先级**：任一 hard 机械项失败 → `passed = false`，CausalAgent
+//! **裁决优先级**：任一 hard 机械项失败 → `passed = false`，YinAgent
 //! 直接短路，LLM 不可翻案（LLM 的 PASS 不能覆盖机械 FAIL）。
 //!
 //! SkillEngine 是 Rust 内部函数（非 LLM 工具）——LLM 不可调用、不可绕过。
@@ -85,7 +85,7 @@ impl SkillEngine {
     /// 机械执行全部 Skill 的检查项，产出 [`SkillReport`]。
     ///
     /// - 仅执行机械类检查项（FileExists / SchemaValid / ReferenceResolves /
-    ///   CommandSucceeds）；`LlmJudgement` 项跳过（由调用方 CausalAgent
+    ///   CommandSucceeds）；`LlmJudgement` 项跳过（由调用方 YinAgent
     ///   收集注入 LLM 裁决 — §6.6 L2）。
     /// - 任一 hard 机械项失败 → `passed = false`。
     /// - 串行执行（MVP-1 Skill 数量少）；单检查项内部失败（如文件读失败）
@@ -101,7 +101,7 @@ impl SkillEngine {
         for skill in skills {
             for check in &skill.checks {
                 if check.kind == CheckKind::LlmJudgement {
-                    // L2 项不参与机械裁决 — 由 CausalAgent 收集（§6.6）
+                    // L2 项不参与机械裁决 — 由 YinAgent 收集（§6.6）
                     continue;
                 }
                 let result = Self::run_check(check, task_dir).await;
@@ -134,7 +134,7 @@ impl SkillEngine {
 
     /// V45: 机械执行 SkillAsset 的阴面 implementations（FileExists/SchemaValid/
     /// ReferenceResolves/CommandSucceeds/TraceConsistency）；LlmJudgement 跳过
-    /// （由 CausalAgent 收集注入 LLM 裁决—§6.6 L2）；阳面 kind 跳过（非机械）。
+    /// （由 YinAgent 收集注入 LLM 裁决—§6.6 L2）；阳面 kind 跳过（非机械）。
     ///
     /// 等价旧 [`Self::run_checks`]（吃 VerificationAsset）的新接口——统一 SkillAsset
     /// 后的调用点入口；旧接口保留供过渡期单测。
@@ -215,7 +215,7 @@ impl SkillEngine {
             passed,
             detail,
             duration_ms: start.elapsed().as_millis() as u64,
-            // 机械检查零 token 成本；任务级信号（cost/rounds/quality）由 TPN 入队层摊派
+            // 机械检查零 token 成本；任务级信号（cost/rounds/quality）由 Zhouyi 入队层摊派
             cost_tokens: 0,
             verify_rounds: 0,
             quality: 0.0,
@@ -869,7 +869,7 @@ mod tests {
         fs::write(dir.join("deliverables").join("out.md"), "content").await.unwrap();
         fs::write(
             dir.join("deliverables").join("handoff.md"),
-            "---\nphase: fitting\noutput_refs:\n  - deliverables/out.md\n---\nbody\n",
+            "---\nphase: yang\noutput_refs:\n  - deliverables/out.md\n---\nbody\n",
         )
         .await
         .unwrap();
@@ -1111,9 +1111,9 @@ mod trace_consistency_tests {
     /// （soft 失败不短路 passed；编造证据时 passed=false 但 hard_failed=false）。
     #[tokio::test]
     async fn seed_contract_executes_via_run_checks() {
-        use crate::infra::knowledge::LiluoClient;
+        use crate::infra::knowledge::GuizangClient;
         let dir = make_task_dir().await;
-        let client = LiluoClient::new(dir.join("knowledge").as_path()).await.unwrap();
+        let client = GuizangClient::new(dir.join("knowledge").as_path()).await.unwrap();
         // 直接构造等价资产（避免依赖 .taiji 目录——测试隔离）
         let mut v = crate::types::agent::VerificationAsset::new(
             "v-assertion-evidence", "断言证据链", "t", "契约语义",
@@ -1133,7 +1133,7 @@ mod trace_consistency_tests {
         .unwrap();
         let report = SkillEngine::run_checks(&[v.clone()], &dir).await;
         // soft 失败不短路（§6.6：soft 注入 LLM prompt 供参考）——passed 仍 true，
-        // 但检查项结果记录失败（供 verify prompt 与 DMN 回传消费）
+        // 但检查项结果记录失败（供 verify prompt 与 Lianshan 回传消费）
         assert!(report.passed, "soft failure does not short-circuit");
         let tc = report
             .results

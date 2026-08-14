@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::infra::error::TaijiError;
 use crate::types::frontend::{
-    DmnActivity, EvolutionSummary, NodeStatus, SpindleEdge, SpindleNode, TaskTreeSnapshot, TpnPhase,
+    LianshanActivity, EvolutionSummary, NodeStatus, SpindleEdge, SpindleNode, TaskTreeSnapshot, ZhouyiPhase,
 };
 use crate::types::task::{Checkpoint, CyclePhase, Task, TaskStatus};
 
@@ -79,7 +79,7 @@ pub fn build_task_tree(data_root: &Path, root_task_id: &str) -> Result<TaskTreeS
 
         // Per-node derived data.
         let checkpoint = load_checkpoint(&task_dir);
-        let (phase, round, cycle) = derive_tpn_state(&task, &checkpoint);
+        let (phase, round, cycle) = derive_zhouyi_state(&task, &checkpoint);
         let status = derive_node_status(&task, &checkpoint);
         let deliverables_count = count_files(&task_dir.join("deliverables"));
         let tools_used = collect_tools_used(&task_dir);
@@ -131,7 +131,7 @@ pub fn build_task_tree(data_root: &Path, root_task_id: &str) -> Result<TaskTreeS
         root_description,
         nodes,
         edges,
-        dmn_activity: None, // populated by the WS handler layer
+        lianshan_activity: None, // populated by the WS handler layer
     })
 }
 
@@ -175,22 +175,22 @@ fn derive_node_status(task: &Task, checkpoint: &Option<Checkpoint>) -> NodeStatu
     }
 }
 
-/// Derive the current TPN phase from checkpoint + status.
-fn derive_tpn_state(task: &Task, checkpoint: &Option<Checkpoint>) -> (TpnPhase, u32, u32) {
+/// Derive the current Zhouyi phase from checkpoint + status.
+fn derive_zhouyi_state(task: &Task, checkpoint: &Option<Checkpoint>) -> (ZhouyiPhase, u32, u32) {
     let (round, cycle) = checkpoint
         .as_ref()
         .map(|c| (c.round, c.cycle))
         .unwrap_or((0, 0));
 
     if matches!(task.status, TaskStatus::Completed) {
-        return (TpnPhase::Converged, round, cycle);
+        return (ZhouyiPhase::Converged, round, cycle);
     }
 
     let phase = match checkpoint.as_ref().map(|c| &c.phase) {
-        Some(CyclePhase::MetaDone) => TpnPhase::Meta,
-        Some(CyclePhase::FittingDone) => TpnPhase::Fitting,
-        Some(CyclePhase::VerifyDone) => TpnPhase::Causal,
-        None => TpnPhase::Idle,
+        Some(CyclePhase::MetaDone) => ZhouyiPhase::Meta,
+        Some(CyclePhase::YangDone) => ZhouyiPhase::Yang,
+        Some(CyclePhase::YinDone) => ZhouyiPhase::Yin,
+        None => ZhouyiPhase::Idle,
     };
 
     (phase, round, cycle)
@@ -243,32 +243,32 @@ fn find_sibling_index(task_dir: &Path, _parent_id: &str, _data_root: &Path) -> O
 }
 
 // ---------------------------------------------------------------------------
-// DMN activity
+// Lianshan activity
 // ---------------------------------------------------------------------------
 
-/// Build a [`DmnActivity`] summary from a list of evolution summaries.
-pub fn dmn_activity(evolutions: Vec<EvolutionSummary>) -> Option<DmnActivity> {
+/// Build a [`LianshanActivity`] summary from a list of evolution summaries.
+pub fn lianshan_activity(evolutions: Vec<EvolutionSummary>) -> Option<LianshanActivity> {
     if evolutions.is_empty() {
         None
     } else {
-        Some(DmnActivity {
+        Some(LianshanActivity {
             active_nodes: evolutions.len() as u32,
             recent_evolutions: evolutions,
         })
     }
 }
 
-/// Read the most recent evolution summaries from the DMN log file.
-pub fn read_dmn_activity(data_root: &Path, max: usize) -> Option<DmnActivity> {
+/// Read the most recent evolution summaries from the Lianshan log file.
+pub fn read_lianshan_activity(data_root: &Path, max: usize) -> Option<LianshanActivity> {
     #[derive(Serialize, Deserialize)]
-    struct DmnLogEntry {
+    struct LianshanLogEntry {
         layer: u32,
         asset_id: String,
         delta: String,
         timestamp: String,
     }
 
-    let log_path = data_root.join("dmn_evolution.log");
+    let log_path = data_root.join("lianshan_evolution.log");
     if !log_path.is_file() {
         return None;
     }
@@ -276,12 +276,12 @@ pub fn read_dmn_activity(data_root: &Path, max: usize) -> Option<DmnActivity> {
         return None;
     };
 
-    let mut entries: Vec<DmnLogEntry> = Vec::new();
+    let mut entries: Vec<LianshanLogEntry> = Vec::new();
     for line in content.lines().rev() {
         if entries.len() >= max {
             break;
         }
-        if let Ok(entry) = serde_json::from_str::<DmnLogEntry>(line) {
+        if let Ok(entry) = serde_json::from_str::<LianshanLogEntry>(line) {
             entries.push(entry);
         }
     }
@@ -290,7 +290,7 @@ pub fn read_dmn_activity(data_root: &Path, max: usize) -> Option<DmnActivity> {
     if entries.is_empty() {
         None
     } else {
-        Some(DmnActivity {
+        Some(LianshanActivity {
             active_nodes: entries.len() as u32,
             recent_evolutions: entries
                 .into_iter()

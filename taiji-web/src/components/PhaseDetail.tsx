@@ -1,9 +1,9 @@
-import type { SpindleNode, TpnPhase, TpnPhaseState, TraceRecordPreview } from "../types";
+import type { SpindleNode, ZhouyiPhase, ZhouyiPhaseState, TraceRecordPreview } from "../types";
 
 const TRACE_PHASE_COLOR: Record<string, string> = {
   Meta: "border-purple-500/40 bg-purple-500/10 text-purple-400",
-  Fitting: "border-yang/40 bg-yang/10 text-yang",
-  Causal: "border-cyan-500/40 bg-cyan-500/10 text-cyan-400",
+  Yang: "border-yang/40 bg-yang/10 text-yang",
+  Yin: "border-cyan-500/40 bg-cyan-500/10 text-cyan-400",
   Converged: "border-green-500/40 bg-green-500/10 text-green-400",
   Idle: "border-slate-600/40 bg-slate-700/10 text-slate-400",
 };
@@ -40,9 +40,9 @@ export default function PhaseDetail({
   node,
   phaseState,
 }: {
-  phase: TpnPhase;
+  phase: ZhouyiPhase;
   node: SpindleNode;
-  phaseState: TpnPhaseState | null;
+  phaseState: ZhouyiPhaseState | null;
 }) {
   const deliverables = phaseState?.deliverables ?? [];
   const trace = phaseState?.tracePreview ?? [];
@@ -75,13 +75,13 @@ export default function PhaseDetail({
           </section>
         )}
 
-        {phase === "Fitting" && (
+        {phase === "Yang" && (
           <section>
             <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-yang">
-              Fitting 相位
+              Yang 相位
             </h4>
             <p className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm leading-relaxed text-slate-200">
-              {phaseState?.fittingSummary ?? "Fitting 相:阳面拟合与递归分解进行中…"}
+              {phaseState?.yangSummary ?? "Yang 相:阳面拟合与递归分解进行中…"}
             </p>
             {node.toolsUsed.length > 0 && (
               <div className="mt-3">
@@ -101,16 +101,16 @@ export default function PhaseDetail({
           </section>
         )}
 
-        {phase === "Causal" && (
+        {phase === "Yin" && (
           <section>
             <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-cyan-400">
-              Causal 相位
+              Yin 相位
             </h4>
-            {phaseState?.causalVerdict ? (
+            {phaseState?.yinVerdict ? (
               <div className="space-y-3 rounded-lg border border-slate-800 bg-slate-900/60 p-3">
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="rounded border border-cyan-500/40 bg-cyan-500/10 px-2 py-0.5 font-mono text-xs text-cyan-300">
-                    {phaseState.causalVerdict.route}
+                    {phaseState.yinVerdict.route}
                   </span>
                   <span className="text-xs text-slate-500">置信度</span>
                   <div className="h-1.5 min-w-0 flex-1 overflow-hidden rounded-full bg-slate-800">
@@ -119,21 +119,21 @@ export default function PhaseDetail({
                       style={{
                         width: `${Math.min(
                           100,
-                          Math.max(0, phaseState.causalVerdict.confidence)
+                          Math.max(0, phaseState.yinVerdict.confidence)
                         )}%`,
                       }}
                     />
                   </div>
                   <span className="font-mono text-xs text-cyan-300">
-                    {Math.min(100, Math.max(0, phaseState.causalVerdict.confidence))}%
+                    {Math.min(100, Math.max(0, phaseState.yinVerdict.confidence))}%
                   </span>
                 </div>
                 <p className="text-sm leading-relaxed text-slate-200">
-                  {phaseState.causalVerdict.summary}
+                  {phaseState.yinVerdict.summary}
                 </p>
-                {phaseState.causalVerdict.violations.length > 0 && (
+                {phaseState.yinVerdict.violations.length > 0 && (
                   <ul className="space-y-1">
-                    {phaseState.causalVerdict.violations.map((v) => (
+                    {phaseState.yinVerdict.violations.map((v) => (
                       <li key={v} className="flex items-start gap-1.5 text-xs text-red-400">
                         <span className="shrink-0">✗</span>
                         <span>{v}</span>
@@ -144,13 +144,13 @@ export default function PhaseDetail({
               </div>
             ) : (
               <p className="rounded-lg border border-slate-800 bg-slate-900/60 p-3 text-sm leading-relaxed text-slate-400">
-                Causal 相:因果验证等待执行
+                Yin 相:因果验证等待执行
               </p>
             )}
           </section>
         )}
 
-        {phase !== "Meta" && phase !== "Fitting" && phase !== "Causal" && (
+        {phase !== "Meta" && phase !== "Yang" && phase !== "Yin" && (
           <section>
             <h4 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">
               相位 {phase}

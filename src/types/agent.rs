@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::verification::CheckStats;
 
-/// 资产引用（V35/MVP-6：DMN 回传依据——编排所选资产列表，§8.21 数据流断点修复）。
+/// 资产引用（V35/MVP-6：Lianshan 回传依据——编排所选资产列表，§8.21 数据流断点修复）。
 /// `partition`（模型分区 model_key）后置：分区激活时扩展，serde default 兼容。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetRef {
@@ -48,11 +48,11 @@ impl std::fmt::Display for ModelKey {
 }
 
 /// V36：模型级 MCTS 统计行（BCP §6.4 元权重表，`model_key → StatsRow`）。
-/// serde default 零迁移：缺失字段按 0 处理。DMN 回传更新（n++ 等），
+/// serde default 零迁移：缺失字段按 0 处理。Lianshan 回传更新（n++ 等），
 /// ModelRouter 读取（§8.8 第 1 步）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ModelStatsRow {
-    /// 采样次数（TPN 任务数）。
+    /// 采样次数（Zhouyi 任务数）。
     #[serde(default)]
     pub n: u64,
     /// 通过次数。
@@ -108,7 +108,7 @@ impl ModelStatsRow {
     }
 }
 
-/// Specifies whether a task node's FittingAgent (概率拟合·阳) operates in
+/// Specifies whether a task node's YangAgent (概率拟合·阳) operates in
 /// **Orchestration** or **Execution** mode (V27 阴阳配对模式恢复).
 ///
 /// Decided by the MetaAgent's weight update based on recursion depth rules
@@ -139,8 +139,20 @@ impl Default for AgentMode {
     }
 }
 
+/// 元 (Meta) 的产出——半 LLM 半符号认知节点的两个出口（BCP §8.8 V46）。
+///
+/// - `Context`：行动类任务（产出改变世界状态）→ 完整三相循环（阳→阴→路由）。
+/// - `Answer`：应答类任务（产出不改变世界，如查询/问答/讨论）→ 短路，跳过阳阴
+///   直接 PASS。验证规则：符号校验保底（引用真实性）+ 交互判断兜底（父节点/用户
+///   裁定），阴不做语义验证（同源概率回路 §1.3）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MetaOutcome {
+    Context(MetaContext),
+    Answer(String),
+}
+
 /// Context produced by MetaAgent (权重更新·元), injected as reasoning bias
-/// into FittingAgent and CausalAgent.
+/// into YangAgent and YinAgent.
 ///
 /// MetaAgent queries the 归藏 (cognitive warehouse) and LLM-decides:
 /// - Cognitive context (constraints, skills)
@@ -148,7 +160,7 @@ impl Default for AgentMode {
 /// - Composed system prompts for downstream agents (mode-paired)
 ///
 /// # Fallback
-/// When 归藏 has no matching prompt assets, `fitting_system_prompt`,
+/// When 归藏 has no matching prompt assets, `yang_system_prompt`,
 /// `verify_system_prompt`, and `converge_system_prompt` are `None`, `mode`
 /// defaults to [`AgentMode::Orchestration`], and downstream agents fall back
 /// to their built-in mode-paired hardcoded templates.
@@ -172,38 +184,38 @@ pub struct MetaContext {
     pub degraded: Option<String>,
 
     /// V35/MVP-6：本次编排选用的资产引用列表（prompts + verifications，
-    /// UCB 序消费）——DMN 回传依据（§8.21 数据流断点修复）。
+    /// UCB 序消费）——Lianshan 回传依据（§8.21 数据流断点修复）。
     /// serde default：旧 meta_ctx.json 零迁移；空 = 未接线（checks-only 路径）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets_used: Vec<AssetRef>,
 
     /// V36：元权重模型路由结果（BCP §8.8 第 1 步，纯符号层先于分区检索）。
-    /// 唯一分区载体——Fitting/Causal 按此模型执行 + 按此分区加载资产（§8.3
+    /// 唯一分区载体——Yang/Yin 按此模型执行 + 按此分区加载资产（§8.3
     /// 分区一致性）；None = 路由异常/未接线 → 配置默认。serde default：旧
     /// meta_ctx.json 零迁移。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelKey>,
 
-    /// V37：验证相位（Causal）专用模型——异源裁判（BCP §8.8 相位级）。
-    /// Some = CausalAgent verify/converge 用此模型（及对应分区加载契约）执行，
+    /// V37：验证相位（Yin）专用模型——异源裁判（BCP §8.8 相位级）。
+    /// Some = YinAgent verify/converge 用此模型（及对应分区加载契约）执行，
     /// 与执行模型（`model`）异源——裁判 ≠ 运动员（§1.3 self-preference 偏置
     /// 的对抗）；None = 继承 `model`（主模型）。serde default：旧 meta_ctx.json
     /// 零迁移；默认关闭（`runtime.model_routing.heterogeneous_verifier`）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub verify_model: Option<ModelKey>,
 
-    /// Full system prompt for FittingAgent (概率拟合·阳), LLM-composed by
-    /// MetaAgent.  When `None`, FittingAgent uses its mode-paired built-in
+    /// Full system prompt for YangAgent (概率拟合·阳), LLM-composed by
+    /// MetaAgent.  When `None`, YangAgent uses its mode-paired built-in
     /// template (编排模板 / 执行模板).
-    pub fitting_system_prompt: Option<String>,
+    pub yang_system_prompt: Option<String>,
 
-    /// Full system prompt for CausalAgent.verify() (因果验证·阴).
-    /// When `None`, CausalAgent falls back to VERIFY_ORC/EXEC_SYSTEM_PROMPT
+    /// Full system prompt for YinAgent.verify() (因果验证·阴).
+    /// When `None`, YinAgent falls back to VERIFY_ORC/EXEC_SYSTEM_PROMPT
     /// by `mode`.
     pub verify_system_prompt: Option<String>,
 
-    /// Full system prompt for CausalAgent.converge() (收敛判决).
-    /// When `None`, CausalAgent falls back to CONVERGE_ORC/EXEC_SYSTEM_PROMPT
+    /// Full system prompt for YinAgent.converge() (收敛判决).
+    /// When `None`, YinAgent falls back to CONVERGE_ORC/EXEC_SYSTEM_PROMPT
     /// by `mode`.
     pub converge_system_prompt: Option<String>,
 }
@@ -229,7 +241,7 @@ impl MetaContext {
             assets_used: vec![],
             model: None,
             verify_model: None,
-            fitting_system_prompt: None,
+            yang_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
         }
@@ -243,15 +255,18 @@ pub struct SkillRef {
     pub name: String,
     pub tool_name: String,
     pub match_weight: f64,
+    /// 层 0：一句话摘要（披露进 tool 列表，BCP §10.2 渐进披露；空 = 回退 id—name）。
+    #[serde(default)]
+    pub summary: String,
 }
 
-/// The prompt context passed to FittingAgent (概率拟合·阳).
+/// The prompt context passed to YangAgent (概率拟合·阳).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct YangPrompt {
     pub task_description: String,
     pub constraint_summaries: Vec<String>,
     /// Absolute paths of parent deliverables, injected by `recursive_decompose`.
-    /// Read-only reference for the child FittingAgent — the child can read but
+    /// Read-only reference for the child YangAgent — the child can read but
     /// cannot write to parent directories.
     #[serde(default)]
     pub parent_deliverables: Vec<String>,
@@ -270,10 +285,10 @@ pub struct YangPrompt {
 ///
 /// When a frontend agent (any MCP client) calls `taiji_run`, it can provide
 /// files it has read, tools it has executed, and a summary of the conversation.
-/// This context is injected into the TPN cycle so FittingAgent can reason over
+/// This context is injected into the Zhouyi cycle so YangAgent can reason over
 /// data that the frontend already collected — avoiding redundant tool calls.
 ///
-/// All fields are optional.  When `None`/empty, the TPN cycle runs normally
+/// All fields are optional.  When `None`/empty, the Zhouyi cycle runs normally
 /// with no external context.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExternalContext {
@@ -306,7 +321,7 @@ pub struct ExternalToolResult {
 }
 
 // ---------------------------------------------------------------------------
-// PromptAsset — 理络 prompt template asset
+// PromptAsset — 归藏 prompt template asset
 // ---------------------------------------------------------------------------
 
 /// A prompt template asset stored in the 归藏 cognitive warehouse under
@@ -317,8 +332,8 @@ pub struct ExternalToolResult {
 /// # Directory layout
 /// ```text
 /// {data_dir}/prompts/
-/// ├── orchestration_fitting.yaml
-/// ├── execution_fitting.yaml
+/// ├── orchestration_yang.yaml
+/// ├── execution_yang.yaml
 /// ├── orchestration_verify.yaml
 /// └── ...
 /// ```
@@ -349,19 +364,19 @@ pub struct PromptAsset {
     pub tags: Vec<String>,
     /// Confidence score [0.0, 1.0] — MetaAgent uses this for ranking.
     pub confidence: f64,
-    /// Version counter (auto-incremented by LiluoClient).
+    /// Version counter (auto-incremented by GuizangClient).
     pub version: u32,
 
     /// The prompt template body.
     pub content: String,
 
-    /// Which agent this prompt targets: `"FittingAgent"` or `"CausalAgent"`.
+    /// Which agent this prompt targets: `"YangAgent"` or `"YinAgent"`.
     /// `serde(default)` — 手写/外部生成的资产 YAML 可能省略此字段（V27 资产
     /// 实测缺此字段导致整条资产加载失败 → MetaAgent 静默降级，系统性 bug）。
     #[serde(default)]
     pub agent_target: String,
 
-    /// Usage statistics (updated by DMN evolver).
+    /// Usage statistics (updated by Lianshan evolver).
     #[serde(default)]
     pub usage_count: u32,
     /// Historical success rate [0.0, 1.0].
@@ -459,7 +474,7 @@ pub struct VerificationAsset {
     pub tags: Vec<String>,
     /// Confidence score [0.0, 1.0] — initial prior（人工种子）。
     pub confidence: f64,
-    /// Version counter (auto-incremented by LiluoClient).
+    /// Version counter (auto-incremented by GuizangClient).
     pub version: u32,
     /// 契约语义描述（人读）。
     #[serde(default)]
@@ -467,10 +482,10 @@ pub struct VerificationAsset {
     /// 结构化检查项（V33 — §4 CheckSpec；机器执行）。
     #[serde(default)]
     pub checks: Vec<crate::types::verification::CheckSpec>,
-    /// 消费方 Agent："CausalAgent" 为主。
+    /// 消费方 Agent："YinAgent" 为主。
     #[serde(default)]
     pub agent_target: String,
-    /// Usage statistics (updated by DMN evolver).
+    /// Usage statistics (updated by Lianshan evolver).
     #[serde(default)]
     pub usage_count: u32,
     /// Historical success rate [0.0, 1.0].
@@ -484,6 +499,12 @@ pub struct VerificationAsset {
     /// 变体与源资产构成演化组，组内统计对比驱动 merge/prune。
     #[serde(default)]
     pub variant_of: Option<String>,
+    /// 环境维度（V50 §6.3.1）：空 = 环境无关；模型类（flash/strong）隔离变体。
+    #[serde(default)]
+    pub env_tags: Vec<String>,
+    /// V50 危险隔离：只有 true 的资产允许进入主动学习探索候选（默认 false）。
+    #[serde(default)]
+    pub safe_for_exploration: bool,
 }
 
 impl VerificationAsset {
@@ -511,11 +532,13 @@ impl VerificationAsset {
             version: 1,
             content: content.to_string(),
             checks,
-            agent_target: "CausalAgent".into(),
+            agent_target: "YinAgent".into(),
             usage_count: 0,
             success_rate: 0.0,
             status: Self::default_status(),
             variant_of: None,
+            env_tags: Vec::new(),
+            safe_for_exploration: false,
         }
     }
 }

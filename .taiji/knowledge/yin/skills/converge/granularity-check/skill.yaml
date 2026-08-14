@@ -18,7 +18,7 @@ implementations:
   params: {}
   severity: soft
   pass_condition: 子任务数量适中（≤4）；聚焦单一维度；同级规模相近
-agent_target: CausalAgent
+agent_target: YinAgent
 confidence: 0.65
 version: 1
 status: active

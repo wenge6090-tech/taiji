@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::verification::ConvergenceStatus;
 
-/// A recursive work unit in the TPN-DMN engine.
+/// A recursive work unit in the Zhouyi-Lianshan engine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Task {
     pub id: String,
@@ -32,7 +32,7 @@ pub struct SubtaskSpec {
     #[serde(default)]
     pub mode: crate::types::agent::AgentMode,
     /// V37：子任务模型覆盖（BCP §8.8 子任务级路由）。父 LLM 拆解时可按
-    /// 子任务难度/领域分配不同模型；None = 继承父模型（子 TpnCycle 注入父
+    /// 子任务难度/领域分配不同模型；None = 继承父模型（子 ZhouyiCycle 注入父
     /// MetaContext，`model` 默认继承）。serde default：旧 decompose_result
     /// 零迁移。
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -48,7 +48,7 @@ pub struct SubtaskSpec {
 ///
 /// Carried inside [`DecomposeResult.child_results`] so the converge LLM has
 /// full visibility into each child's quality signals (rounds, tools) and the
-/// parent FittingAgent can make informed re-run decisions.
+/// parent YangAgent can make informed re-run decisions.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChildResultSummary {
     pub task_id: String,
@@ -84,9 +84,9 @@ pub struct DecomposeResult {
     pub status: ConvergenceStatus,
     pub subtask_count: u32,
     /// Absolute paths of all child deliverables aggregated upward.
-    /// Populated by `recursive_decompose` tool from child TPNResults.
+    /// Populated by `recursive_decompose` tool from child ZhouyiResults.
     pub deliverables: Vec<String>,
-    /// How many TPN rounds the child agent needed before passing verify().
+    /// How many Zhouyi rounds the child agent needed before passing verify().
     /// Low rounds = easy task, high rounds = struggled task — key signal for converge.
     #[serde(default)]
     pub rounds: u32,
@@ -99,9 +99,9 @@ pub struct DecomposeResult {
     pub child_results: Vec<ChildResultSummary>,
 }
 
-/// Final result of a TPN execution cycle.
+/// Final result of a Zhouyi execution cycle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct TPNResult {
+pub struct ZhouyiResult {
     pub task_id: String,
     pub content: String,
     pub tools_used: Vec<String>,
@@ -120,23 +120,23 @@ pub enum TaskStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Checkpoint — TpnCycle phase tracking (durable, atomic-write to checkpoint.json)
+// Checkpoint — ZhouyiCycle phase tracking (durable, atomic-write to checkpoint.json)
 // ---------------------------------------------------------------------------
 
-/// Which phase of the TPN cycle has been durably persisted.
+/// Which phase of the Zhouyi cycle has been durably persisted.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum CyclePhase {
     /// `MetaAgent.run()` completed; MetaContext is in `meta.json`.
     MetaDone,
-    /// `FittingAgent.run()` completed; conversation is in `chat_history.json`.
-    FittingDone,
-    /// `CausalAgent.verify()` completed; state is in `verify_state.json`.
-    VerifyDone,
+    /// `YangAgent.run()` completed; conversation is in `chat_history.json`.
+    YangDone,
+    /// `YinAgent.verify()` completed; state is in `verify_state.json`.
+    YinDone,
 }
 
-/// Snapshot of TpnCycle progress, atomically written to `task_dir/checkpoint.json`.
+/// Snapshot of ZhouyiCycle progress, atomically written to `task_dir/checkpoint.json`.
 ///
-/// On TpnCycle startup, if this file exists and the task is not fully complete,
+/// On ZhouyiCycle startup, if this file exists and the task is not fully complete,
 /// the cycle can resume from the last completed phase rather than restarting.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Checkpoint {
