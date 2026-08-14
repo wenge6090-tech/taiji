@@ -152,65 +152,6 @@ impl YinVerifyAgentBuilder {
     ///    [`VerificationReport`].
     /// 3. **Return**: the final report.
     ///
-    /// # Production wiring (pinned for Rig API verification)
-    ///
-    /// ```ignore
-    /// use rig::providers::deepseek;
-    /// use rig_core::agent::AgentBuilder;
-    ///
-    /// // Step 1: load constraints relevant to the task type tags
-    /// let constraints = ConstraintEngine::load_truths(&[]);
-    ///
-    /// // Step 1a: run pre-check (hard violations short-circuit)
-    /// let pre_check = ConstraintEngine::check_yin_output(
-    ///     task_output,
-    ///     tool_results,
-    ///     &constraints,
-    /// );
-    ///
-    /// if !pre_check.passed {
-    ///     let has_hard = pre_check.violations.iter().any(|v| {
-    ///         v.severity == ConstraintSeverity::Hard
-    ///     });
-    ///     if has_hard {
-    ///         return Ok(VerificationReport {
-    ///             route: VerificationRoute::BackToMeta,
-    ///             confidence: 1.0,
-    ///             summary: "Hard constraint violation".into(),
-    ///             constraint_violations: pre_check.violations.iter().map(|v| v.reason.clone()).collect(),
-    ///         });
-    ///     }
-    /// }
-    ///
-    /// // Step 2: inject soft violations into LLM prompt
-    /// let soft_context: Vec<String> = pre_check.violations.iter()
-    ///     .filter(|v| v.severity == ConstraintSeverity::Soft)
-    ///     .map(|v| format!("[Soft] {}: {}", v.truth_name, v.reason))
-    ///     .collect();
-    ///
-    /// let client = self.provider.client("deepseek")?;
-    /// let agent = client
-    ///     .agent(&self.model)
-    ///     .preamble(VERIFY_ORC_SYSTEM_PROMPT)
-    ///     .max_turns(200)
-    ///     .build();
-    ///
-    /// let input = format!(
-    ///     "Task output:\n{}\n\nTool results:\n{}\n\nSoft violations:\n{}",
-    ///     task_output,
-    ///     tool_results.join("\n---\n"),
-    ///     soft_context.join("\n"),
-    /// );
-    ///
-    /// let response = agent.prompt(&input).await
-    ///     .map_err(|e| TaijiError::LLMCallFailed { ... })?;
-    ///
-    /// let report: VerificationReport = serde_json::from_str(response.as_ref())
-    ///     .map_err(|e| TaijiError::StructuredOutputParseFailed { ... })?;
-    ///
-    /// Ok(report)
-    /// ```
-    ///
     /// # Current behaviour (production path)
     /// Runs the **LLM verification path**: constraint pre-check first (hard
     /// violations short-circuit to `BackToMeta`), then the LLM reviews the task
@@ -230,7 +171,7 @@ impl YinVerifyAgentBuilder {
             Some(g) => g.load_rules().await?,
             None => vec![],
         };
-        let constraints = ConstraintEngine::load_truths(&[], &rules);
+        let constraints = ConstraintEngine::load_truths(&meta_ctx.task_type_tags, &rules);
 
         // ── Step 1: Constraint pre-check ──
         let pre_check = ConstraintEngine::check_yin_output(task_output, tool_results, &constraints);
@@ -389,6 +330,8 @@ impl YinVerifyAgentBuilder {
             .preamble(system_prompt)
             .max_tokens(1024u64)
             .default_max_turns(self.max_turns as usize)
+            // V51 四象温度（AGENTS.md §3）：YinVerify 默认 0.2（低温稳定验证）。
+            .temperature(0.2)
             .hook(hook_set)
             .tools(skill_tools)
             .build();
@@ -676,29 +619,6 @@ impl YinConvergeAgentBuilder {
     ///    parent task rerun (children/ reuse → idempotent reconverge) since
     ///    V26.2 no longer persists a converge state file.
     ///
-    /// # Production wiring (pinned for Rig API verification)
-    ///
-    /// ```ignore
-    /// use rig::providers::deepseek;
-    /// use rig_core::agent::AgentBuilder;
-    ///
-    /// let client = self.provider.client("deepseek")?;
-    /// let agent = client
-    ///     .agent(&self.model)
-    ///     .preamble(CONVERGE_ORC_SYSTEM_PROMPT)
-    ///     .max_turns(200)
-    ///     .build();
-    ///
-    /// let input = serde_json::to_string_pretty(subtask_results)?;
-    /// let response = agent.prompt(&input).await
-    ///     .map_err(|e| TaijiError::LLMCallFailed { ... })?;
-    ///
-    /// let decision: ConvergenceDecision = serde_json::from_str(response.as_ref())
-    ///     .map_err(|e| TaijiError::StructuredOutputParseFailed { ... })?;
-    ///
-    /// Ok(decision)
-    /// ```
-    ///
     /// # Current behaviour (production path)
     /// Runs the **LLM convergence judgment**: the LLM reviews the aggregated
     /// subtask results with `read` / `webfetch` tools for file-level and web
@@ -799,6 +719,8 @@ impl YinConvergeAgentBuilder {
             .preamble(system_prompt)
             .max_tokens(1024u64)
             .default_max_turns(self.max_turns as usize)
+            // V51 四象温度（AGENTS.md §3）：YinConverge 默认 0.2（低温稳定收敛）。
+            .temperature(0.2)
             .hook(hook_set)
             .tools(skill_tools)
             .build();

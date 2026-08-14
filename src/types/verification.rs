@@ -35,7 +35,7 @@ pub struct ConvergenceDecision {
     pub task_summary: String,
 }
 
-/// L4 Truth 的状态（TMS 真值维护）。
+/// Truth 的状态（TMS 真值维护）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum TruthStatus {
     /// 活跃中，ConstraintEngine 正常加载。
@@ -52,7 +52,7 @@ impl Default for TruthStatus {
     }
 }
 
-/// An L4 Truth constraint (runtime enforcement).
+/// A truth constraint (runtime enforcement).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TruthConstraint {
     pub id: String,
@@ -154,7 +154,7 @@ pub enum SkillKind {
     ReferenceResolves,
     /// 命令执行成功（白名单 + 30s 超时）。
     CommandSucceeds,
-    /// LLM 裁决：不机械执行，判据注入 verify/converge prompt（§6.6 L2）。
+    /// LLM 裁决：不机械执行，判据注入 verify/converge prompt（§6.6）。
     LlmJudgement,
     /// 断言证据链：产出中 `[证据: 工具名]` 引用 → trace 工具调用存在性。
     TraceConsistency,
@@ -333,8 +333,8 @@ impl SkillAsset {
 
 /// 验证契约检查项类型（CheckSpec.kind）。
 ///
-/// 前四种为**机械可判定断言**（L0/L1，SkillEngine 执行，LLM 不可翻案）；
-/// `LlmJudgement` 是唯一留给 LLM 的检查项类型（L2 兜底，§6.6）。
+/// 前四种为**机械可判定断言**（SkillEngine 执行，LLM 不可翻案）；
+/// `LlmJudgement` 是唯一留给 LLM 的检查项类型（§6.6）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckKind {
@@ -347,7 +347,7 @@ pub enum CheckKind {
     ReferenceResolves,
     /// 命令执行成功：params = {command: "cargo check"}——白名单前缀 + 30s 超时。
     CommandSucceeds,
-    /// LLM 裁决：不机械执行，由 YinAgent 收集注入 verify prompt（§6.6 L2）。
+    /// LLM 裁决：不机械执行，由 YinAgent 收集注入 verify prompt（§6.6）。
     LlmJudgement,
     /// V34/MVP-4 断言证据链：产出中 `[证据: 工具名]` 引用 → 任务 trace.jsonl
     /// `tool_call::*` 记录存在性校验（引用完整性，reference_resolves 推广，§8.22）。
@@ -506,7 +506,7 @@ pub struct CheckResult {
     pub quality: f64,
 }
 
-/// SkillEngine 输出（L0 机械 + L1 契约，§8.22）。
+/// SkillEngine 输出（机械判据 + 契约校验，§8.22）。
 /// 仅含机械检查项结果；llm_judgement 项由调用方（YinAgent）收集。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillReport {
@@ -516,8 +516,7 @@ pub struct SkillReport {
     pub summary: String,
 }
 
-/// 兼容别名——过渡期保留，待全仓引用迁移后删除。
-pub type ContractReport = SkillReport;
+/// 兼容别名已删除（批3 P2 清理：grep 确认全仓无引用）。
 
 #[cfg(test)]
 mod tests {

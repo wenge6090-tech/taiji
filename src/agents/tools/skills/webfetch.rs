@@ -8,6 +8,7 @@ use serde_json::Value as JsonValue;
 use std::path::Path;
 
 use super::BuiltinSkill;
+use crate::hooks::safety::SafetyHook;
 use crate::infra::error::TaijiError;
 
 /// Built-in `webfetch` skill.
@@ -17,64 +18,12 @@ pub struct WebfetchTool;
 /// Maximum response body size (512 KB).
 const MAX_RESPONSE_BYTES: usize = 512 * 1024;
 
-/// Check for SSRF: block localhost, private IPs, and 127.0.0.1.
+/// Check for SSRF — delegates to the single source of truth in
+/// [`SafetyHook::check_web_url_static`] (AGENTS.md §16 危险隔离), covering
+/// decimal/hex private-IP encodings, all RFC1918/link-local ranges, and
+/// fragment-before-`@` bypasses that the old local check missed (批10 P1).
 fn check_ssrf(url: &str) -> Result<(), TaijiError> {
-    let lower = url.to_lowercase();
-
-    // Blocked patterns
-    let blocked = [
-        "localhost",
-        "127.0.0.1",
-        "0.0.0.0",
-        "10.",
-        "172.16.",
-        "172.17.",
-        "172.18.",
-        "172.19.",
-        "172.20.",
-        "172.21.",
-        "172.22.",
-        "172.23.",
-        "172.24.",
-        "172.25.",
-        "172.26.",
-        "172.27.",
-        "172.28.",
-        "172.29.",
-        "172.30.",
-        "172.31.",
-        "192.168.",
-        "[::1]",
-        "[::]",
-
-        // URL host patterns (e.g. http://127.0.0.1:8080/)
-        "@127.0.0.1",
-        "@localhost",
-        "@0.0.0.0",
-    ];
-
-    for pattern in &blocked {
-        if lower.contains(pattern) {
-            return Err(TaijiError::Other(format!(
-                "webfetch: blocked URL (SSRF prevention): {} (matched: {})",
-                url, pattern
-            )));
-        }
-    }
-
-    // Also check the host part via url parsing
-    if let Ok(parsed) = url::Url::parse(url)
-        && let Some(host) = parsed.host_str() {
-            let host_lower = host.to_lowercase();
-            if host_lower == "localhost" || host_lower.starts_with("127.") || host_lower == "[::1]" {
-                return Err(TaijiError::Other(format!(
-                    "webfetch: blocked URL (SSRF prevention): {} (host: {})",
-                    url, host_lower
-                )));
-            }
-        }
-
-    Ok(())
+    SafetyHook::check_web_url_static(url)
 }
 
 #[async_trait]
@@ -104,7 +53,17 @@ impl BuiltinSkill for WebfetchTool {
         let client = reqwest::Client::builder()
             .user_agent("taiji/0.1.0")
             .timeout(std::time::Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::limited(5))
+            // 逐跳 SSRF 检查（批10 P1）：跟随重定向前对每一跳目标做 SSRF 检查，
+            // 阻止初始公网 URL 302→内网地址的绕过；最多 5 跳。
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if check_ssrf(attempt.url().as_str()).is_err() {
+                    attempt.stop()
+                } else if attempt.previous().len() >= 5 {
+                    attempt.stop()
+                } else {
+                    attempt.follow()
+                }
+            }))
             .build()
             .map_err(|e| {
                 TaijiError::Other(format!("webfetch: failed to create HTTP client: {e}"))
@@ -186,6 +145,33 @@ mod tests {
     async fn test_webfetch_ssrf_localhost_name() {
         let tool = WebfetchTool;
         let args = serde_json::json!({"url": "http://localhost:8080/"});
+        let result = tool.call(std::path::Path::new("."), &args).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_webfetch_ssrf_decimal_ip() {
+        // 167772160 = 10.0.0.0（十进制编码的私网 IP，批10 P1 绕过）
+        let tool = WebfetchTool;
+        let args = serde_json::json!({"url": "http://167772160/"});
+        let result = tool.call(std::path::Path::new("."), &args).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("SSRF"));
+    }
+
+    #[tokio::test]
+    async fn test_webfetch_ssrf_hex_ip() {
+        // 0x7f000001 = 127.0.0.1（十六进制编码的环回地址）
+        let tool = WebfetchTool;
+        let args = serde_json::json!({"url": "http://0x7f000001/"});
+        let result = tool.call(std::path::Path::new("."), &args).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn test_webfetch_ssrf_private_10() {
+        let tool = WebfetchTool;
+        let args = serde_json::json!({"url": "http://10.0.0.1/"});
         let result = tool.call(std::path::Path::new("."), &args).await;
         assert!(result.is_err());
     }

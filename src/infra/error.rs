@@ -9,6 +9,11 @@ pub enum TaijiError {
     #[error("归藏 knowledge store unavailable: {context}")]
     KnowledgeStoreUnavailable { context: String },
 
+    #[error("knowledge asset not found: {id}")]
+    /// 资产文件不存在（区别于读权限/解析错误——调用方据此区分「不存在→降级」
+    /// 与「真实 I/O 错误→上抛」，替代旧的文案字符串匹配反模式）。
+    KnowledgeAssetNotFound { id: String },
+
     #[error("LLM call failed: {context}")]
     LLMCallFailed { context: String },
 

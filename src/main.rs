@@ -252,9 +252,8 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-/// V39：种子复制——把源分区（默认 = 配置的默认模型分区）的活跃种子资产
-/// （prompts/ + verifications/）复制到目标模型分区。stats/models 不复制
-/// （每个分区是独立学习单元，新模型从零积累——BCP §6.1）。
+/// V44：种子复制——把指定模型分区的活跃种子资产（prompts/ + verifications/）
+/// 恢复到知识根（去分区化恢复工具）。stats/models 不复制（学习单元从零积累）。
 async fn cmd_seed(
     model_key: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
@@ -301,9 +300,11 @@ async fn cmd_trace(
         writer.read()?
     };
 
-    // Tail: keep only the last N records.
+    // Tail: keep only the last N records（批19 P2 修复：保序，与 mcp
+    // handle_trace 的 split_off 一致——旧 rev().take(n) 输出倒序）。
     if let Some(n) = tail {
-        records = records.into_iter().rev().take(n).collect();
+        let start = records.len().saturating_sub(n);
+        records = records.into_iter().skip(start).collect();
     }
 
     if records.is_empty() {

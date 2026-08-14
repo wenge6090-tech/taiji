@@ -294,7 +294,10 @@ impl ZhouyiCycle {
                 .factory
                 .create_meta_agent(&engine_ctx.task_id, engine_ctx.depth, self.config.runtime.max_depth)?;
             // 首次运行无前一瞬态产出（handoff=None）。
-            match meta_agent.run(description, &["general"], None).await? {
+            // 批18 P2：任务类型标签从描述纯符号提取（替代硬编码 "general"）。
+            let task_tags = crate::agents::meta::classify_task_tags(description);
+            let tag_refs: Vec<&str> = task_tags.iter().map(String::as_str).collect();
+            match meta_agent.run(description, &tag_refs, None).await? {
                 // V46 短路（BCP §8.8）：应答类任务直接产出，跳过阳阴。
                 MetaOutcome::Answer(answer) => {
                     let answer_path =
@@ -540,11 +543,10 @@ impl ZhouyiCycle {
                     // 原子写 pending/{task_id}.json。Zhouyi 只读归藏（§8.3 硬约束）：
                     // 入队只写 pending/，归藏 YAML 由 Lianshan Consumer 单写。
                     // I/O 失败仅 warn —— 学习是增强层，不阻断 PASS。
-                    let data_root = engine_ctx
-                        .task_dir
-                        .parent()
-                        .and_then(|p| p.parent());
-                    if let Some(data_root) = data_root {
+                    // V50 修正（批18 P1）：data_root 直接用 factory.data_root，
+                    // 不再从 task_dir 推两级父目录（仅根任务正确；子任务会推错）。
+                    let data_root = self.factory.data_root.clone();
+                    {
                         // ── V33/MVP-3: 四维信号摊派（BCP §6.4）──
                         // cost = trace usage.input_tokens 求和；rounds = verify_state.round；
                         // quality = route 映射（Pass=1.0/BackToZhouyi=0.4/BackToMeta=0.2）× confidence——
@@ -604,11 +606,6 @@ impl ZhouyiCycle {
                                 "Failed to enqueue Lianshan pending — learning skipped (non-blocking)"
                             );
                         }
-                    } else {
-                        tracing::warn!(
-                            task_dir = %engine_ctx.task_dir.display(),
-                            "Cannot derive data_root from task_dir — Lianshan pending enqueue skipped"
-                        );
                     }
 
                     return Ok(yang_result);
@@ -1013,8 +1010,10 @@ async fn rerun_meta(
         factory.config.runtime.max_depth,
     )?;
     let handoff = crate::infra::handoff::read_handoff(&engine_ctx.task_dir);
+    let task_tags = crate::agents::meta::classify_task_tags(description);
+    let tag_refs: Vec<&str> = task_tags.iter().map(String::as_str).collect();
     match meta_agent
-        .run(description, &["general"], handoff.as_deref())
+        .run(description, &tag_refs, handoff.as_deref())
         .await?
     {
         MetaOutcome::Answer(answer) => {

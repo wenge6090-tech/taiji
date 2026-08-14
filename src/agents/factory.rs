@@ -32,7 +32,7 @@ use crate::agents::chat::ChatAgentBuilder;
 /// V45 工具集路由画像（BCP §8.14 双通道——弱模型最小集）。
 ///
 /// 按模型 key 字符串启发式判断：含 "flash" / "lite" / "mini" / "small"
-/// → [`ToolProfile::Minimal`]（隐藏 recursive-decompose/webfetch 等高代价工具）；
+/// → [`ToolProfile::Minimal`]（仅隐藏 webfetch 高代价联网；recursive-decompose 保留——拆解正是弱模型小上下文规避超限的核心手段）；
 /// 其余 [`ToolProfile::Full`]。弱模型基础执行与验证闭环仍可用（元层判据保底）。
 pub fn profile_for_model(model: &crate::types::agent::ModelKey) -> crate::infra::skill_catalog::ToolProfile {
     if model_class(model) == "flash" {
@@ -135,6 +135,22 @@ impl AgentFactory {
 
     // ── Factory methods ──────────────────────────────────────────────
 
+    /// 返回一个新 factory，替换 config（其他共享字段 clone）——批19 P2 修复：
+    /// max_depth override 需要同步 factory.config（否则 RecursiveDecomposeTool
+    /// 读旧值，与 ZhouyiCycle 用副本的 override 不一致）。
+    pub fn with_config(&self, config: TaijiConfig) -> Arc<AgentFactory> {
+        Arc::new(AgentFactory {
+            guizang: self.guizang.clone(),
+            providers: self.providers.clone(),
+            config,
+            safety_hook: self.safety_hook.clone(),
+            worker_pool: self.worker_pool.clone(),
+            constraint_engine: self.constraint_engine.clone(),
+            trigger_engine: self.trigger_engine.clone(),
+            data_root: self.data_root.clone(),
+        })
+    }
+
     /// Create a [`MetaAgentBuilder`] (权重更新·元) for the given task ID.
     ///
     /// The MetaAgent traverses the 归藏 via dynamic context injection to
@@ -153,7 +169,7 @@ impl AgentFactory {
         depth: u32,
         max_depth: u32,
     ) -> Result<MetaAgentBuilder, TaijiError> {
-        let (_provider, model) = self.agent_llm_config("meta");
+        let (provider, model) = self.agent_llm_config("meta");
         tracing::debug!(
             task_id,
             depth,
@@ -167,6 +183,7 @@ impl AgentFactory {
             self.providers.clone(),
             &model,
         )
+        .provider_name(&provider)
         .max_turns(6)
         .depth(depth)
         .max_depth(max_depth)
@@ -185,10 +202,12 @@ impl AgentFactory {
     /// **LLM config**: resolved from `agent_overrides["plan"]`, falling back
     /// to the default provider + model.
     pub fn create_plan_agent(&self, task_id: &str) -> Result<PlanBuilder, TaijiError> {
-        let (_provider, model) = self.agent_llm_config("plan");
+        let (provider, model) = self.agent_llm_config("plan");
+        let (meta_provider, meta_model) = self.agent_llm_config("meta");
         tracing::debug!(
             task_id,
             model = %model,
+            meta_model = %meta_model,
             "Creating PlanBuilder"
         );
         Ok(PlanBuilder::new(
@@ -196,7 +215,9 @@ impl AgentFactory {
             self.guizang.clone(),
             self.providers.clone(),
             &model,
-        ))
+        )
+        .provider_name(&provider)
+        .meta_llm(&meta_provider, &meta_model))
     }
 
     /// Create a [`YangAgentBuilder`] (概率拟合·阳) seeded with a
@@ -717,5 +738,28 @@ mod tests {
         }
         let mk = crate::types::agent::ModelKey("deepseek-deepseek-v4-flash".into());
         assert_eq!(model_class(&mk), "flash", "ModelKey → flash");
+    }
+
+    #[tokio::test]
+    async fn with_config_replaces_config_keeps_shared_fields() {
+        // 批19 P2：max_depth override 需同步 factory.config；with_config 重建
+        // factory 替换 config，其他共享字段（guizang/providers/safety_hook）保持同一 Arc。
+        let config = make_config();
+        let (factory, tmp_dir) = build_factory(config).await;
+        let original_max_depth = factory.config.runtime.max_depth;
+
+        let mut new_config = factory.config.clone();
+        new_config.runtime.max_depth = original_max_depth + 7;
+        let f2 = factory.with_config(new_config);
+
+        assert_eq!(f2.config.runtime.max_depth, original_max_depth + 7);
+        // 原 factory 不受影响（不可变共享语义）
+        assert_eq!(factory.config.runtime.max_depth, original_max_depth);
+        // 共享基础设施字段仍指向同一 Arc
+        assert!(Arc::ptr_eq(&f2.guizang, &factory.guizang));
+        assert!(Arc::ptr_eq(&f2.providers, &factory.providers));
+        assert!(Arc::ptr_eq(&f2.safety_hook, &factory.safety_hook));
+
+        let _ = tokio::fs::remove_dir_all(&tmp_dir).await;
     }
 }

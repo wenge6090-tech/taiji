@@ -36,7 +36,13 @@ pub struct PlanBuilder {
     task_id: String,
     guizang: Arc<GuizangClient>,
     provider: Arc<ProviderRegistry>,
+    /// Resolved provider name（批14 P1 修复：由工厂传入，不再硬编码 "deepseek"）。
+    provider_name: String,
     model: String,
+    /// MetaAgent 专用 provider/model（批14 P2 修复：plan 路径下 meta 用 meta 的
+    /// override 配置，不被 plan 的 override 覆盖——两阶段模型职责解耦）。
+    meta_provider_name: String,
+    meta_model: String,
 }
 
 impl PlanBuilder {
@@ -54,8 +60,26 @@ impl PlanBuilder {
             task_id: task_id.to_string(),
             guizang,
             provider,
+            provider_name: "deepseek".to_string(),
             model: model.to_string(),
+            meta_provider_name: "deepseek".to_string(),
+            meta_model: model.to_string(),
         }
+    }
+
+    /// Override the resolved provider name（批14 P1 修复：由工厂从
+    /// `agent_llm_config("plan")` 传入，替代硬编码 "deepseek"）。
+    pub fn provider_name(mut self, provider: &str) -> Self {
+        self.provider_name = provider.to_string();
+        self
+    }
+
+    /// MetaAgent 专用 LLM 配置（批14 P2 修复：由工厂从
+    /// `agent_llm_config("meta")` 传入——plan 路径下 meta 不被 plan 覆盖）。
+    pub fn meta_llm(mut self, provider: &str, model: &str) -> Self {
+        self.meta_provider_name = provider.to_string();
+        self.meta_model = model.to_string();
+        self
     }
 
     /// Produce a [`PlanSummary`] by:
@@ -106,8 +130,9 @@ impl PlanBuilder {
             &self.task_id,
             self.guizang.clone(),
             self.provider.clone(),
-            &self.model,
-        );
+            &self.meta_model,
+        )
+        .provider_name(&self.meta_provider_name);
         // V28：PlanBuilder 不涉及 BACK_TO_META 校准，handoff 传 None。
         meta_agent.run(description, task_type_tags, None).await
     }
@@ -124,7 +149,7 @@ impl PlanBuilder {
     ) -> Result<PlanSummary, TaijiError> {
         let llm_input = build_plan_prompt(description, meta_ctx);
 
-        let client = self.provider.client("deepseek").map_err(|e| {
+        let client = self.provider.client_for(&self.provider_name).map_err(|e| {
             TaijiError::LLMCallFailed {
                 context: format!("PlanBuilder: failed to get provider client: {e}"),
             }
@@ -257,10 +282,12 @@ fn build_plan_prompt(description: &str, meta_ctx: &MetaContext) -> String {
 
     // Yang system prompt (summary)
     if let Some(prompt) = &meta_ctx.yang_system_prompt {
-        // Truncate to first 200 chars for the prompt
+        // Truncate to first 200 chars for the prompt（批14 P1 修复：按 char
+        // 而非字节切片，避免中文多字节 UTF-8 在非 char boundary 处 panic）。
         let max_chars = 200usize;
-        let snippet = if prompt.len() > max_chars {
-            format!("{}...", &prompt[..max_chars])
+        let snippet = if prompt.chars().count() > max_chars {
+            let truncated: String = prompt.chars().take(max_chars).collect();
+            format!("{truncated}...")
         } else {
             prompt.clone()
         };
@@ -318,5 +345,16 @@ mod tests {
         let prompt = build_plan_prompt("Test task", &ctx);
         assert!(prompt.contains("NoFabrication"));
         assert!(prompt.contains("Hard"));
+    }
+
+    #[test]
+    fn test_build_plan_prompt_chinese_multibyte_no_panic() {
+        // 批14 P1 回归：中文每字 3 字节，200 字节处必非 char boundary。
+        // 旧实现 `&prompt[..200]` 会 panic；新实现按 char 截断必须安全。
+        let mut ctx = MetaContext::empty();
+        ctx.yang_system_prompt = Some("太".repeat(300)); // 900 字节
+        let prompt = build_plan_prompt("Test task", &ctx);
+        assert!(prompt.contains("Yang system prompt"));
+        assert!(prompt.contains("太"));
     }
 }

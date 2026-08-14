@@ -102,11 +102,13 @@ pub fn truncate_tail(content: &str, max_lines: usize, max_bytes: usize) -> Trunc
     let mut truncated = tail_lines.join("\n");
 
     if truncated.len() > max_bytes {
-        let mut hi = truncated.len().min(max_bytes);
-        while !truncated.is_char_boundary(hi) {
-            hi -= 1;
+        // 批10 P2 修复：tail 语义应保留**末尾** max_bytes 字节（错误信息
+        // 通常在尾部），而非从头截断丢末尾（原 truncate(hi) 保开头）。
+        let mut start = truncated.len() - max_bytes;
+        while start < truncated.len() && !truncated.is_char_boundary(start) {
+            start += 1;
         }
-        truncated.truncate(hi);
+        truncated = truncated[start..].to_string();
     }
 
     if content.ends_with('\n') && !truncated.ends_with('\n') {
@@ -141,37 +143,24 @@ fn safe_canonicalize(path: &Path) -> PathBuf {
     match path.canonicalize() {
         Ok(c) => c,
         Err(_) => {
-            // Walk ancestors to find the longest existing prefix
+            // Walk ancestors to find the longest existing prefix, canonicalize
+            // that prefix (resolving symlinks), then re-append the non-existing
+            // suffix. 批10 P2 修复：suffix 必须用**原始祖先**（词法）截取，而非
+            // 已解析祖先——否则含 symlink 的祖先段会导致 strip_prefix 失败、
+            // 退化为词法路径，enforce_cwd_scope 的 starts_with 退化为词法比较，
+            // symlink 逃逸漏检。
             let mut parent = path.parent();
-            let mut ancestor_exists = PathBuf::new();
-
             while let Some(p) = parent {
                 if p.exists() {
-                    match p.canonicalize() {
-                        Ok(c) => {
-                            ancestor_exists = c;
-                            break;
-                        }
-                        Err(_) => {
-                            parent = p.parent();
-                            continue;
-                        }
+                    if let Ok(c) = p.canonicalize() {
+                        let suffix = path.strip_prefix(p).unwrap_or(path);
+                        return c.join(suffix);
                     }
                 }
                 parent = p.parent();
             }
-
-            if ancestor_exists.as_os_str().is_empty() {
-                return path.to_path_buf();
-            }
-
-            // Append the remaining non-existing suffix
-            let suffix: PathBuf = path
-                .strip_prefix(&ancestor_exists)
-                .unwrap_or(path)
-                .components()
-                .collect();
-            ancestor_exists.join(suffix)
+            // 无存在祖先（如纯相对新路径）→ 原样返回
+            path.to_path_buf()
         }
     }
 }
@@ -265,4 +254,69 @@ pub fn spill_to_artifact(
         ),
         Some(artifact_str),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_tail_keeps_tail_not_head() {
+        // 批10 P2 回归：超 max_bytes 时应保留**末尾**字节（错误信息在尾部），
+        // 而非从头截断丢末尾（原 truncate(hi) 保开头）。
+        let content = "HEAD\n".repeat(50) + &"E".repeat(100); // 350 字节
+        let r = truncate_tail(&content, 1000, 64);
+        assert!(r.truncated);
+        assert_eq!(r.content.len(), 64);
+        assert!(
+            r.content.chars().all(|c| c == 'E'),
+            "tail 语义应保留末尾内容，实际: {:?}",
+            r.content
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_cwd_scope_blocks_symlink_escape() {
+        // 批10 P2 回归：cwd 内 symlink 指向外部目录、目标不存在时，
+        // safe_canonicalize 必须解析 symlink 祖先——否则 starts_with 退化为词法
+        // 比较，write 新文件可经 symlink 逃逸出沙箱。
+        let tmp = std::env::temp_dir().join(format!(
+            "taiji_symlink_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let task = tmp.join("task");
+        let outside = tmp.join("outside");
+        std::fs::create_dir_all(&task).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::os::unix::fs::symlink(&outside, task.join("link")).unwrap();
+
+        let target = task.join("link").join("newfile"); // newfile 不存在
+        let r = enforce_cwd_scope(&target, &task, "write to");
+        assert!(r.is_err(), "symlink 逃逸应被拦截，实际: {:?}", r);
+
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn enforce_cwd_scope_allows_legit_new_file_in_cwd() {
+        // 正常 cwd 内新文件（write 目标不存在）应放行。
+        let tmp = std::env::temp_dir().join(format!(
+            "taiji_legit_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let r = enforce_cwd_scope(&tmp.join("deliverables/x.md"), &tmp, "write to");
+        assert!(r.is_ok());
+        std::fs::remove_dir_all(&tmp).unwrap();
+    }
 }

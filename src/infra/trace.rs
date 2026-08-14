@@ -20,7 +20,7 @@ pub struct TraceRecord {
     pub cycle: u32,
     pub depth: u32,
     pub task_id: String,
-    /// 权重更新 | 概率拟合·turn | 工具调用 | 因果验证 | 收敛判定
+    /// meta | yang | tool_call::<tool> | verify | converge
     pub phase: String,
     pub provider_model: String,
     pub duration_ms: u64,
@@ -243,5 +243,55 @@ pub fn load_json_optional<T: serde::de::DeserializeOwned>(path: &Path) -> Result
             );
             Ok(None)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn redact_sensitive_redacts_keys_and_patterns() {
+        // 批5 P2 修复：锁脱敏逻辑（键名 + 值模式）。
+        let v = serde_json::json!({
+            "api_key": "sk-abcdefghijklmnopqrstuvwxyz123456",
+            "nested": {"token": "ghp_abcdefghijklmnopqrstuvwxyz123456"},
+            "normal": "keep me"
+        });
+        let r = TraceWriter::redact_sensitive(&v);
+        assert_eq!(r["api_key"], "***REDACTED***");
+        assert_eq!(r["nested"]["token"], "***REDACTED***");
+        assert_eq!(r["normal"], "keep me");
+    }
+
+    #[test]
+    fn redact_sensitive_redacts_sk_in_string() {
+        let v = serde_json::json!({"content": "call with sk-abcdefghijklmnopqrstuvwxyz123456 here"});
+        let r = TraceWriter::redact_sensitive(&v);
+        assert_eq!(r["content"], "***REDACTED***");
+    }
+
+    #[test]
+    fn rotate_shifts_generations() {
+        // 批5 P2 修复：锁轮转逻辑（trace.jsonl → trace.1 → ... → trace.5）。
+        let seq = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = std::env::temp_dir().join(format!("taiji_trace_rotate_{seq}"));
+        std::fs::create_dir_all(&dir).unwrap();
+        let writer = TraceWriter::new(&dir);
+
+        std::fs::write(&writer.path, "line1\n").unwrap();
+        writer.rotate().unwrap();
+        assert!(dir.join("trace.1.jsonl").exists());
+        assert!(!writer.path.exists());
+
+        std::fs::write(&writer.path, "line2\n").unwrap();
+        writer.rotate().unwrap();
+        assert!(dir.join("trace.1.jsonl").exists());
+        assert!(dir.join("trace.2.jsonl").exists());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

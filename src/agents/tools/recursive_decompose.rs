@@ -250,6 +250,15 @@ impl RecursiveDecomposeTool {
 
                     let dir = children_root.join(old_idx.to_string());
 
+                    // 批11 P2 修复：rerun_of 指向不存在的索引时报错，而非
+                    // create_dir_all 静默新建空目录（LLM 传错 index 被掩盖）。
+                    if !dir.is_dir() {
+                        return Err(TaijiError::Other(format!(
+                            "rerun_of index {old_idx} does not exist (dir: {})",
+                            dir.display()
+                        )));
+                    }
+
                     // Load old chat_history for context continuity.
                     let history: Option<Vec<Message>> = {
                         let chat_path = dir.join("chat_history.json");
@@ -261,9 +270,6 @@ impl RecursiveDecomposeTool {
                     // Delete old checkpoint to prevent ZhouyiCycle from mis-reading it.
                     let checkpoint_path = dir.join("checkpoint.json");
                     let _ = std::fs::remove_file(&checkpoint_path);
-
-                    // Ensure the child directory still exists.
-                    std::fs::create_dir_all(&dir).map_err(TaijiError::IO)?;
 
                     (old_idx, dir, history)
                 } else {
@@ -574,6 +580,7 @@ fn classify_failure(e: &TaijiError) -> String {
         TaijiError::IO(_) | TaijiError::Serde(_) => "io",
         TaijiError::Config { .. } => "config",
         TaijiError::KnowledgeStoreUnavailable { .. } => "io",
+        TaijiError::KnowledgeAssetNotFound { .. } => "io",
         TaijiError::WorkerPoolUnavailable { .. } => "io",
         TaijiError::Cancelled { .. } => "cancelled",
         TaijiError::Other(_) => "other",

@@ -49,6 +49,19 @@ impl BuiltinSkill for ReadTool {
         })?;
         let canonical = enforce_read_scope(&path, &cwd, None)?;
 
+        // 批10 P2 修复：先查元数据大小（避免超大文件整体读入内存），
+        // 再读文件；读后仍保留 len 检查兜底（TOCTOU 防御）。
+        let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+            TaijiError::Other(format!("read: failed to stat '{}': {e}", canonical.display()))
+        })?;
+        if metadata.len() > READ_TOOL_MAX_BYTES as u64 {
+            return Err(TaijiError::Other(format!(
+                "read: file '{}' exceeds maximum size of {} bytes",
+                canonical.display(),
+                READ_TOOL_MAX_BYTES,
+            )));
+        }
+
         // Detect binary files by reading first 8 KB
         let file = tokio::fs::read(&canonical).await.map_err(|e| {
             TaijiError::Other(format!("read: failed to read '{}': {e}", canonical.display()))

@@ -309,12 +309,12 @@ mod tests {
     #[test]
     fn mine_constraints_requires_full_failure() {
         let failures = vec![
-            FailureGroup { env_tags: vec!["prod".into()], check_kind: "command-succeeds".into(), fails: 50, total: 50 },
-            FailureGroup { env_tags: vec!["prod".into()], check_kind: "file-exists".into(), fails: 40, total: 50 },
+            FailureGroup { env_tags: vec!["prod".into()], check_kind: "command_succeeds".into(), fails: 50, total: 50 },
+            FailureGroup { env_tags: vec!["prod".into()], check_kind: "file_exists".into(), fails: 40, total: 50 },
         ];
         let rules = mine_constraints(&failures, 50);
         assert_eq!(rules.len(), 1, "只有 100% 失败产出规则");
-        assert_eq!(rules[0].require, vec!["check:command-succeeds"]);
+        assert_eq!(rules[0].require, vec!["check:command_succeeds"]);
         assert_eq!(rules[0].when.env.as_deref(), Some("prod"));
     }
 }

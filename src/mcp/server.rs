@@ -320,12 +320,17 @@ impl TaijiMcpServer {
             .and_then(|v| v.as_u64())
             .map(|v| v as u32);
 
-        // Clone config and apply override if provided
-        let mut config = self.factory.config.clone();
-        if let Some(depth) = max_depth_override {
+        // Apply max_depth override by rebuilding factory with the new config
+        // （批19 P2：同步 factory.config——否则 RecursiveDecomposeTool 读旧值，
+        // 与 ZhouyiCycle 用副本的 override 不一致，叶节点判断/decompose 深度检查分裂）。
+        let factory = if let Some(depth) = max_depth_override {
             info!(max_depth = depth, "Overriding max_depth from MCP call");
+            let mut config = self.factory.config.clone();
             config.runtime.max_depth = depth;
-        }
+            self.factory.with_config(config)
+        } else {
+            self.factory.clone()
+        };
 
         // Parse optional external context from frontend agent
         let external_ctx = args
@@ -342,8 +347,8 @@ impl TaijiMcpServer {
         }
 
         let runner = RecursiveRunner::new(
-            self.factory.clone(),
-            config,
+            factory.clone(),
+            factory.config.clone(),
         );
 
         match runner.execute_with_context(&description, external_ctx, None).await {

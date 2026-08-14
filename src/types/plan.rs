@@ -19,7 +19,7 @@ pub struct PlanSummary {
     /// Estimated subtasks the task may decompose into.
     #[serde(default)]
     pub estimated_subtasks: Vec<SubtaskPlan>,
-    /// Names of L1 skills likely needed (e.g. "read", "write", "bash").
+    /// Names of skills likely needed (e.g. "read", "write", "bash").
     #[serde(default)]
     pub recommended_skills: Vec<String>,
     /// Human-readable descriptions of expected deliverables.
@@ -27,11 +27,10 @@ pub struct PlanSummary {
     pub expected_deliverables: Vec<String>,
     /// Complexity assessment: "simple" | "moderate" | "complex".
     pub estimated_complexity: String,
-    /// Summary of prompts matched from 归藏 (V22 renamed from
-    /// `reasoning_path_summary`; L5 Prompt 匹配摘要).
+    /// Summary of prompts matched from 归藏.
     #[serde(default)]
     pub matched_prompts_summary: String,
-    /// Relevant L4 Truth constraints applicable to this task.
+    /// Relevant truth constraints applicable to this task.
     #[serde(default)]
     pub relevant_constraints: Vec<String>,
 }

@@ -294,3 +294,33 @@ pub struct McpServerConfig {
     #[serde(default)]
     pub env: std::collections::HashMap<String, String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn context_limits_effective_thresholds_derive_from_window() {
+        // 批4 P2 修复：锁定 30%/35% 阈值推导。
+        let l = ContextLimits {
+            context_window_tokens: 100_000,
+            handoff_tokens: 0,
+            hard_cutoff_tokens: 0,
+            compress_input_tokens: 2_000,
+        };
+        assert_eq!(l.effective_handoff(), 30_000);
+        assert_eq!(l.effective_hard_cutoff(), 35_000);
+    }
+
+    #[test]
+    fn context_limits_absolute_overrides_win() {
+        let l = ContextLimits {
+            context_window_tokens: 100_000,
+            handoff_tokens: 40_000,
+            hard_cutoff_tokens: 45_000,
+            compress_input_tokens: 2_000,
+        };
+        assert_eq!(l.effective_handoff(), 40_000);
+        assert_eq!(l.effective_hard_cutoff(), 45_000);
+    }
+}

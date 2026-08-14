@@ -533,29 +533,28 @@ mod tests {
     #[tokio::test]
     async fn test_spawn_and_cancel() {
         let data_root = create_test_root("spawn_cancel").await;
+        let cancel = CancellationToken::new();
         let (consumer, knowledge_dir) = test_consumer(&data_root).await;
+        // 批18 P2 修复：用外部 token 重建 consumer，测试末尾 cancel + join，
+        // 避免旧实现 JoinHandle 被 drop 后 consumer 无限跑（detached 泄漏）。
+        let evolver = consumer.evolver;
+        let consumer = LianshanConsumer::new(
+            evolver,
+            cancel.clone(),
+            &data_root,
+            LianshanConfig::default(),
+        );
         let handle = consumer.spawn();
 
-        // Give the loop time to spin once, then cancel.
+        // 等待循环启动一次。
         tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-        // The consumer was created with its own CancellationToken.
-        // We create a new token to cancel it from outside.
-        // Actually, we need to drop the consumer or signal its token.
-        // For this test we just drop the handle after a timeout.
-        // The consumer loops forever so we use timeout.
-        let result = tokio::time::timeout(
-            tokio::time::Duration::from_millis(500),
-            handle,
-        ).await;
+        // 取消并 join，确认干净退出。
+        cancel.cancel();
+        let _ = tokio::time::timeout(tokio::time::Duration::from_secs(2), handle)
+            .await
+            .expect("consumer should exit after cancellation");
 
-        // The handle should still be running (timeout), or done if cancelled.
-        // Since we didn't cancel the internal token, it runs forever.
-        // We just verify it started without panicking.
-        assert!(result.is_err(), "consumer should run indefinitely until cancelled");
-
-        // Manually join to clean up
-        // The consumer will run until the process exits; we just clean up the dirs.
         cleanup(&data_root).await;
         cleanup(&knowledge_dir).await;
     }

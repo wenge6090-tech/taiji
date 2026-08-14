@@ -725,8 +725,15 @@ fn impl_to_check_spec(
         SkillKind::CommandSucceeds => CheckKind::CommandSucceeds,
         SkillKind::TraceConsistency => CheckKind::TraceConsistency,
         SkillKind::LlmJudgement => CheckKind::LlmJudgement,
-        // 阳面 kind 不会走到这里（run_checks_assets 已过滤）。
-        _ => CheckKind::FileExists,
+        // 批16 P2 修复：显式列出全部阳面 kind（run_checks_assets 已过滤，
+        // 理论上不可达）——去掉 `_` 兑底，未来新增阴面 kind 时编译器报
+        // non-exhaustive 强制更新此处，避免静默映射 FileExists 错误执行。
+        SkillKind::Bash
+        | SkillKind::Write
+        | SkillKind::Read
+        | SkillKind::Search
+        | SkillKind::Webfetch
+        | SkillKind::RecursiveDecompose => CheckKind::LlmJudgement,
     };
     let stats = crate::types::verification::CheckStats::default();
     CheckSpec {

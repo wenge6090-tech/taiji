@@ -21,7 +21,7 @@ use crate::orchestration::runner::RecursiveRunner;
 use crate::types::agent::VerificationAsset;
 use crate::types::verification::RewardWeights;
 use crate::infra::config::TaijiConfig;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -37,10 +37,12 @@ pub(crate) const UCB_C: f64 = 1.414;
 /// posterior 传入；无后验 → 频率回退）。
 ///
 /// 根资产不参与探索（已积累统计，走利用路径）；无候选返回 None。
+/// `exclude`：已选资产 id 集合（多窗口入队时排除，避免重复）。
 pub fn pick_exploration_target(
     assets: &[VerificationAsset],
     weights: &RewardWeights,
     posterior: &BTreeMap<String, f64>,
+    exclude: &HashSet<String>,
 ) -> Option<usize> {
     let total_n: f64 = assets
         .iter()
@@ -52,7 +54,12 @@ pub fn pick_exploration_target(
     assets
         .iter()
         .enumerate()
-        .filter(|(_, a)| a.status == "active" && a.variant_of.is_some() && a.safe_for_exploration)
+        .filter(|(_, a)| {
+            a.status == "active"
+                && a.variant_of.is_some()
+                && a.safe_for_exploration
+                && !exclude.contains(&a.id)
+        })
         .max_by(|(_, a), (_, b)| {
             let sa = exploration_score(a, n_total, weights, posterior);
             let sb = exploration_score(b, n_total, weights, posterior);
@@ -156,8 +163,9 @@ pub async fn enqueue_exploration_task(
         .map(|m| (m.header.id.clone(), m.posterior_mean()))
         .collect();
     let mut queued = 0u32;
+    let mut selected: HashSet<String> = HashSet::new();
     for _ in 0..max_per_window {
-        let Some(idx) = pick_exploration_target(&assets, weights, &posterior) else {
+        let Some(idx) = pick_exploration_target(&assets, weights, &posterior, &selected) else {
             break;
         };
         let asset = &assets[idx];
@@ -170,13 +178,13 @@ pub async fn enqueue_exploration_task(
         save_json_atomic(&payload, &path).map_err(|e| {
             TaijiError::Other(format!("failed to write experiment {:?}: {e}", path))
         })?;
+        // 排除已选资产后继续，直到 max_per_window 或候选耗尽（批16 P2）。
+        selected.insert(asset.id.clone());
         queued += 1;
         tracing::info!(
             asset_id = %asset.id,
             "[active_learning] exploration task queued"
         );
-        // 同资产不重复入队（id 唯一文件名天然幂等）
-        break;
     }
     Ok(queued)
 }
@@ -367,7 +375,7 @@ mod tests {
             mk_asset("root-b", 10, 9, None),
         ];
         // 变体（n=0 → f64::MAX 探索分）优先于根资产
-        let idx = pick_exploration_target(&assets, &RewardWeights::default(), &BTreeMap::new()).expect("candidate");
+        let idx = pick_exploration_target(&assets, &RewardWeights::default(), &BTreeMap::new(), &HashSet::new()).expect("candidate");
         assert_eq!(assets[idx].id, "root-a-v1", "unverified variant has max exploration score");
     }
 
@@ -379,7 +387,7 @@ mod tests {
         unsafe_.safe_for_exploration = false;
         let assets = vec![safe, unsafe_];
         // 只有 safe 变体进入候选（V50 危险隔离）
-        let idx = pick_exploration_target(&assets, &RewardWeights::default(), &BTreeMap::new())
+        let idx = pick_exploration_target(&assets, &RewardWeights::default(), &BTreeMap::new(), &HashSet::new())
             .expect("safe candidate exists");
         assert_eq!(assets[idx].id, "v-safe", "unsafe variant filtered out");
     }
@@ -387,7 +395,7 @@ mod tests {
     #[test]
     fn pick_exploration_target_none_without_variants() {
         let assets = vec![mk_asset("root-a", 20, 18, None), mk_asset("root-b", 5, 4, None)];
-        assert!(pick_exploration_target(&assets, &RewardWeights::default(), &BTreeMap::new()).is_none());
+        assert!(pick_exploration_target(&assets, &RewardWeights::default(), &BTreeMap::new(), &HashSet::new()).is_none());
     }
 
     #[test]

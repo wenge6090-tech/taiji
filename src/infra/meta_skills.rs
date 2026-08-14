@@ -131,7 +131,7 @@ fn asset(
 // 元层查询接口
 // ---------------------------------------------------------------------------
 
-/// 全部元层 Skill（阳 7 + 阴 8），按类别过滤用 [`meta_skills`]。
+/// 全部元层 Skill（阳 7 + 阴 9），按类别过滤用 [`meta_skills`]。
 pub fn all_meta_skills() -> Vec<SkillAsset> {
     let mut v = yang_meta_skills();
     v.extend(yin_meta_skills());
@@ -244,7 +244,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
 // 阴·元 skill（机械判据 / LLM 裁决模板——判据从 V33/V43 种子资产提取）
 // ---------------------------------------------------------------------------
 
-/// 阴 8 元 skill 判据模板。
+/// 阴 9 元 skill 判据模板。
 pub fn yin_meta_skills() -> Vec<SkillAsset> {
     vec![
         yin(

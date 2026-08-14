@@ -266,19 +266,21 @@ where
         _args: &str,
         result: &str,
     ) -> HookAction {
-        let (duration, input_value) = if let Ok(mut guard) = self.tool_starts.lock() {
-            match guard.remove(internal_call_id) {
-                Some((start, input_str)) => {
-                    let dur = start.elapsed().as_millis() as u64;
-                    let inp = serde_json::from_str(&input_str).unwrap_or({
-                        Value::String(input_str)
-                    });
-                    (dur, inp)
-                }
-                None => (0, Value::Null),
+        // 锁内只取 (Instant, String) 快照，锁外做 elapsed + JSON 解析（缩短临界区，批8）。
+        let snapshot = self
+            .tool_starts
+            .lock()
+            .ok()
+            .and_then(|mut guard| guard.remove(internal_call_id));
+
+        let (duration, input_value) = match snapshot {
+            Some((start, input_str)) => {
+                let dur = start.elapsed().as_millis() as u64;
+                let inp = serde_json::from_str(&input_str)
+                    .unwrap_or({ Value::String(input_str) });
+                (dur, inp)
             }
-        } else {
-            (0, Value::Null)
+            None => (0, Value::Null),
         };
 
         let output_value = serde_json::from_str(result).unwrap_or_else(|_| {
@@ -404,8 +406,10 @@ mod tests {
 
     #[test]
     fn write_record_creates_jsonl_entry() {
-        let dir = std::env::temp_dir().join(format!("trace_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let seq = TRACE_TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+let dir = std::env::temp_dir().join(format!("trace_test_{}_{}", std::process::id(), seq));
+let _ = std::fs::remove_dir_all(&dir);
+let _ = std::fs::create_dir_all(&dir);
 
         let context = EngineContext {
             task_id: "test-task-1".into(),
@@ -445,8 +449,10 @@ mod tests {
 
     #[test]
     fn write_record_redacts_sensitive_fields() {
-        let dir = std::env::temp_dir().join(format!("trace_redact_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let seq = TRACE_TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+let dir = std::env::temp_dir().join(format!("trace_redact_test_{}_{}", std::process::id(), seq));
+let _ = std::fs::remove_dir_all(&dir);
+let _ = std::fs::create_dir_all(&dir);
 
         let context = EngineContext {
             task_id: "redact-test".into(),
@@ -487,6 +493,10 @@ mod tests {
     // second pass in infra/trace.rs.
 
     static TRACE_E2E_SEQ: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    /// 批8 P2 修复：测试临时目录唯一性（§16 并行测试共享 pid 会冲突）。
+    static TRACE_TEST_SEQ: std::sync::atomic::AtomicUsize =
         std::sync::atomic::AtomicUsize::new(0);
 
     #[test]
@@ -542,8 +552,10 @@ mod tests {
     async fn tools_called_records_real_tool_names_deduplicated() {
         use crate::hooks::test_support::TestCompletionModel;
 
-        let dir = std::env::temp_dir().join(format!("trace_tools_test_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
+        let seq = TRACE_TEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+let dir = std::env::temp_dir().join(format!("trace_tools_test_{}_{}", std::process::id(), seq));
+let _ = std::fs::remove_dir_all(&dir);
+let _ = std::fs::create_dir_all(&dir);
 
         let context = EngineContext {
             task_id: "tools-test".into(),

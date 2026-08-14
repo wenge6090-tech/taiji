@@ -329,7 +329,7 @@ mod tests {
             factory.providers.clone(),
             factory.safety_hook.clone(),
             factory.config.clone(),
-            factory.data_root.clone(),
+            tmp_dir.clone(),
             "deepseek-chat",
             "deepseek",
         );
@@ -350,8 +350,31 @@ mod tests {
     #[test]
     fn test_build_system_prompt_with_task_context() {
         let (builder, tmp_dir) = make_builder(Some("task-123".into()));
+        // 批14 P2 修复：建真实 task meta.json，真正覆盖任务上下文注入分支
+        // （旧弱断言 `contains("任务-123") || !contains("正在查看任务")` 恒真）。
+        let task_dir = tmp_dir.join("tasks").join("task-123");
+        std::fs::create_dir_all(&task_dir).unwrap();
+        std::fs::write(
+            task_dir.join("meta.json"),
+            serde_json::json!({
+                "id": "task-123",
+                "description": "写一个 Rust 冒泡排序",
+                "depth": 0,
+                "status": "Completed",
+                "parent_id": null,
+                "subtask_ids": []
+            })
+            .to_string(),
+        )
+        .unwrap();
+
         let prompt = builder.build_system_prompt();
-        assert!(prompt.contains("任务-123") || !prompt.contains("正在查看任务"));
+        assert!(
+            prompt.contains("写一个 Rust 冒泡排序"),
+            "应注入任务描述，实际: {prompt}"
+        );
+        assert!(prompt.contains("task-123"));
+        assert!(prompt.contains("正在查看任务"));
         std::fs::remove_dir_all(&tmp_dir).ok();
     }
 }

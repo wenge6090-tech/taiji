@@ -82,7 +82,7 @@ pub struct OntologyEdge {
     /// 目标类型 id。
     pub to: String,
     pub kind: OntologyEdgeKind,
-    /// 强度 = P(pass | a∧b) − P(pass | a)（lift）。
+    /// 强度 = 联合通过率 pass/co（MVP 非 lift，AGENTS.md §19 遗留③）。
     pub strength: f64,
     /// 共现样本数（≥ min_samples 才产出）。
     pub samples: u64,

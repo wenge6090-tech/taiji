@@ -140,8 +140,13 @@ impl SafetyHook {
             return Err(TaijiError::SafetyViolation { reason });
         }
 
-        // eval – arbitrary code execution
-        if lower.contains("eval") {
+        // eval – arbitrary code execution（批8 P2 修复：加空格边界，避免误杀
+        // 含 "eval" 的正常命令如 `cargo test evaluation`、"retrieval"）。
+        if lower == "eval"
+            || lower.starts_with("eval ")
+            || lower.contains(" eval ")
+            || lower.ends_with(" eval")
+        {
             let reason = format!(
                 "Dangerous command rejected: 'eval' detected: {}",
                 cmd
@@ -250,6 +255,14 @@ impl SafetyHook {
     /// - `169.254.0.0/16` (link-local)
     /// - `[::1]` (IPv6 loopback)
     pub fn check_web_url(&self, url: &str) -> Result<(), TaijiError> {
+        Self::check_web_url_static(url)
+    }
+
+    /// Standalone SSRF URL check — single source of truth shared by
+    /// [`SafetyHook`] and the `webfetch` tool (AGENTS.md §16 危险隔离).
+    /// Rejects loopback / private / link-local addresses, decimal & hex IP
+    /// encodings, `file://`, and fragment-before-`@` bypasses.
+    pub fn check_web_url_static(url: &str) -> Result<(), TaijiError> {
         if url.is_empty() {
             return Ok(());
         }

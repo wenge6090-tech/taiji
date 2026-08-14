@@ -69,7 +69,7 @@
 - `recursive_decompose` 创建子任务前必须检查 `depth < max_depth`（默认 2），超限返回错误。
 - 子任务数量上限 `max_subtasks`（默认 4），超出截断。
 - `CancellationToken` 必须通过 `child_token()` 传递到所有递归层级。
-- 子任务并发使用 `JoinSet::spawn`，`join_next()` 流式收集，任何子任务失败时 `abort_all()` 清理。
+- 子任务并发使用 `JoinSet::spawn`，`join_next()` 流式收集；取消/panic 时 `abort_all()` 清理，任务级失败记录 Diverged 继续收集（V31）。
 
 ## 3. Agent 关键约束
 
@@ -85,7 +85,7 @@
 
 ## 5. 错误处理与测试
 
-- `TaijiError` 变体必须携带 `context: String`。
+- `TaijiError` 变体必须携带上下文信息（`context: String` 或结构化字段如 `threshold`/`max`/`reason`）。
 - LLM 调用失败重试 3 次 → 降级 → `TaijiError::LLMCallFailed`。
 - async 上下文中禁止 `panic!` / `unwrap()`，全部用 `Result`。
 - 测试中创建的临时目录用 `tmp_dir`，测试末尾必须清理。并行测试的临时目录必须唯一（静态 `AtomicUsize` 计数器）。
@@ -201,3 +201,13 @@
 - **约束升级** `orchestration/constraint_engine.rs`：`load_truths(task_type_tags, rules)` —— 元层 4 truth ∪ 挖掘规则（id 前缀 `ontology:`）；`yin.rs::verify` 从 `self.guizang` 加载 rules（None=测试路径，I/O 失败上抛）。
 - **测试基线**：`cargo test --lib` → **335 passed, 0 failed**（+12：miner 5 + types 2 + meta 3 + constraint 1 + knowledge 1）。
 - **遗留/边界**：① **种子词表前置**——`types.yaml` 空则 `asset_type_map` 空 → 类型抽象/挖掘空转（需人工种 5-10 类型 + 给资产 tags 打语义类型 id）；② **skill 共现数据源缺失**——`assets_used` 现只含 prompt，skill 级挖掘延后；③ MVP 用**联合通过率**（pass/co）非 lift（个体基线 P(pass|a) 扩展后续）；④ 宏节点 `Abstract_Concept`（命名走 compile）延后。
+
+## 20. 全量代码审查避坑回流（V51）
+
+- **max_depth override 必须同步 factory.config**：`AgentFactory::with_config(config)` 重建 factory（clone 共享字段 + 替换 config），不可只改 config 副本——否则 `RecursiveDecomposeTool`（读 `factory.config.runtime.max_depth`）与 `ZhouyiCycle`（读副本）深度来源分裂，override 半生效（mcp/ws 两处同构）。
+- **task_type_tags 链贯通**：`zhouyi classify_task_tags(description)`（纯符号关键词零 LLM，代码/编译/重构/调试→`code`，否则 `general`）→ `meta.run(description, tags)` 透传 → `MetaContext.task_type_tags` → `yin verify load_truths(&meta_ctx.task_type_tags, rules)`。新增标签型约束（如 `code-safety`）必须确认链贯通，否则死代码。已知边界：关键词启发式，LLM 语义标签（MetaComposeResult 输出）后续增强。
+- **`safe_canonicalize` symlink 逃逸**（`skills/common.rs`）：fallback 分支的 `strip_prefix` 必须用**原始祖先 p（词法）**，不是已解析祖先 c——否则含 symlink 祖先段时 strip_prefix 失败退回词法路径，`starts_with` 退化为词法比较漏检。
+- **reqwest 0.11 redirect SSRF 每跳校验**（`skills/webfetch.rs`）：`redirect(Policy::custom)` 闭包内对 `attempt.url()` 做 IP 归一化校验（`attempt.follow()/stop()`），不可只校验首跳。
+- **归藏资产缺失用 `TaijiError::KnowledgeAssetNotFound { id }` 变体匹配**（`matches!`），禁 `e.to_string().contains("failed to read asset")`（字符串匹配脆弱）。
+- **`save_model_stats` 有意不 commit**（高频统计衍生，非资产契约——避免快照爆炸 + 污染回滚语义）；资产写路径（save_asset/save_skill/ontology_yaml）仍必须 tmp+rename+git commit。
+- **LLM 围栏解析走 `json_util::find_json_fence`**（case-insensitive + 允许空格，覆盖 ```JSON / ``` json）；所有 LLM 响应解析一律经 `parse_llm_json<T>`。

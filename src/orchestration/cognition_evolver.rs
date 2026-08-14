@@ -79,36 +79,6 @@ impl CognitionEvolver {
         Ok(self.guizang.clone())
     }
 
-    /// δ₀: Prune low-confidence cognitive assets.
-    ///
-    /// Logs which nodes would be removed (confidence < `threshold`)
-    /// and returns the count of hypothetical pruned nodes.
-    pub async fn prune_low_confidence(&self, threshold: f64) -> Result<u64, TaijiError> {
-        tracing::info!(
-            knowledge_dir = %self.guizang.knowledge_dir().display(),
-            threshold = threshold,
-            "[δ₀] prune_low_confidence: would remove nodes with confidence < {threshold}",
-        );
-
-        // In a production implementation this would query the 归藏 via
-        // `search_by_tags()` or directory scan, then delete assets whose
-        // `confidence` is below threshold. Here we log and return 0.
-        Ok(0)
-    }
-
-    /// δ₁: L1 skill tuning — update success/fail statistics.
-    ///
-    /// Logs the tuning event. Returns `Ok(())` on success.
-    pub async fn tune_skill(&self, skill_id: &str, success: bool) -> Result<(), TaijiError> {
-        tracing::info!(
-            knowledge_dir = %self.guizang.knowledge_dir().display(),
-            skill_id = %skill_id,
-            success = success,
-            "[δ₁] tune_skill: skill={skill_id} success={success}",
-        );
-        Ok(())
-    }
-
     /// δ₂ → V33/MVP-3.5: Beta-Bernoulli 后验更新（持久化版 — BCP §6.4.1）。
     ///
     /// 加载 `models/{asset_id}.yaml`；不存在 → 从关联 verification 的 `confidence`
@@ -174,17 +144,10 @@ impl CognitionEvolver {
             trace_records.len(),
         );
 
-        // δ₀: Prune low-confidence nodes (threshold 0.1 per AGENTS.md §6).
-        let pruned = self.prune_low_confidence(0.1).await?;
-
-        // δ₁: Tune skills from trace records.
-        let mut skills_tuned = 0u64;
-        for record in trace_records {
-            if record.phase.contains("工具调用") || record.phase.contains("tool") {
-                self.tune_skill(&record.task_id, !record.degraded).await?;
-                skills_tuned += 1;
-            }
-        }
+        // 批17 P2 修复：δ₀ 剪枝 / δ₁ 调优 no-op 占位已废弃（实际演化走
+        // backprop_checks / evolve_contracts / evolve_prompts）——置 0 不空转。
+        let pruned = 0u64;
+        let skills_tuned = 0u64;
 
         // δ₂: Bayesian updates from trace records (placeholder logic).
         let mut models_updated = 0u64;
@@ -1031,7 +994,7 @@ impl CognitionEvolver {
                             }
                         }
                     }
-                    assets[candidate].status = "pruned".into();
+                    assets[candidate].status_mark_merged();
                     merged += 1;
                     if !changed.contains(&best) {
                         changed.push(best);
@@ -1208,22 +1171,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_prune_low_confidence() {
-        let (evolver, dir) = test_evolver().await;
-        let count = evolver.prune_low_confidence(0.1).await.unwrap();
-        assert_eq!(count, 0);
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
-    async fn test_tune_skill() {
-        let (evolver, dir) = test_evolver().await;
-        evolver.tune_skill("skill_test_001", true).await.unwrap();
-        evolver.tune_skill("skill_test_002", false).await.unwrap();
-        let _ = tokio::fs::remove_dir_all(&dir).await;
-    }
-
-    #[tokio::test]
     async fn test_bayesian_update_persists_posterior() {
         let dir = test_knowledge_dir().await;
         let client = Arc::new(GuizangClient::new(&dir).await.unwrap());
@@ -1296,7 +1243,8 @@ mod tests {
             },
         ];
         let report = evolver.evolve("task_traced", &traces).await.unwrap();
-        assert_eq!(report.skills_tuned, 1);
+        // 批17 P2 修复：δ₁ 调优 no-op 已废弃（skills_tuned 恒 0）；δ₂ 仍在。
+        assert_eq!(report.skills_tuned, 0);
         assert_eq!(report.models_updated, 1);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }

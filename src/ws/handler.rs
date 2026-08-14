@@ -36,10 +36,19 @@ pub struct ServeState {
 /// unfolds; this function only returns once the whole recursion converges.
 pub async fn handle_execute_task(
     description: &str,
-    _max_depth: Option<u32>, // MVP: signature kept, uses config max_depth
+    max_depth: Option<u32>,
     state: &ServeState,
 ) -> Result<TaskTreeSnapshot, TaijiError> {
-    let runner = RecursiveRunner::new(state.factory.clone(), state.config.clone());
+    // 批19 P2：max_depth override 同步 factory.config（与 mcp taiji_run 同构——
+    // 否则 RecursiveDecomposeTool 读旧值，与 ZhouyiCycle override 分裂）。
+    let factory = if let Some(depth) = max_depth {
+        let mut config = state.config.clone();
+        config.runtime.max_depth = depth;
+        state.factory.with_config(config)
+    } else {
+        state.factory.clone()
+    };
+    let runner = RecursiveRunner::new(factory.clone(), factory.config.clone());
     let result = runner.execute(description).await?;
     build_task_tree(&state.data_root, &result.task_id)
 }
@@ -164,6 +173,13 @@ pub fn handle_get_zhouyi_state(
                 let summary = v["output"]
                     .as_str()
                     .map(|s| s.chars().take(200).collect::<String>())
+                    .or_else(|| {
+                        // 批19 P2 修复：output 为对象（completion/tool_call 结果）
+                        // 时 .as_str() 恒 None → 序列化为 JSON 截断。
+                        serde_json::to_string(&v["output"])
+                            .ok()
+                            .map(|s| s.chars().take(200).collect::<String>())
+                    })
                     .unwrap_or_default();
                 trace_preview.push(crate::types::frontend::TraceRecordPreview {
                     ts: v["ts"].as_str().unwrap_or("").to_string(),

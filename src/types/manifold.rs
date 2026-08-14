@@ -47,6 +47,8 @@ pub enum TopologyNodeKind {
     Deliverable,
     /// 交接节点（deliverables/handoff.md）。
     Handoff,
+    /// 检查节点（checks[].check_id——verify 边 to 端）。
+    Check,
 }
 
 /// 拓扑边：状态转移。
@@ -74,4 +76,36 @@ pub enum TopologyEdgeKind {
     Handoff,
     /// task → check（checks[].check_id）。
     Verify,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn topology_yaml_roundtrip_and_kind_snake_case() {
+        // 批1 P2 修复：锁拓扑契约（YAML roundtrip + kind snake_case 序列化）。
+        let t = ManifoldTopology {
+            root_task: "task-1".into(),
+            generated_at: 1700000000000,
+            nodes: vec![TopologyNode {
+                id: "task-1".into(),
+                kind: TopologyNodeKind::Task,
+                depth: 0,
+                stats: CheckStats::default(),
+            }],
+            edges: vec![TopologyEdge {
+                from: "task-1".into(),
+                to: "deliverables/a.md".into(),
+                kind: TopologyEdgeKind::Dataflow,
+            }],
+        };
+        let yaml = serde_yaml::to_string(&t).unwrap();
+        assert!(yaml.contains("kind: task"), "node kind 应 snake_case，实际: {yaml}");
+        assert!(yaml.contains("kind: dataflow"), "edge kind 应 snake_case，实际: {yaml}");
+        let back: ManifoldTopology = serde_yaml::from_str(&yaml).unwrap();
+        assert_eq!(back.root_task, "task-1");
+        assert_eq!(back.nodes[0].kind, TopologyNodeKind::Task);
+        assert_eq!(back.edges[0].kind, TopologyEdgeKind::Dataflow);
+    }
 }

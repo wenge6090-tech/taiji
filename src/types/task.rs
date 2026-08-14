@@ -15,7 +15,7 @@ pub struct Task {
 
 /// Subtask specification emitted by LLM during recursive decomposition.
 ///
-/// V26 起无 `mode` 字段（异层同构：子任务与根任务完全同构，无模式分化）。
+/// V27 阴阳配对：子任务模式由父 LLM 按难度分配（`mode` 字段）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SubtaskSpec {
     pub description: String,

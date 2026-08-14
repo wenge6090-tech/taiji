@@ -9,6 +9,27 @@
 
 use serde::de::DeserializeOwned;
 
+/// 定位 ` ```json ` 围栏并返回其内容（不含围栏本身）。
+/// 语言标签大小写不敏感（json/JSON/Json）、允许 ` ``` ` 与 json 间空格。
+fn find_json_fence(raw: &str) -> Option<&str> {
+    let mut search_from = 0usize;
+    while let Some(rel) = raw[search_from..].find("```") {
+        let fence_start = search_from + rel;
+        let after_fence = fence_start + 3;
+        let rest = &raw[after_fence..];
+        let lang_end = rest.find('\n').unwrap_or(rest.len());
+        let lang = rest[..lang_end].trim();
+        if lang.eq_ignore_ascii_case("json") {
+            let content_start = after_fence + lang_end;
+            return raw[content_start..]
+                .find("```")
+                .map(|end| &raw[content_start..content_start + end]);
+        }
+        search_from = after_fence;
+    }
+    None
+}
+
 /// 解析 LLM 结构化输出为 `T`。
 ///
 /// 解析策略（逐级降级）：
@@ -25,19 +46,14 @@ pub fn parse_llm_json<T: DeserializeOwned>(raw: &str) -> Result<T, serde_json::E
     }
 
     // 2) ```json 围栏内容内的大括号切片（优先于全文中括号切片，更精确）
-    let fence_slice = raw
-        .find("```json")
-        .and_then(|idx| {
-            let after = &raw[idx + "```json".len()..];
-            after.find("```").map(|end| &after[..end])
-        })
-        .and_then(|content| {
-            content
-                .find('{')
-                .zip(content.rfind('}'))
-                .filter(|(s, e)| e > s)
-                .map(|(s, e)| &content[s..=e])
-        });
+    //    语言标签大小写不敏感、允许 ``` 与 json 间空格（覆盖 ```JSON / ``` json）。
+    let fence_slice = find_json_fence(raw).and_then(|content| {
+        content
+            .find('{')
+            .zip(content.rfind('}'))
+            .filter(|(s, e)| e > s)
+            .map(|(s, e)| &content[s..=e])
+    });
 
     if let Some(slice) = fence_slice {
         if let Ok(v) = serde_json::from_str::<T>(slice) {
@@ -107,5 +123,16 @@ mod tests {
     fn parse_non_json_returns_err() {
         let raw = "This is not JSON at all, no braces here.";
         assert!(parse_llm_json::<TestStruct>(raw).is_err());
+    }
+
+    #[test]
+    fn parse_fence_case_insensitive_and_spaced() {
+        let raw = "```JSON\n{\"route\":\"Pass\",\"confidence\":0.5}\n```";
+        let v: TestStruct = parse_llm_json(raw).expect("uppercase fence should parse");
+        assert_eq!(v.route, "Pass");
+
+        let raw2 = "``` json\n{\"route\":\"Fail\",\"confidence\":0.2}\n```";
+        let v2: TestStruct = parse_llm_json(raw2).expect("spaced fence should parse");
+        assert_eq!(v2.route, "Fail");
     }
 }

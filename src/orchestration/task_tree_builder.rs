@@ -85,7 +85,10 @@ pub fn build_task_tree(data_root: &Path, root_task_id: &str) -> Result<TaskTreeS
         let tools_used = collect_tools_used(&task_dir);
         let total_siblings = if parent_id.is_some() {
             // Count siblings by re-scanning the parent's children dir.
-            let parent_dir = &task_dir.parent().unwrap_or(&task_dir).join("children");
+            // 批15 P2 修复：子任务 task_dir = {root}/children/{idx}，其父目录
+            // 就是 children 目录本身，无需再 .join("children")（原实现扫到了
+            // 不存在的 {root}/children/children → count_dirs 恒 0 → .max(1) 恒 1）。
+            let parent_dir = task_dir.parent().unwrap_or(&task_dir);
             count_dirs(parent_dir).max(1)
         } else {
             1
@@ -302,5 +305,61 @@ pub fn read_lianshan_activity(data_root: &Path, max: usize) -> Option<LianshanAc
                 })
                 .collect(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static TREE_TEST_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+    #[test]
+    fn test_total_siblings_counts_actual_siblings() {
+        // 批15 P2 回归：子任务 total_siblings 应 = 父 children 目录的子目录数，
+        // 而非恒 1（原实现 .join("children") 多套一层扫到不存在目录）。
+        let tmp = std::env::temp_dir().join(format!(
+            "taiji_tree_test_{}_{}",
+            std::process::id(),
+            TREE_TEST_COUNTER.fetch_add(1, Ordering::SeqCst)
+        ));
+        let root = tmp.join("tasks").join("root1");
+        std::fs::create_dir_all(root.join("children/0")).unwrap();
+        std::fs::create_dir_all(root.join("children/1")).unwrap();
+        std::fs::create_dir_all(root.join("children/2")).unwrap();
+
+        let mk_task = |id: &str, depth: u32, parent: Option<&str>| {
+            serde_json::json!({
+                "id": id,
+                "description": id,
+                "depth": depth,
+                "status": "Completed",
+                "parent_id": parent,
+                "subtask_ids": []
+            })
+        };
+        std::fs::write(root.join("meta.json"), mk_task("root1", 0, None).to_string()).unwrap();
+        std::fs::write(
+            root.join("children/0/meta.json"),
+            mk_task("c0", 1, Some("root1")).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("children/1/meta.json"),
+            mk_task("c1", 1, Some("root1")).to_string(),
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("children/2/meta.json"),
+            mk_task("c2", 1, Some("root1")).to_string(),
+        )
+        .unwrap();
+
+        let snapshot = build_task_tree(&tmp, "root1").unwrap();
+        let c0 = snapshot.nodes.iter().find(|n| n.task_id == "c0").unwrap();
+        assert_eq!(c0.total_siblings, 3, "子任务应数到 3 个兄弟");
+
+        std::fs::remove_dir_all(&tmp).unwrap();
     }
 }

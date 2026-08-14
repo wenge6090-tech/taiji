@@ -97,12 +97,18 @@ pub async fn migrate_all(data_root: &Path) -> Result<usize, TaijiError> {
         )));
     }
     let mut dirs = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(&tasks_root) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if p.is_dir() {
-                collect_task_dirs(&p, &mut dirs);
+    match std::fs::read_dir(&tasks_root) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_dir() {
+                    collect_task_dirs(&p, &mut dirs);
+                }
             }
+        }
+        Err(e) => {
+            // 批5 P2 修复：read_dir 失败 warn 而非静默返回 Ok(0)（运维工具需可见）。
+            tracing::warn!(error = %e, dir = %tasks_root.display(), "migrate: read_dir failed");
         }
     }
     let mut touched = 0usize;

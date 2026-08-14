@@ -23,7 +23,7 @@ use crate::types::execution::EngineContext;
 pub struct YinVerifyArgs {
     /// The task output text produced by the YangAgent.
     pub task_output: String,
-    /// Raw result strings from any L1 skill tools that were called.
+    /// Raw result strings from any skill tools that were called.
     #[serde(default)]
     pub tool_results: Vec<String>,
 }
@@ -82,7 +82,7 @@ impl Tool for YinVerifyTool {
     async fn definition(&self, _prompt: String) -> ToolDefinition {
         ToolDefinition {
             name: Self::NAME.to_string(),
-            description: "Verify a task output against L4 Truth constraints and produce a VerificationReport. Returns a JSON-serialized VerificationReport.".to_string(),
+            description: "Verify a task output against truth constraints and produce a VerificationReport. Returns a JSON-serialized VerificationReport.".to_string(),
             parameters: serde_json::json!({
                 "type": "object",
                 "properties": {
@@ -93,7 +93,7 @@ impl Tool for YinVerifyTool {
                     "tool_results": {
                         "type": "array",
                         "items": { "type": "string" },
-                        "description": "Raw result strings from any L1 skill tools that were called"
+                        "description": "Raw result strings from any skill tools that were called"
                     }
                 },
                 "required": ["task_output"]

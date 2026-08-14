@@ -78,7 +78,7 @@ pub struct ExplainReport {
 /// A single phase in the execution timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PhaseSummary {
-    /// Phase name: "权重更新" | "概率拟合" | "因果验证" | "收敛判定"
+    /// Phase name（当前实现仅写 "概率拟合"，其余相位待接线）。
     pub phase: String,
     pub cycle: u32,
     pub round: u32,

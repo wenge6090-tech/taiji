@@ -69,8 +69,19 @@ pub fn compress_task_tree_to_topology(
         });
     }
 
-    // verify 边：根任务 → check
+    // verify 边：根任务 → check（check 也建模为节点，拓扑完整，批17 P2）。
     for c in checks {
+        if !nodes
+            .iter()
+            .any(|n| n.id == c.check_id && n.kind == TopologyNodeKind::Check)
+        {
+            nodes.push(TopologyNode {
+                id: c.check_id.clone(),
+                kind: TopologyNodeKind::Check,
+                depth: 0,
+                stats: Default::default(),
+            });
+        }
         edges.push(TopologyEdge {
             from: root_task.clone(),
             to: c.check_id.clone(),
@@ -257,7 +268,7 @@ mod tests {
 
         assert_eq!(topo.root_task, "task-root");
 
-        // 节点：2 task + 2 deliverable + 1 handoff + 1 asset = 6
+        // 节点：2 task + 2 deliverable + 1 handoff + 1 asset + 1 check = 7
         let task_nodes: Vec<_> = topo
             .nodes
             .iter()
@@ -307,6 +318,14 @@ mod tests {
             .collect();
         assert_eq!(verify.len(), 1);
         assert_eq!(verify[0].to, "file-exists");
+        // check 也建模为节点（verify 边 to 端不悬空）
+        let check_nodes: Vec<_> = topo
+            .nodes
+            .iter()
+            .filter(|n| n.kind == TopologyNodeKind::Check)
+            .collect();
+        assert_eq!(check_nodes.len(), 1);
+        assert_eq!(check_nodes[0].id, "file-exists");
 
         // 产出物节点 id 相对 root，树内唯一（child 的 sub.md 带 children/0 前缀）
         let deliverable_ids: Vec<_> = topo

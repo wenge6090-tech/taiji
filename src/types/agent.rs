@@ -6,7 +6,7 @@ use crate::types::verification::CheckStats;
 /// `partition`（模型分区 model_key）后置：分区激活时扩展，serde default 兼容。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetRef {
-    /// 资产类型："prompt" | "verification" | "workflow" | "truth"。
+    /// 资产类型："prompt" | "verification" | "truth"。
     pub asset_type: String,
     /// 资产 id（文件 stem）。
     pub id: String,
@@ -117,7 +117,7 @@ impl ModelStatsRow {
 /// | 配对 | 阳 Agent | 阴 Agent |
 /// |------|----------|----------|
 /// | Orchestration（编排） | 编排模板：recursive_decompose 拆解 + 综合 | 收敛模板：子结果聚合判决（converge） |
-/// | Execution（执行） | 执行模板：L1 工具直接产出 | 验证模板：直接产出核验（verify） |
+/// | Execution（执行） | 执行模板：内置工具直接产出 | 验证模板：直接产出核验（verify） |
 ///
 /// Mode is **not** derived from depth alone: the MetaAgent LLM weighs depth
 /// rules (leaf `depth+1 >= max_depth` is hard-forced to Execution by
@@ -128,7 +128,7 @@ pub enum AgentMode {
     /// Agent acts as a task decomposer/synthesizer — breaks complex tasks into
     /// subtasks via `recursive_decompose`, delegates, then integrates results.
     Orchestration,
-    /// Agent acts as a focused executor — uses L1 skills to directly produce
+    /// Agent acts as a focused executor — uses builtin skills to directly produce
     /// output; `recursive_decompose` is not registered (LLM cannot see it).
     Execution,
 }
@@ -218,6 +218,17 @@ pub struct MetaContext {
     /// When `None`, YinAgent falls back to CONVERGE_ORC/EXEC_SYSTEM_PROMPT
     /// by `mode`.
     pub converge_system_prompt: Option<String>,
+
+    /// V51：编排温度覆盖（LLM 可输出 temperature 覆盖四象默认）。None = 用
+    /// 四象默认（YangOrch 0.8 / YangExec 0.5 / YinVerify 0.2 / YinConverge 0.2）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+
+    /// 任务类型标签（批18 P2 修复：zhouyi 提取 → 透传本字段 → 阴 load_truths）。
+    /// 空 = 无标签（阴仅加载元层基线 truth，不加载 code-safety 等标签型约束）。
+    /// serde default：旧 meta_ctx.json 零迁移。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub task_type_tags: Vec<String>,
 }
 
 impl MetaContext {
@@ -244,11 +255,13 @@ impl MetaContext {
             yang_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
+            temperature: None,
+            task_type_tags: vec![],
         }
     }
 }
 
-/// Reference to an L1 Skill matched by SkillTriggerEngine.
+/// Reference to a skill matched by SkillTriggerEngine.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillRef {
     pub id: String,
@@ -331,11 +344,8 @@ pub struct ExternalToolResult {
 ///
 /// # Directory layout
 /// ```text
-/// {data_dir}/prompts/
-/// ├── orchestration_yang.yaml
-/// ├── execution_yang.yaml
-/// ├── orchestration_verify.yaml
-/// └── ...
+/// {data_dir}/yang/prompts/    # 阳系统提示词
+/// {data_dir}/yin/prompts/     # 阴系统提示词
 /// ```
 ///
 /// V26 起 `agent_mode` 字段已删除（serde 默认宽容，旧归藏 YAML 中的
@@ -350,7 +360,7 @@ pub struct PromptAsset {
     /// already provides the `type` key.
     #[serde(skip)]
     pub asset_type: String,
-    /// Cognitive layer (1 = Skill, matching L1).
+    /// Cognitive layer (1 = skill).
     pub layer: u32,
     /// Unique identifier (file stem).
     pub id: String,
@@ -460,8 +470,7 @@ pub struct VerificationAsset {
     /// Type discriminator — always `"verification"`.
     #[serde(skip)]
     pub asset_type: String,
-    /// Cognitive layer — 0 占位（BCP §6.2 未定义 verifications 层号，
-    /// V32 资产层统一修订时定义；不参与运行时行为）。
+    /// Cognitive layer — 0 占位（不参与运行时行为）。
     pub layer: u32,
     /// Unique identifier (file stem).
     pub id: String,
@@ -510,6 +519,11 @@ pub struct VerificationAsset {
 impl VerificationAsset {
     fn default_status() -> String {
         "active".to_string()
+    }
+
+    /// 标记为合并淘汰（merge 吸收统计后）——对齐 PromptAsset::status_mark_merged。
+    pub fn status_mark_merged(&mut self) {
+        self.status = "pruned".into();
     }
 
     /// Create a new `VerificationAsset` with default metadata.

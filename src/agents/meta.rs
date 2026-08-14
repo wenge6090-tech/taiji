@@ -160,6 +160,23 @@ async fn apply_ontology(
     Ok(())
 }
 
+/// 纯符号任务类型标签提取（批18 P2 修复：替代 zhouyi 硬编码 `["general"]`）。
+/// 零 LLM——关键词匹配任务描述，识别代码类任务以激活 code-safety truth
+/// （constraint_engine::load_truths）。无法归类时回退 `["general"]`（宁简勿误）。
+/// 测试：`classify_task_tags_detects_code`。
+pub fn classify_task_tags(description: &str) -> Vec<String> {
+    let lower = description.to_lowercase();
+    const CODE_KEYWORDS: &[&str] = &[
+        "code", "coding", "compile", "compiler", "cargo", "rust", "refactor",
+        "debug", "bug", "function", "trait", "struct", "enum", "module",
+        "代码", "编译", "重构", "调试", "函数", "类型", "模块", "接口", "缺陷",
+    ];
+    if CODE_KEYWORDS.iter().any(|k| lower.contains(k)) {
+        return vec!["code".to_string()];
+    }
+    vec!["general".to_string()]
+}
+
 /// Builder for the MetaAgent (权重更新·元).
 ///
 /// Encapsulates all configuration needed to construct and execute a Rig agent
@@ -175,6 +192,9 @@ pub struct MetaAgentBuilder {
     task_id: String,
     guizang: Arc<GuizangClient>,
     provider: Arc<ProviderRegistry>,
+    /// Resolved provider name (config `agent_overrides["meta"]` → default),
+    /// used to select the LLM client — 批12 P1 修复（不再硬编码 "deepseek"）。
+    provider_name: String,
     model: String,
     /// Recursion depth of the current node (root = 0) — injected into the
     /// mode-decision prompt (递归层数规则, V27).
@@ -208,6 +228,7 @@ impl MetaAgentBuilder {
             task_id: task_id.to_string(),
             guizang,
             provider,
+            provider_name: "deepseek".to_string(),
             model: model.to_string(),
             depth: 0,
             max_depth: 2, // RuntimeConfig::default().max_depth
@@ -250,6 +271,13 @@ impl MetaAgentBuilder {
     /// Override the LLM turn budget (default 6).
     pub fn max_turns(mut self, n: u32) -> Self {
         self.max_turns = n;
+        self
+    }
+
+    /// Override the resolved provider name (批12 P1 修复：由工厂从
+    /// `agent_llm_config("meta")` 传入，替代硬编码 "deepseek")。
+    pub fn provider_name(mut self, provider: &str) -> Self {
+        self.provider_name = provider.to_string();
         self
     }
 
@@ -389,7 +417,7 @@ impl MetaAgentBuilder {
             _ => llm_prompt,
         };
 
-        let client = self.provider.client("deepseek").map_err(|e| {
+        let client = self.provider.client_for(&self.provider_name).map_err(|e| {
             TaijiError::LLMCallFailed {
                 context: format!("MetaAgent: failed to get provider client: {e}"),
             }
@@ -501,6 +529,11 @@ impl MetaAgentBuilder {
                     yang_system_prompt: result.yang_system_prompt,
                     verify_system_prompt: result.verify_system_prompt,
                     converge_system_prompt: result.converge_system_prompt,
+                    // V51：温度覆盖（批12 P1 死字段接线）——LLM 输出的 temperature
+                    // 覆盖四象默认；None = 下游用四象默认。
+                    temperature: result.temperature.map(|v| v as f64),
+                    // 批18 P2：任务类型标签透传（zhouyi 提取 → 阴 load_truths）。
+                    task_type_tags: task_type_tags.iter().map(|s| s.to_string()).collect(),
                 };
 
                 // V50 §6.6 本体消费：实体链接 → 类型级软查询（expand）+ 约束校验
@@ -1023,5 +1056,31 @@ mod tests {
         let with_onto = r#"{"mode":"Execution","ontology":{"domain":"Security","action":"Fix","objects":["security-check"]}}"#;
         let r2: MetaComposeResult = serde_json::from_str(with_onto).expect("ontology parse");
         assert_eq!(r2.ontology.as_ref().map(|v| v.domain.as_str()), Some("Security"));
+    }
+
+    #[test]
+    fn classify_task_tags_detects_code() {
+        // 批18 P2：代码类任务描述 → ["code"]，激活 code-safety truth。
+        assert_eq!(
+            classify_task_tags("重构日志模块，修复编译错误"),
+            vec!["code".to_string()]
+        );
+        assert_eq!(
+            classify_task_tags("Refactor the logging module and fix compile errors"),
+            vec!["code".to_string()]
+        );
+    }
+
+    #[test]
+    fn classify_task_tags_falls_back_general() {
+        // 非代码任务（写作/分析等）→ ["general"]。
+        assert_eq!(
+            classify_task_tags("写一份项目周报，总结本周进展"),
+            vec!["general".to_string()]
+        );
+        assert_eq!(
+            classify_task_tags("Summarize the meeting notes"),
+            vec!["general".to_string()]
+        );
     }
 }

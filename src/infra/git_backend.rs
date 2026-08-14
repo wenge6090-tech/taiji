@@ -57,6 +57,15 @@ fn now_millis() -> i64 {
         .unwrap_or(0)
 }
 
+/// 批6 P2 修复：纳秒时间戳——原 `now_millis` 同毫秒 + 同 msg 的两次 commit
+/// 会产生相同 id 覆盖历史快照（「单调 + 唯一」不成立）。
+fn now_nanos() -> i128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0)
+}
+
 /// Recursively collect all file paths under `dir` (absolute), skipping the
 /// subtree rooted at `exclude` (if any).
 async fn walk_files(dir: &Path, exclude: Option<&Path>) -> Result<Vec<PathBuf>, TaijiError> {
@@ -174,8 +183,9 @@ impl GitBackend {
     ///
     /// Commit id = `{ts_millis:x}-{hash:x}`（单调 + 唯一）。返回 commit id。
     pub async fn commit(&self, msg: &str) -> Result<String, TaijiError> {
+        // 批6 P2 修复：id 用纳秒时间戳（唯一）；meta.ts 保持毫秒（log 排序兼容）。
         let ts = now_millis();
-        let id = format!("{:x}-{:x}", ts, short_hash(msg));
+        let id = format!("{:x}-{:x}", now_nanos(), short_hash(msg));
         let dir = self.commit_dir(&id);
         let tree = dir.join("tree");
         fs::create_dir_all(&tree).await.map_err(|e| {

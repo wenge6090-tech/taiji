@@ -298,3 +298,57 @@ fn build_openai_compat_client(
     info!(client = %label, "OpenAI-compatible client created");
     Ok(Arc::new(client))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::infra::config::{LlmConfig, ProviderEntry, TaijiConfig};
+
+    fn test_config() -> TaijiConfig {
+        TaijiConfig {
+            version: "0.1".into(),
+            workspace: "test".into(),
+            data_root: String::new(),
+            llm: LlmConfig {
+                default_provider: "deepseek".into(),
+                default_model: "deepseek-chat".into(),
+                api_key: "test-key".into(),
+                base_url: None,
+                agent_overrides: Default::default(),
+                providers: vec![ProviderEntry {
+                    name: "deepseek-r1".into(),
+                    base_url: String::new(),
+                    api_key: "test-key".into(),
+                    model: "deepseek-reasoner".into(),
+                }],
+            },
+            runtime: Default::default(),
+            knowledge: Default::default(),
+            safety: Default::default(),
+            mcp_servers: vec![],
+        }
+    }
+
+    #[test]
+    fn client_falls_back_to_default() {
+        // 批5 P2 修复：未知名回退默认 client（无降级原则——回退 + warn）。
+        let reg = ProviderRegistry::new(&test_config()).unwrap();
+        let c = reg.client("nonexistent").unwrap();
+        assert!(Arc::ptr_eq(&c, &reg.default_client()));
+    }
+
+    #[test]
+    fn model_candidates_default_first_and_resolve() {
+        // 批5 P2 修复：锁路由候选（default 在前）+ resolve_model 查表。
+        let reg = ProviderRegistry::new(&test_config()).unwrap();
+        let keys = reg.model_keys();
+        assert_eq!(keys.len(), 2);
+        assert_eq!(keys[0].key(), "deepseek-deepseek-chat");
+        assert_eq!(keys[1].key(), "deepseek-r1-deepseek-reasoner");
+        let resolved = reg.resolve_model(&keys[1]).unwrap();
+        assert_eq!(
+            resolved,
+            ("deepseek-r1".to_string(), "deepseek-reasoner".to_string())
+        );
+    }
+}

@@ -29,7 +29,6 @@ pub fn handoff_path(task_dir: &Path) -> std::path::PathBuf {
     task_dir.join("deliverables").join("handoff.md")
 }
 
-/// 写交接文件 — 确定性收尾（V28 第一版不调 LLM；BCP §8.18「收尾调用」留待增强）。
 /// 写交接文件 — V28 确定性收尾为基线，V29+ LLM 压缩收尾（BCP §8.18）为增强。
 ///
 /// 输出 YAML-ish front matter + 正文。`body`：

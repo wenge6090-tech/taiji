@@ -6,7 +6,6 @@
 //! V38：truths 资产层已移除——约束不再资产化、不参与 Lianshan 演化；
 //! 硬约束 = 本引擎内置的硬编码检查（summary 非空/有依据/可审计 + code-safety）。
 
-use crate::types::agent::MetaContext;
 use crate::types::ontology::OntologyRule;
 use crate::types::verification::{
     CheckSeverity, ConstraintResult, ConstraintSeverity, ConstraintViolation, TruthConstraint,
@@ -98,56 +97,6 @@ impl ConstraintEngine {
         );
 
         truths
-    }
-
-    /// Check `MetaContext` output against a set of constraints.
-    ///
-    /// For each constraint a domain-specific check is applied:
-    ///   - `truth:no-fabrication`  → constraints + skills must not both be empty
-    ///   - `truth:evidence-based`  → at least one L4 constraint present
-    ///   - `truth:auditable`       → task description should be non-empty (soft)
-    ///   - `truth:code-safety`     → dangerous tools require constraint guardrails
-    ///
-    /// Any **Hard** violation immediately returns `passed: false`
-    /// with a single violation entry (short-circuit).  Soft violations
-    /// are accumulated and returned without short-circuiting.
-    pub fn check_constraints(
-        output: &MetaContext,
-        constraints: &[TruthConstraint],
-    ) -> ConstraintResult {
-        if constraints.is_empty() {
-            return ConstraintResult {
-                passed: true,
-                violations: Vec::new(),
-            };
-        }
-
-        let mut violations: Vec<ConstraintViolation> = Vec::new();
-
-        for constraint in constraints {
-            let maybe_violation = Self::check_single_constraint(output, constraint);
-
-            if let Some(violation) = maybe_violation {
-                if violation.severity == ConstraintSeverity::Hard {
-                    tracing::debug!(
-                        count = violations.len(),
-                        hard_truth_id = %violation.truth_id,
-                        hard_truth_name = %violation.truth_name,
-                        reason = %violation.reason,
-                        "Hard constraint violation — returning all accumulated violations"
-                    );
-                    violations.push(violation);
-                    return ConstraintResult {
-                        passed: false,
-                        violations,  // Include soft violations accumulated before the hard one
-                    };
-                }
-                violations.push(violation);
-            }
-        }
-
-        let passed = violations.is_empty();
-        ConstraintResult { passed, violations }
     }
 
     /// Check YinAgent textual output (summary + violation list) against
@@ -256,74 +205,6 @@ impl ConstraintEngine {
         }
     }
 
-    // ------------------------------------------------------------------
-    // Internal helpers
-    // ------------------------------------------------------------------
-
-    /// Check a single constraint against the MetaContext.
-    /// Returns `Some(violation)` if the constraint is not satisfied.
-    fn check_single_constraint(
-        output: &MetaContext,
-        constraint: &TruthConstraint,
-    ) -> Option<ConstraintViolation> {
-        match constraint.id.as_str() {
-            "truth:no-fabrication" => {
-                if output.constraints.is_empty() && output.matched_skills.is_empty() {
-                    Some(ConstraintViolation {
-                        truth_id: constraint.id.clone(),
-                        truth_name: constraint.name.clone(),
-                        reason: "No constraints or skills in MetaContext — possible fabrication risk"
-                            .into(),
-                        severity: constraint.severity.clone(),
-                    })
-                } else {
-                    None
-                }
-            }
-            "truth:evidence-based" => {
-                if output.constraints.is_empty() {
-                    Some(ConstraintViolation {
-                        truth_id: constraint.id.clone(),
-                        truth_name: constraint.name.clone(),
-                        reason: "No L4 constraints in MetaContext — missing evidence"
-                            .into(),
-                        severity: constraint.severity.clone(),
-                    })
-                } else {
-                    None
-                }
-            }
-            "truth:auditable" => {
-                if output.yang_prompt.task_description.trim().is_empty() {
-                    Some(ConstraintViolation {
-                        truth_id: constraint.id.clone(),
-                        truth_name: constraint.name.clone(),
-                        reason: "Task context is empty — reduces auditability".into(),
-                        severity: constraint.severity.clone(),
-                    })
-                } else {
-                    None
-                }
-            }
-            "truth:code-safety" => {
-                let has_dangerous_tool = output.matched_skills.iter().any(|s| {
-                    matches!(s.tool_name.as_str(), "bash" | "exec" | "shell")
-                });
-                if has_dangerous_tool && output.constraints.is_empty() {
-                    Some(ConstraintViolation {
-                        truth_id: constraint.id.clone(),
-                        truth_name: constraint.name.clone(),
-                        reason: "Dangerous tools matched but no constraints guide safe usage"
-                            .into(),
-                        severity: constraint.severity.clone(),
-                    })
-                } else {
-                    None
-                }
-            }
-            _ => None,
-        }
-    }
 }
 
 impl Default for ConstraintEngine {
@@ -335,40 +216,10 @@ impl Default for ConstraintEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::agent::{SkillRef, YangPrompt};
     use crate::types::verification::ConstraintSeverity;
-
-    fn make_meta_context(
-        constraints: Vec<TruthConstraint>,
-        matched_skills: Vec<SkillRef>,
-        task_description: &str,
-    ) -> MetaContext {
-        MetaContext {
-            constraints,
-            matched_skills,
-            yang_prompt: YangPrompt {
-                task_description: task_description.into(),
-                constraint_summaries: Vec::new(),
-                parent_deliverables: vec![],
-                sibling_deliverables: vec![],
-            },
-            mode: crate::types::agent::AgentMode::Orchestration,
-            degraded: None,
-            assets_used: vec![],
-            model: None,
-            verify_model: None,
-            yang_system_prompt: None,
-            verify_system_prompt: None,
-            converge_system_prompt: None,
-        }
-    }
 
     fn hard_truth(id: &str, name: &str, desc: &str) -> TruthConstraint {
         TruthConstraint::hard(id, name, desc)
-    }
-
-    fn soft_truth(id: &str, name: &str, desc: &str) -> TruthConstraint {
-        TruthConstraint::soft(id, name, desc)
     }
 
     #[test]
@@ -412,98 +263,6 @@ mod tests {
         let truths = ConstraintEngine::load_truths(&tags, &rules);
         assert_eq!(truths.len(), 4); // 3 元层 + 1 挖掘规则
         assert!(truths.iter().any(|t| t.id == "ontology:guard-command-succeeds-prod"));
-    }
-
-    #[test]
-    fn test_check_constraints_empty_list_passes() {
-        let ctx = make_meta_context(Vec::new(), Vec::new(), "");
-        let result = ConstraintEngine::check_constraints(&ctx, &[]);
-        assert!(result.passed);
-        assert!(result.violations.is_empty());
-    }
-
-    #[test]
-    fn test_check_constraints_no_fabrication_pass() {
-        let ctx = make_meta_context(
-            vec![hard_truth("truth:evidence-based", "有依据推理", "evidence")],
-            Vec::new(),
-            "test task",
-        );
-        let constraints = vec![hard_truth(
-            "truth:no-fabrication",
-            "不编造事实",
-            "no fabrications",
-        )];
-        let result = ConstraintEngine::check_constraints(&ctx, &constraints);
-        assert!(result.passed);
-    }
-
-    #[test]
-    fn test_check_constraints_no_fabrication_fail_hard() {
-        let ctx = make_meta_context(Vec::new(), Vec::new(), "test task");
-        let constraints = vec![hard_truth(
-            "truth:no-fabrication",
-            "不编造事实",
-            "no fabrications",
-        )];
-        let result = ConstraintEngine::check_constraints(&ctx, &constraints);
-        assert!(!result.passed);
-        assert_eq!(result.violations.len(), 1);
-        assert_eq!(result.violations[0].truth_id, "truth:no-fabrication");
-        assert_eq!(result.violations[0].severity, ConstraintSeverity::Hard);
-    }
-
-    #[test]
-    fn test_check_constraints_soft_does_not_short_circuit() {
-        let ctx = make_meta_context(Vec::new(), Vec::new(), "");
-        let constraints = vec![soft_truth("truth:auditable", "透明可审计", "auditability")];
-        let result = ConstraintEngine::check_constraints(&ctx, &constraints);
-        // Soft violations are still reported, but passed = false when any exists
-        assert!(!result.passed);
-        assert_eq!(result.violations.len(), 1);
-        assert_eq!(result.violations[0].severity, ConstraintSeverity::Soft);
-    }
-
-    #[test]
-    fn test_check_constraints_hard_short_circuits_before_soft() {
-        // Hard constraint comes first, so soft is never checked
-        let ctx = make_meta_context(Vec::new(), Vec::new(), "");
-        let constraints = vec![
-            hard_truth("truth:no-fabrication", "不编造事实", ""),
-            soft_truth("truth:auditable", "透明可审计", ""),
-        ];
-        let result = ConstraintEngine::check_constraints(&ctx, &constraints);
-        assert!(!result.passed);
-        assert_eq!(result.violations.len(), 1);
-        assert_eq!(result.violations[0].truth_id, "truth:no-fabrication");
-    }
-
-    #[test]
-    fn test_check_constraints_evidence_based_pass() {
-        let ctx = make_meta_context(
-            vec![hard_truth("truth:evidence-based", "有依据推理", "evidence")],
-            Vec::new(),
-            "test",
-        );
-        let constraints = vec![hard_truth(
-            "truth:evidence-based",
-            "有依据推理",
-            "evidence",
-        )];
-        let result = ConstraintEngine::check_constraints(&ctx, &constraints);
-        assert!(result.passed);
-    }
-
-    #[test]
-    fn test_check_constraints_evidence_based_fail() {
-        let ctx = make_meta_context(Vec::new(), Vec::new(), "test");
-        let constraints = vec![hard_truth(
-            "truth:evidence-based",
-            "有依据推理",
-            "evidence",
-        )];
-        let result = ConstraintEngine::check_constraints(&ctx, &constraints);
-        assert!(!result.passed);
     }
 
     #[test]

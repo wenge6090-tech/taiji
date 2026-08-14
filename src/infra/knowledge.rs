@@ -1,7 +1,7 @@
 //! GuizangClient — 归藏 (cognitive warehouse) file-system client.
 //!
-//! Cognitive assets (Prompts, Models, Skills, Verifications) are stored as
-//! YAML files under `{data_dir}/{type}s/{id}.yaml`. V38: no `index.yaml` —
+//! Cognitive assets (prompts/skills/verifications) are stored as YAML files
+//! under yang/yin 对偶目录（见下方布局）。V38: no `index.yaml` —
 //! tag search scans directories on demand (`scan_assets`).
 //!
 //! # Directory layout (V43：yang/yin Skills 对偶子树，BCP §10.1)
@@ -349,6 +349,8 @@ impl GuizangClient {
     }
 
     /// 原子写根级 model_stats.yaml（Lianshan 单写者调用；Zhouyi 只读）。
+    /// 批7 P2 决策：有意不 git.commit——model_stats 是高频统计衍生数据（每次
+    /// PASS 都更新），非资产契约；进版本历史会造成快照爆炸 + 污染资产回滚语义。
     pub async fn save_model_stats(
         &self,
         stats: &std::collections::BTreeMap<String, crate::types::agent::ModelStatsRow>,
@@ -401,8 +403,14 @@ impl GuizangClient {
     pub async fn load_asset(&self, type_: &str, id: &str) -> Result<CognitiveAsset, TaijiError> {
         let path = self.asset_path(type_, id);
         let content = fs::read_to_string(&path).await.map_err(|e| {
-            TaijiError::KnowledgeStoreUnavailable {
-                context: format!("failed to read asset {:?}: {e}", path),
+            if e.kind() == std::io::ErrorKind::NotFound {
+                TaijiError::KnowledgeAssetNotFound {
+                    id: path.display().to_string(),
+                }
+            } else {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to read asset {:?}: {e}", path),
+                }
             }
         })?;
         let asset: CognitiveAsset = serde_yaml::from_str(&content).map_err(|e| {
@@ -527,7 +535,7 @@ impl GuizangClient {
     /// 实时扫描所有资产目录，内存构建 tag 反向索引（V38：替代 index.yaml）。
     /// 扫描逻辑继承原 build_index：遍历各资产层的 *.yaml（跳过 .tmp），
     /// 提取 id / tags / layer 建索引。不落盘。
-    pub async fn scan_assets(&self) -> Result<IndexData, TaijiError> {
+    async fn scan_assets(&self) -> Result<IndexData, TaijiError> {
         let mut index = IndexData::empty();
 
         for type_ in &["model", "skill", "prompt", "verification", "yang_prompt", "yin_prompt", "yin_skill_verify", "yin_skill_converge"] {
@@ -646,7 +654,7 @@ impl GuizangClient {
                     return Ok(None);
                 }
                 Err(e) => {
-                    if e.to_string().contains("failed to read asset") {
+                    if matches!(e, TaijiError::KnowledgeAssetNotFound { .. }) {
                         continue; // 尝试下一个路径
                     } else {
                         return Err(e);
@@ -949,7 +957,7 @@ impl GuizangClient {
                 Ok(None)
             }
             Err(e) => {
-                if e.to_string().contains("failed to read asset") {
+                if matches!(e, TaijiError::KnowledgeAssetNotFound { .. }) {
                     Ok(None)
                 } else {
                     Err(e)
@@ -1018,7 +1026,7 @@ impl GuizangClient {
                 Ok(None)
             }
             Err(e) => {
-                if e.to_string().contains("failed to read asset") {
+                if matches!(e, TaijiError::KnowledgeAssetNotFound { .. }) {
                     Ok(None)
                 } else {
                     Err(e)
@@ -1424,6 +1432,10 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
     /// check kind → 对偶元工具/skill id（旧格式迁移推导）。
     fn dual_for_check_kind(kind: crate::types::verification::CheckKind) -> String {
         use crate::types::verification::CheckKind;
+        // 批7 P2 决策：迁移期 kind 级近似——LlmJudgement 无法从 kind 唯一恢复 dual
+        // （mece-check/cross-consistency/granularity-check → recursive-decompose，
+        //  semantic-coherence → yin-verify），取多数派 recursive-decompose（3/4）。
+        // 语义漂移仅影响旧单文件迁移（文件夹格式已在资产层存精确 dual），已知边界。
         match kind {
             CheckKind::FileExists => "write".to_string(),
             CheckKind::SchemaValid => "read".to_string(),
@@ -1860,13 +1872,6 @@ pub struct SeedReport {
     pub pruned_skipped: usize,
 }
 
-/// V42 归藏目录 yang/yin 迁移（BCP §10.1）——幂等，可重跑：
-/// - `prompts/*.yaml` → 按 agent_target 分派：
-///   `"YangAgent"` → `yang/prompts/`，`"YinAgent"` → `yin/prompts/`
-/// - `verifications/*.yaml` → `yin/skills/verify/`（V43：verifications 概念已废弃）
-/// - `yin/verifications/*.yaml` → `yin/skills/verify/`（V43：迁移过渡目录）
-/// - models/ 不迁移（根级统一存放，无需 yang/yin 拆分）
-/// - 目标已存在同名文件 → 跳过，不覆盖
 /// V42 归藏目录 yang/yin 迁移（BCP §10.1）——幂等，可重跑。
 /// V44：改为根级处理（不再遍历模型分区——分区已合并回根）。
 /// - `prompts/*.yaml` → 按 agent_target 分派：
@@ -2355,7 +2360,7 @@ mod tests {
         let dir = test_dir("save_load_skill").await;
         let client = GuizangClient::new(&dir).await.unwrap();
 
-        let mut asset = CognitiveAsset::Skill(SkillAsset {
+        let mut asset = CognitiveAsset::Skill(LegacyToolSkillAsset {
             header: AssetHeader {
                 asset_type: "skill".into(),
                 layer: 1,
@@ -2395,7 +2400,7 @@ mod tests {
         let dir = test_dir("save_increments_version").await;
         let client = GuizangClient::new(&dir).await.unwrap();
 
-        let mut asset = CognitiveAsset::Skill(SkillAsset {
+        let mut asset = CognitiveAsset::Skill(LegacyToolSkillAsset {
             header: AssetHeader {
                 asset_type: "skill".into(),
                 layer: 1,
@@ -2443,7 +2448,7 @@ mod tests {
         client.save_asset(&mut asset).await.unwrap();
 
         // Save a skill with tag "math".
-        let mut skill = CognitiveAsset::Skill(SkillAsset {
+        let mut skill = CognitiveAsset::Skill(LegacyToolSkillAsset {
             header: AssetHeader {
                 asset_type: "skill".into(),
                 layer: 1,

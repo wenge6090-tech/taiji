@@ -577,6 +577,8 @@ summary: String::new(),
             let result = tool.execute(&args).await;
             assert!(result.is_ok(), "Skill '{}' failed: {:?}", tool.name(), result.err());
         }
+        // 批10 P2 修复：清理 write 测试写出的 target 文件（§5 临时文件清理）。
+        let _ = std::fs::remove_file("target/taiji_test_write.txt");
     }
 
     // ── V26.3 E2: input contract — plain string / JSON object string ──────

@@ -113,64 +113,6 @@ impl YangAgentBuilder {
     ///   `recursive_decompose` and `yin_verify`.
     /// - `Hooks`: [`SafetyHook`] and [`TraceHook`] for security and tracing.
     ///
-    /// # Production wiring (pinned for Rig API verification)
-    ///
-    /// ```ignore
-    /// use rig::providers::deepseek;
-    /// use rig_core::agent::AgentBuilder;
-    /// use crate::hooks::safety::SafetyHook;
-    /// use crate::hooks::trace::TraceHook;
-    /// use crate::agents::tools::recursive_decompose::RecursiveDecompose;
-    /// use crate::agents::tools::yin_verify::YinVerifyTool;
-    ///
-    /// let client = self.factory.providers.client("deepseek")?;
-    ///
-    /// let system_prompt = build_system_prompt(&self.meta_ctx);
-    ///
-    /// let mut agent = client
-    ///     .agent(&self.model)
-    ///     .preamble(&system_prompt)
-    ///     .max_turns(self.factory.config.runtime.max_rounds);
-    ///
-    /// // Register matched L1 skills as tools
-    /// for skill in &self.meta_ctx.matched_skills {
-    ///     agent = agent.tool(skill.tool_name.clone());
-    /// }
-    ///
-    /// // Register built-in tools
-    /// let task_dir = self.factory.task_dir(&self.engine_ctx.task_id);
-    /// let trace_hook = TraceHook::new(&task_dir, &self.engine_ctx, &self.model);
-    /// let safety_hook = self.factory.safety_hook.clone();
-    ///
-    /// // Wire hooks via one .hook() call — Rig 0.39 AgentBuilder::hook() is a
-    /// // SINGLE slot, so multiple hooks must be composed via YangHookSet
-    /// // (safety → trace → snapshot) instead of chaining .hook().hook().
-    /// // agent = agent.hook(YangHookSet::new(safety_hook, trace_hook, snapshot_hook));
-    ///
-    /// let agent = agent.build();
-    ///
-    /// let response = agent
-    ///     .prompt(task_description)
-    ///     .await
-    ///     .map_err(|e| TaijiError::LLMCallFailed {
-    ///         context: format!("YangAgent LLM call failed: {e}"),
-    ///     })?;
-    ///
-    /// Ok(ZhouyiResult {
-    ///     task_id: self.engine_ctx.task_id.clone(),
-    ///     content: response.as_ref().to_string(),
-    ///     tools_used: vec![],
-    ///     deliverables: vec![],
-    ///     depth: self.depth,
-    ///     rounds: 1,
-    /// })
-    /// ```
-    ///
-    /// # Current state (TODO)
-    /// The actual Rig agent construction and LLM invocation is stubbed with
-    /// [`todo!`] here.  The struct, constructor, and method signatures are
-    /// complete and correct.  The LLM wiring will be filled in once the
-    /// Rig 0.39 API surface is finalised.
     ///
     /// # Returns
     /// - `Ok(ZhouyiResult)` on successful execution.
@@ -231,10 +173,19 @@ impl YangAgentBuilder {
             .get("yang")
             .and_then(|o| o.max_tokens)
             .map(|v| v as u64);
-        #[allow(unused)]
-        let temperature = self.factory.config.llm.agent_overrides
-            .get("yang")
-            .and_then(|o| o.temperature);
+        // V51 四象温度（AGENTS.md §3）：MetaContext 覆盖 > agent_overrides > 四象默认。
+        let temperature = self
+            .meta_ctx
+            .temperature
+            .or_else(|| {
+                self.factory.config.llm.agent_overrides
+                    .get("yang")
+                    .and_then(|o| o.temperature)
+            })
+            .unwrap_or_else(|| match self.meta_ctx.mode {
+                crate::types::agent::AgentMode::Orchestration => 0.8,
+                crate::types::agent::AgentMode::Execution => 0.5,
+            });
         let mut agent_builder = client
             .agent(&self.model)
             .preamble(&system_prompt)
@@ -243,9 +194,7 @@ impl YangAgentBuilder {
         if let Some(v) = max_tokens {
             agent_builder = agent_builder.max_tokens(v);
         }
-        if let Some(v) = temperature {
-            agent_builder = agent_builder.temperature(v);
-        }
+        agent_builder = agent_builder.temperature(temperature);
 
         // ── Register hooks: single-slot composite (safety → trace → snapshot) ──
         // Rig 0.39 AgentBuilder::hook() is a SINGLE slot — each call replaces
@@ -685,8 +634,6 @@ async fn compress_history_to_handoff(
 
     // 压缩输入 = 磁盘快照（chat_history.json，ChatHistorySnapshotHook 写入）。
     // 不用内存 history：Rig chat() 在 hook Terminate 时可能不追加消息。
-    // 压缩输入 = 磁盘快照（chat_history.json，ChatHistorySnapshotHook 写入）。
-    // 不用内存 history：Rig chat() 在 hook Terminate 时可能不追加消息。
     let history: Vec<Message> =
         crate::infra::trace::load_json_optional(&task_dir.join("chat_history.json"))
             .ok()
@@ -978,6 +925,8 @@ summary: String::new(),
             yang_system_prompt: None,
             verify_system_prompt: None,
             converge_system_prompt: None,
+            temperature: None,
+            task_type_tags: vec![],
         }
     }
 

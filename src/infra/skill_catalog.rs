@@ -96,6 +96,7 @@ mod tests {
     async fn test_load_skill_catalog_meta_only_when_empty() {
         // 空知识库：元层保底，verify 类别应含全部 6 个元判据。
         let dir = tempfile_dir();
+        let _g = TmpGuard(dir.clone());
         let guizang = crate::infra::knowledge::GuizangClient::new(&dir).await.expect("guizang init");
         let cat = load_skill_catalog(&guizang, SkillCategory::Verify, ToolProfile::Full)
             .await
@@ -113,6 +114,7 @@ mod tests {
     #[tokio::test]
     async fn test_load_skill_catalog_minimal_keeps_recursive_decompose() {
         let dir = tempfile_dir();
+        let _g = TmpGuard(dir.clone());
         let guizang = crate::infra::knowledge::GuizangClient::new(&dir).await.expect("guizang init");
         let orch = load_skill_catalog(&guizang, SkillCategory::Orch, ToolProfile::Minimal)
             .await
