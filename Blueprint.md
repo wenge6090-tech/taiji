@@ -15,7 +15,7 @@
 
 > **核心动态**：周易（泛化执行）→ 连山（非线性流形压缩）→ 归藏（符号固化）三位一体的同构循环。归藏资产树与周易递归任务树异层同构——fork=decompose、merge=converge、prune=FAIL 终止、backprop=子→父统计上浮。
 >
-> **架构定论（不可推翻）**：① 概率系统不能验证概率系统——收敛验证符号化；② 归藏不是 RAG 知识库——是压缩固化后的可复用符号系统；③ 激励问题不需要 ground truth——断言证据链机械可判定；④ 权重微调是模型厂家的事；⑤ 一个模型 + 它的约束系统 = 一个领域学习单元——统计层独立演化（资产树共享，V44）。
+> **架构定论（不可推翻）**：① 概率系统不能验证概率系统——收敛验证符号化；② 归藏不是 RAG 知识库——是压缩固化后的可复用符号系统；③ 激励问题不需要 ground truth——断言证据链机械可判定；④ 权重微调是模型厂家的事；⑤ 一个模型 + 它的约束系统 = 一个领域学习单元——统计层独立演化（资产树共享，V44）；⑥ 资产层执行体统一 Python、Rust 骨架守住 invariant——Python 是编译管道可行的必要条件，Rust 种子层是 bootstrap 安全网（V52）。
 >
 > **术语**：全文统一采用周易 (Zhouyi) / 连山 (Lianshan) / 归藏 (Guizang) 易经体系命名。代码标识符随 V45 全面改名：`ZhouyiCycle`、`lianshan.rs`、`YangAgent`/`YinAgent`、`GuizangClient`。
 
@@ -513,7 +513,7 @@ classDiagram
     }
 
     class SkillImpl {
-        %% 机械可执行体（阳 = builtin 引用；阴 = 机械判据）
+        %% 机械可执行体（Builtin = Rust 种子层引用；Python = 资产层脚本；阴 = 机械判据）
         +kind: SkillKind
         +target: String
         +params: Value
@@ -523,19 +523,10 @@ classDiagram
 
     class SkillKind {
         <<enum>>
-        %% TraceConsistency（断言引用完整性）+ V45 阳 kind
-        FileExists
-        SchemaValid
-        ReferenceResolves
-        CommandSucceeds
-        LlmJudgement
-        TraceConsistency  %% [证据: 工具名] 引用 → trace 工具调用存在性
-        Bash
-        Write
-        Read
-        Search
-        Webfetch
-        RecursiveDecompose
+        %% V52 资产层统一 Python：12 种坍缩为 2 + 1
+        Builtin  %% Rust 种子层（read/write/bash/search/webfetch + 验证 builtin），bootstrap 安全网
+        Python  %% 资产层统一执行体（fork 变体/编译产出/主动学习实验体）
+        LlmJudgement  %% 唯一允许 LLM 的 kind（§1.3 例外项）
     }
 
     class SkillResult {
@@ -1213,7 +1204,9 @@ fn compose_context(
 
 拓扑数据源 = 任务目录树（`data/tasks/{root}/` + `children/<idx>/`），**不碰 `trace.jsonl`**——trace 是「干了什么」的动作日志，归统计压缩（度量轨）；`deliverables/` + `handoff.md` 是「要干什么/产出什么」的事实，归拓扑（结构轨）。两条轨都纯符号、零 LLM。Lianshan 经 pending 负载新增 `task_dir` 字段获得任务树入口（`enqueue_lianshan_pending` 加 `task_dir: &Path` 参数）。
 
-**编译任务契约**：连山拓扑产出后入队 `compile/{root_task}.json`（与 `enqueue_exploration_task` 同构），payload 引用 `manifold/{root_task}.yaml`。编译任务走既有 `execute` 入口（Execution 模式），「标准 skill 编写规范」元层模板教 LLM 按 `SkillAsset` 契约产出：程序 `implementations` + 说明书 `summary/description/detail` + `dual` 对偶；阴验证 = SkillEngine 机械判据 + 原任务变体复跑（复现成功才 `save_skill`）。
+**编译任务契约**：连山拓扑产出后入队 `compile/{root_task}.json`（与 `enqueue_exploration_task` 同构），payload 引用 `manifold/{root_task}.yaml`。编译任务走既有 `execute` 入口（Execution 模式），「标准 skill 编写规范」元层模板教 LLM 按 `SkillAsset` 契约产出：程序 `implementations`（**执行体 = Python 脚本**）+ 说明书 `summary/description/detail` + `dual` 对偶；阴验证 = SkillEngine 机械判据 + 原任务变体复跑（复现成功才 `save_skill`）。
+
+> **V52 定论（资产层统一 Python = 编译管道可行的必要条件）**：若 skill 执行体是 Rust，阳 LLM 生成 Rust 代码 → 需 cargo build → 需集成进运行时 → 阴复跑，一个 fork 变体走完编译-链接-加载循环耗时分钟级，连山四算子（fork/merge/prune）不具实际可操作性；执行体统一为 Python 后，阳 LLM 生成 `.py` 脚本 → SkillEngine 子进程执行 → 阴机械验证 → save YAML，一个变体的 fork→test→save 在**秒级**完成。因果链：**Python 是编译管道可行的必要条件 → 编译管道是「泛化-压缩-固化」循环闭环的必要条件 → 循环闭环是 taiji 存在的意义**。Rust 守住 invariant（内核），Python 释放演化速度（用户态）。
 
 > **V50 调度定稿**：compile/ 队列由连山单写者管理（与 pending/ 分离），触发条件 = pending 空 + 预算允许（与主动学习共用空闲窗口逻辑）；编译任务独立 token 预算配额（`runtime.lianshan.compile_budget`），**不写入 model_stats**（只产 skill YAML，不污染路由统计）；编译失败不产 skill，写 compile/ 失败日志（记录 manifold 引用 + 错误），重试上限 3 次。
 
@@ -1675,7 +1668,7 @@ classDiagram
 | 层次 | 目录 | 语义 | 内容 | 消费方 |
 |------|------|------|------|------|
 | **系统宪法** | `yang/prompts/` + `yin/prompts/` | 保证系统运行的地基 | 环境信息、安全约束、激励策略（种子文本起步） | 元 (Meta) 检索 → YangAgent/YinAgent system prompt |
-| **智能函数库** | `yang/skills/` + `yin/skills/` | 智能的封装单元（智能程序） | 涌现文本（渐进式披露）+ 程序（builtin 执行体），orch/exec/verify/converge 四类 | SkillRegistry → Rig Tool 注册 + SkillEngine 机械执行 |
+| **智能函数库** | `yang/skills/` + `yin/skills/` | 智能的封装单元（智能程序） | 涌现文本（渐进式披露）+ 程序（Python 执行体，Rust builtin 为 bootstrap 原语），orch/exec/verify/converge 四类 | SkillRegistry → Rig Tool 注册 + SkillEngine 机械执行 |
 | **统计学** | `models/` + `model_stats.yaml` | 能力边界（被测试出来的） | 贝叶斯后验（α/β）+ 四维 stats + 模型路由表 | 元 (Meta) UCB bandit / 连山演化决策 |
 
 **git 版本控制（库的生命线）**：归藏目录 = 一个 git 仓库。连山每次压缩 = 一次 commit（可审计/可 diff/可回滚）；fork = 分支、merge = 合并、prune = 删除（历史保留）。当前实现是「version u32 递增 + atomic rename 覆盖」（无历史），git 化是归藏作为库的待补根基。
@@ -1744,7 +1737,38 @@ manifold/ → 作为上下文注入周易任务 → 阳拆解→阴验证→元�
 
 **归藏单一资产树（阴阳嵌套树，V45 双轨）**：与周易任务树同构——yang=生成/执行/分叉（decompose），yin=验证/裁决/收敛（converge）。Skills 嵌套在 yang/ 与 yin/ 之下，类别由阴阳归属 + 子目录共同定义。**每 Skill 一个文件夹**（演化单元，可携带教学附件），入口文件统一 `skill.yaml`：
 
-**双轨原则（V45）**：阳阴元工具/元 skill 全部硬编码于 Rust 元层注册表（保证基础运行，零资产依赖——知识库空/损坏时基础 Zhouyi 闭环照常）；资产层是可演化覆盖层——同 id 资产优先于元层（教学字段可覆盖，执行体恒为 Rust builtin），连山 fork 产出新文件夹变体。
+**双轨原则（V45 修正，V52 资产层统一 Python）**：阳阴元工具/元 skill 全部硬编码于 Rust 元层注册表（保证基础运行，零资产依赖——知识库空/损坏时基础 Zhouyi 闭环照常）。资产层是可演化覆盖层——同 id 资产优先于元层。**元层 5 个 L1 种子 Skill（read/write/bash/search/webfetch）+ 验证 builtin（FileExists/SchemaValid/ReferenceResolves/CommandSucceeds/TraceConsistency）执行体为 Rust builtin，作为 bootstrap 安全网（知识库空/损坏时基础 Zhouyi 闭环照常）；资产层所有可演化 Skill 执行体统一为 Python——包括 fork 变体、编译产出、主动学习实验体。**连山 fork 产出新文件夹变体（入口 `skill.py`）。
+
+**修正后的分层模型（Rust 内核 / Python 用户态）**：Rust 是内核（kernel + syscall）——递归执行、Agent 工厂、SkillEngine、归藏 I/O、连山压缩全部是编译期 invariant，不可演化；Python 是用户态（user space）——所有可演化 skill（fork 变体 / 编译产出 / 主动学习实验体）统一为 Python 脚本，经 SkillEngine 子进程执行，脚本内部可 `subprocess.run(["taiji", "builtin", "<name>", ...])` 调 Rust 种子层原语（用户态程序调 syscall）。内核不变，用户态可任意演化——操作系统经典分层。
+
+```text
+┌─────────────────────────────────────────────┐
+│  Rust 骨架（不可演化，编译期 invariant）        │
+│  RecursiveRunner / AgentFactory / Meta       │
+│  YangAgent / YinAgent / SkillEngine          │
+│  GuizangClient / Lianshan / UcbRanker        │
+│  ┌──────────────────────────────────────┐    │
+│  │  Rust 种子层（bootstrap，零资产依赖）   │    │
+│  │  read / write / bash / search / webfetch │ │
+│  │  FileExists / SchemaValid / ReferenceResolves │
+│  │  CommandSucceeds / TraceConsistency   │    │
+│  └──────────────────────────────────────┘    │
+├─────────────────────────────────────────────┤
+│  Python 资产层（可演化，连山四算子操作对象）      │
+│  fork 变体 / 编译产出 / 主动学习实验体           │
+│  ┌──────────┐ ┌──────────┐ ┌──────────┐    │
+│  │orch/     │ │exec/     │ │verify/   │    │
+│  │.py skills│ │.py skills│ │.py skills│    │
+│  └──────────┘ └──────────┘ └──────────┘    │
+│  ┌──────────┐                               │
+│  │converge/ │                               │
+│  │.py skills│                               │
+│  └──────────┘                               │
+├─────────────────────────────────────────────┤
+│  归藏统计层（YAML，符号持久化）                 │
+│  models/ α/β · model_stats.yaml · manifold/ │
+└─────────────────────────────────────────────┘
+```
 
 ```mermaid
 flowchart TD
