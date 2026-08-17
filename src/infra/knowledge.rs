@@ -255,9 +255,8 @@ impl GuizangClient {
             self.data_dir.join("yang/prompts"),           // 阳轨 YangAgent 提示词
             self.data_dir.join("yang/skills/orch"),       // 阳轨编排 Skill
             self.data_dir.join("yang/skills/exec"),       // 阳轨执行 Skill
-            self.data_dir.join("yin/prompts"),            // 阴轨 YinAgent 提示词
-            self.data_dir.join("yin/skills/verify"),      // 阴轨验证 Skill（Blueprint §6.1）
-            self.data_dir.join("yin/skills/converge"),    // 阴轨收敛 Skill（Blueprint §6.1）
+            // V61（A 定论）：阴/元 = 归藏因果世界模型的消费者，不持有晶体资产——
+            // 不再创建 yin/prompts 与 yin/skills 目录（Blueprint §6.0 V57 落定）。
         ];
         for dir in &dirs {
             fs::create_dir_all(dir).await.map_err(|e| {
@@ -1230,7 +1229,7 @@ impl GuizangClient {
 /// V43：扫描 yang/prompts/ + yin/prompts/ + prompts/（旧兼容）。
 pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
     let mut prompts = Vec::new();
-    for dir_name in ["yang/prompts", "yin/prompts", "prompts"] {
+    for dir_name in ["yang/prompts", "prompts"] {
         let dir = self.data_dir.join(dir_name);
         if !dir.exists() {
             continue;
@@ -2398,9 +2397,11 @@ mod tests {
         assert!(dir.join("yang/prompts").exists());
         assert!(dir.join("yang/skills/orch").exists());
         assert!(dir.join("yang/skills/exec").exists());
-        assert!(dir.join("yin/prompts").exists());
-        assert!(dir.join("yin/skills/verify").exists());
-        assert!(dir.join("yin/skills/converge").exists());
+        // V61（A 定论）：阴/元 = 归藏因果世界模型的消费者，不持有晶体资产——
+        // 不再创建 yin/prompts 与 yin/skills 目录。
+        assert!(!dir.join("yin/prompts").exists());
+        assert!(!dir.join("yin/skills/verify").exists());
+        assert!(!dir.join("yin/skills/converge").exists());
         // 不再创建分区目录（V44 去分区化）
         assert!(!dir.join("deepseek-deepseek-chat").exists());
         assert!(!dir.join("verifications").exists());

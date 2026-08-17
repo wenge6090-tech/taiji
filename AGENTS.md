@@ -274,10 +274,9 @@
 
 - **实测 bug**：编译任务 LLM 按「来源任务类型」（写脚本 → exec）给 skill 分类，把「检查文件是否存在」这类**判据**（输出 passed 布尔、机械判定是否满足）误标 `category: exec` + `agent_target: YangAgent` 落到阳面，且 dual 选了同侧同类（file-exists，verify 侧）——非互补。save_skill 的 dual 互补校验拦不住（exec↔verify 表面互补），只靠 LLM 自觉。
 - **模板教学**（`compile.rs` 两处模板 `compile_task_description` + `compile_recompile_description` 的「skill 分类规则」段）：按**功能本质**分类——判据类（输入目标/引用/内容，输出 passed 布尔）→ `verify` + `YinAgent` + dual 从 exec 侧选（write/read/bash/search/webfetch）；执行类（主动操作）→ `exec` + `YangAgent` + dual 从 verify 侧选；拆解 → orch；收敛 → converge。反例教学：检查文件存在的脚本 = 判据 → verify，不是 exec。
-- **机械护栏**（`compile.rs::enforce_judgment_category`，runner 在 extract_skill 后调用）：description 命中强判据词（判定/验证/存在性/当且仅当/合法性/一致性）**且** pass_condition 含 passed 布尔判定 → 强制 `category=verify` + `agent_target=YinAgent`；dual 若仍同侧（verify）→ 取其对偶 exec skill（如 file-exists.dual = write）。改动用 warn 审计。保守性：只取强判据词，弱词（检查/判断）不取防误伤动作类；已 verify 或动作类不动。
+- **机械护栏**（`compile.rs::enforce_judgment_category`，runner 在 extract_skill 后调用）：description 命中强判据词（判定/验证/存在性/当且仅当/合法性/一致性）**且** pass_condition 含 passed 布尔判定 → 强制 `category=verify` + `agent_target=YinAgent`；dual 若仍同侧（verify）→ 取其对偶 exec skill（如 file-exists.dual = write）。改动用 warn 审计。保守性：只取强判据词，弱词（检查/判断）不取防误伤动作类；已 verify 或动作类不动。**V61 起归阴后进弃置闸**（`discard_yin_category`：verify/converge 产出不落盘，直接删 compile 文件）——判据类不再产出 skill，复用内置原子判据（constraint_engine 硬编码）。
 - **已落库错误资产修正方式**：直接改 yaml（category/agent_target/dual）+ `mv` 目录（yang/skills/exec → yin/skills/verify）；`.history` 旧快照保留作审计，下次任何 save_* 全量快照自然包含修正。
 - **测试基线**：`cargo test --lib` → **370 passed, 0 failed**（+3：判据类强制归阴 / 动作类不动 / 已 verify 不动）。
-
 ## 28. serde(default) 结构体级 vs 字段级（V55：LianshanConfig 默认值全部退化为 0 的 bug）
 
 - **规则**：Rust serde 的 `#[serde(default)]` 在**结构体级**（struct 上方）= 缺失字段取**容器类型 Default::default() 的对应值**；在**字段级** = 缺失字段取**字段类型 Default**（u64/usize/f64/bool → 0/false/0.0）。需要语义默认值的配置结构必须用**结构体级**（与 LlmConfig/ContextLimits/ModelRoutingConfig 同模式）。
@@ -335,3 +334,15 @@
 - **front matter 解析宽容**：手写 handoff 无 `---` 围栏时全文直解报 serde_yaml「multiple documents」误导性错误（§26 死循环的另一形态）→ `extract_first_yaml_block` 先截首个文档分隔符前。
 - **真实闭环基线**：`taiji run` 最小任务（write 产出）实测 Pass/confidence 1.0——4 判据（file-exists/schema-valid/reference-resolves-skip/trace-consistency-write 证据可验）+ LLM 兑底全过；pending 入队 + V59 实时录入（4 prompt usage_count +1）。
 - **测试基线**：`cargo test --lib` → **363 passed, 0 failed, 4 ignored**（+3：write 白名单回归 / output_refs 缺失跳过 / output_refs 严格验证保持）。
+
+## 31. 阴/元去资产化（V61，A 定论落地）
+
+- **定论**（Blueprint §6.0 V57 已有，V61 实现落地）：阴（YinJudge）与元（MetaAgent）已变为**归藏因果世界模型的消费者**——阴消费 ontology 因果（truths/relations/rules）做符号层对碰 + LLM 兑底（硬编码 `VERIFY_FALLBACK`/`CONVERGE_FALLBACK`），元消费语义层先验 + UCB 路由。**不再持有晶体资产**（prompts/skills）。
+- **数据**：`.taiji/knowledge/yin/` 全删（2 prompts + 6 verify + 3 converge 文件夹 + 编译产物 check-file-exists/review-deliverables-verify + 旧扁平 yaml，共 19 tracked + untracked）。元层 `meta_skills`（Rust 硬编码 8 builtin）**保留**——作 catalog 对偶候选表/接线结构，非判据执行源（判据执行 = `check_atomics` 硬编码，Blueprint 902/966）。
+- **代码**：
+  - `ensure_dirs` 不再创建 yin/prompts + yin/skills/{verify,converge}
+  - `load_all_prompts` 只扫 `["yang/prompts", "prompts"]`（不再扫 yin/prompts）
+  - **compile 弃置闸** `compile.rs::discard_yin_category`：verify/converge 类别产物不落盘（删 compile 文件，成功消费不重试）——内置原子判据 + 语义裁决已覆盖，落盘即死资产。`enforce_judgment_category`（§27）保留：判据误标 exec → 归 verify → 进弃置闸
+  - compile 模板（`compile_task_description` / `compile_recompile_description` 分类规则段）：判据类/收敛类 → **不产出 skill**（复用内置原子判据/语义裁决），只产阳面 exec/orch；反例教学同步
+- **保留**（V57 定论，无数据时空转无害）：`fork_variants`/`bayesian_update`/`save_verification` 写路径（VerificationAsset 演化代码留痕）、`type_dir_name` 的 yin 分支（旧库读取兼容）、`load_all_verifications` 连山加载桥（读旧 verify 兼容）。
+- **测试基线**：`cargo test --lib` → **364 passed, 0 failed, 4 ignored**（+1 弃置闸：verify/converge 弃置 / exec/orch 放行；ensure_dirs 断言改反向）。

@@ -237,6 +237,20 @@ async fn run_compile_queue(
                         // V55 判据类强制归阴（机械护栏）：编译 LLM 易按来源任务分类，
                         // 把「检查/判定」类误标 exec（实测 check-file-exists）。
                         enforce_judgment_category(&mut skill);
+                        // V61（A 定论）：阴/元 = 归藏因果世界模型的消费者，不持有晶体
+                        // 资产（Blueprint §6.0 V57 落定）。判据/收敛类 skill 产物弃置——
+                        // 内置原子判据 + 语义裁决已覆盖，落盘即死资产（无消费者）。
+                        // 弃置 = 成功消费（删 compile 文件不重试：同类产出不会变化）。
+                        if let Some(cat) = discard_yin_category(&skill) {
+                            tracing::warn!(
+                                skill_id = %skill.id,
+                                category = ?cat,
+                                root_task = %root_task,
+                                "[compile] 阴面类别 skill 弃置（V61 定论：阴不持有晶体资产）"
+                            );
+                            let _ = tokio::fs::remove_file(&path).await;
+                            continue;
+                        }
                         // V52：提取 Python 脚本（声明 python implementation 则必须有脚本）。
                         let has_python = skill.implementations.iter().any(|i| {
                             i.kind == crate::types::verification::SkillKind::Python
@@ -530,6 +544,20 @@ fn enforce_judgment_category(skill: &mut SkillAsset) -> bool {
     true
 }
 
+/// V61 弃置闸（A 定论）：阴/元 = 归藏因果世界模型的消费者，不持有晶体资产
+/// （Blueprint §6.0 V57 落定）。判据/收敛类 skill 产物弃置——内置原子判据
+/// （file-exists/schema-valid/reference-resolves/trace-consistency，约束引擎 Rust
+/// 内置）+ 语义裁决已覆盖，落盘即死资产（无消费者）。返回被弃置的类别。
+fn discard_yin_category(skill: &SkillAsset) -> Option<crate::types::verification::SkillCategory> {
+    use crate::types::verification::SkillCategory;
+    let cat = skill.effective_category()?;
+    if matches!(cat, SkillCategory::Verify | SkillCategory::Converge) {
+        Some(cat)
+    } else {
+        None
+    }
+}
+
 /// 提取 ``` 围栏内容（跳过语言标签行），无围栏返回原文 trim。
 fn strip_fences(raw: &str) -> String {
     let raw = raw.trim();
@@ -642,15 +670,17 @@ status: active
 
 编译 skill 的 category 由**它自己的功能本质**决定，**不是**由编译任务/主任务的类型决定。
 
-- **判据类**：输入「目标/引用/内容」，输出「passed 布尔 + detail」，机械判定是否满足
-  （文件存在、格式合法、引用可解析、内容一致）→ `category: verify`，`agent_target: YinAgent`，dual 从 exec 侧选（write/read/bash/search/webfetch）
 - **执行类**：主动操作（写文件、跑命令、搜索、抓取、生成内容）→ `category: exec`，`agent_target: YangAgent`，dual 从 verify 侧选（file-exists/schema-valid/reference-resolves/command-succeeds/trace-consistency）
-- **拆解类** → `category: orch`；**收敛类** → `category: converge`
+- **拆解类** → `category: orch`
+- **判据类**：输入「目标/引用/内容」，输出「passed 布尔 + detail」，机械判定是否满足
+  （文件存在、格式合法、引用可解析、内容一致）→ **不产出 skill**：内置原子判据
+  （file-exists/schema-valid/reference-resolves/trace-consistency）已由约束引擎 Rust 内置覆盖，
+  产出判据类 skill 会被系统弃置。判据类编译任务的产出 = 在 handoff.md 说明「复用内置判据」即可。
+- **收敛类** → 同样**不产出**（归藏语义裁决覆盖，阴不持资产）。
 
-**反例（已实测踩坑）**：「检查文件是否存在的脚本」功能本质是**判据**（输出 passed 布尔判定文件存在性），
-必须 `category: verify` + `agent_target: YinAgent` + dual 选 exec 侧（如 write）——
-**不是** exec！不要因为它由「写脚本的任务」编译而来就归 exec，也不要因为名字含
-file/exists 就把 dual 也选成 verify 侧的 file-exists（dual 必须是**对侧互补**，不是同侧同类）。
+**反例（已实测踩坑）**：「检查文件是否存在的脚本」功能本质是**判据**——不要把它编译成
+skill（会被系统弃置）：它不该是 exec（会被 YangAgent 当执行工具误用），也不是 verify
+（阴不持有晶体资产，V61 定论）。判据需求一律引用内置原子判据。
 
 ## 类别-对偶互补（硬约束）
 
@@ -735,16 +765,17 @@ write 工具**；**禁止**用 bash 执行 `cp` / `mkdir` / `echo >` 写到绝�
 - `id` 必须 = `{variant_id}`（不要用原 id）
 - `dual` 必须 = `{dual}`（继承原根）
 - `parent_id` 填 `{parent}`（溯源）
-- `category` 继承原根类别（若原根是判据类但类别误标 exec，应修正为 verify——按功能本质分类，规则见下）
-- `agent_target` 与 category 一致：verify/converge → YinAgent；orch/exec → YangAgent
+- `category` 继承原根类别（重编译对象恒为阳面 exec/orch Python skill——阴面判据/收敛已在编译时弃置，见分类规则）
+- `agent_target` 与 category 一致：exec → YangAgent；orch → YangAgent
 
 ### skill 分类规则（按功能本质，不是按来源任务）
 
-- **判据类**（输入目标，输出 passed 布尔，机械判定是否满足：文件存在/格式合法/引用可解析/内容一致）→ `category: verify` + `agent_target: YinAgent`
 - **执行类**（主动操作：写文件/跑命令/搜索/抓取/生成内容）→ `category: exec` + `agent_target: YangAgent`
-- **拆解类** → orch；**收敛类** → converge
-- dual 必须与 category **类别互补**（verify↔exec、orch↔converge），不能同侧同类别
-- 反例：「检查文件是否存在的脚本」是判据 → verify + YinAgent + dual 选 exec 侧（如 write），不是 exec
+- **拆解类** → orch
+- **判据类**（输入目标，输出 passed 布尔，机械判定是否满足：文件存在/格式合法/引用可解析/内容一致）→ **不产出 skill**（内置原子判据已由约束引擎覆盖，产出即弃置，V61 定论）
+- **收敛类** → 同样不产出（归藏语义裁决覆盖）
+- dual 必须与 category **类别互补**（exec↔verify、orch↔converge），不能同侧同类别
+- 反例：「检查文件是否存在」是判据——不要编译成 skill，引用内置 file-exists 原子判据
 - `implementations` 的 kind 用 `python`，target = skill.py
 
 ### skill.py 脚本契约
@@ -964,6 +995,32 @@ status: active
         );
         assert!(!enforce_judgment_category(&mut skill));
         assert_eq!(skill.effective_category(), Some(SkillCategory::Verify));
+    }
+
+    /// V61 弃置闸（A 定论）：verify/converge 类别 → 弃置；exec/orch → 放行。
+    #[test]
+    fn discard_yin_category_disposes_verify_and_converge() {
+        use crate::types::verification::SkillCategory;
+        for cat in [SkillCategory::Verify, SkillCategory::Converge] {
+            let skill = mk_skill(
+                &format!("yin-{cat:?}"),
+                cat,
+                "判据类描述",
+                "passed 布尔判定",
+                "write",
+            );
+            assert_eq!(discard_yin_category(&skill), Some(cat));
+        }
+        for cat in [SkillCategory::Exec, SkillCategory::Orch] {
+            let skill = mk_skill(
+                &format!("yang-{cat:?}"),
+                cat,
+                "执行类描述",
+                "写入文件",
+                "file-exists",
+            );
+            assert_eq!(discard_yin_category(&skill), None, "阳面 {cat:?} 应放行");
+        }
     }
 
     #[tokio::test]
