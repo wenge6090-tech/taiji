@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::types::verification::CheckStats;
 
-/// 资产引用（V35/MVP-6：Lianshan 回传依据——编排所选资产列表，§8.21 数据流断点修复）。
+/// 资产引用（V35/MVP-6：Lianshan 回传依据——编排所选资产列表，§5.3 数据流断点修复）。
 /// `partition`（模型分区 model_key）后置：分区激活时扩展，serde default 兼容。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetRef {
@@ -47,7 +47,7 @@ impl std::fmt::Display for ModelKey {
     }
 }
 
-/// V36：模型级 MCTS 统计行（BCP §6.4 元权重表，`model_key → StatsRow`）。
+/// V36：模型级 MCTS 统计行（Blueprint §5.3 元权重表，`model_key → StatsRow`）。
 /// serde default 零迁移：缺失字段按 0 处理。Lianshan 回传更新（n++ 等），
 /// ModelRouter 读取（§8.8 第 1 步）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -112,7 +112,7 @@ impl ModelStatsRow {
 /// **Orchestration** or **Execution** mode (V27 阴阳配对模式恢复).
 ///
 /// Decided by the MetaAgent's weight update based on recursion depth rules
-/// and task difficulty (BCP §8.8):
+/// and task difficulty (Blueprint §4.3):
 ///
 /// | 配对 | 阳 Agent | 阴 Agent |
 /// |------|----------|----------|
@@ -139,7 +139,7 @@ impl Default for AgentMode {
     }
 }
 
-/// 元 (Meta) 的产出——半 LLM 半符号认知节点的两个出口（BCP §8.8 V46）。
+/// 元 (Meta) 的产出——半 LLM 半符号认知节点的两个出口（Blueprint §4.3 V46）。
 ///
 /// - `Context`：行动类任务（产出改变世界状态）→ 完整三相循环（阳→阴→路由）。
 /// - `Answer`：应答类任务（产出不改变世界，如查询/问答/讨论）→ 短路，跳过阳阴
@@ -184,19 +184,19 @@ pub struct MetaContext {
     pub degraded: Option<String>,
 
     /// V35/MVP-6：本次编排选用的资产引用列表（prompts + verifications，
-    /// UCB 序消费）——Lianshan 回传依据（§8.21 数据流断点修复）。
+    /// UCB 序消费）——Lianshan 回传依据（§5.3 数据流断点修复）。
     /// serde default：旧 meta_ctx.json 零迁移；空 = 未接线（checks-only 路径）。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub assets_used: Vec<AssetRef>,
 
-    /// V36：元权重模型路由结果（BCP §8.8 第 1 步，纯符号层先于分区检索）。
+    /// V36：元权重模型路由结果（Blueprint §4.3 第 1 步，纯符号层先于分区检索）。
     /// 唯一分区载体——Yang/Yin 按此模型执行 + 按此分区加载资产（§8.3
     /// 分区一致性）；None = 路由异常/未接线 → 配置默认。serde default：旧
     /// meta_ctx.json 零迁移。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<ModelKey>,
 
-    /// V37：验证相位（Yin）专用模型——异源裁判（BCP §8.8 相位级）。
+    /// V37：验证相位（Yin）专用模型——异源裁判（Blueprint §4.3 相位级）。
     /// Some = YinAgent verify/converge 用此模型（及对应分区加载契约）执行，
     /// 与执行模型（`model`）异源——裁判 ≠ 运动员（§1.3 self-preference 偏置
     /// 的对抗）；None = 继承 `model`（主模型）。serde default：旧 meta_ctx.json
@@ -229,6 +229,12 @@ pub struct MetaContext {
     /// serde default：旧 meta_ctx.json 零迁移。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub task_type_tags: Vec<String>,
+
+    /// V57 实体链接透传：Meta compose 产出的 ontology 实体（`TaskOntologyView.objects`）——
+    /// 阴判断节点 relations 因果对碰的数据源（零新增 LLM，复用 compose 实体链接）。
+    /// serde default：旧 meta_ctx.json 零迁移；空 = 无实体（阴跳过 relations 对碰）。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ontology_objects: Vec<String>,
 }
 
 impl MetaContext {
@@ -257,6 +263,7 @@ impl MetaContext {
             converge_system_prompt: None,
             temperature: None,
             task_type_tags: vec![],
+            ontology_objects: vec![],
         }
     }
 }
@@ -268,7 +275,7 @@ pub struct SkillRef {
     pub name: String,
     pub tool_name: String,
     pub match_weight: f64,
-    /// 层 0：一句话摘要（披露进 tool 列表，BCP §10.2 渐进披露；空 = 回退 id—name）。
+    /// 层 0：一句话摘要（披露进 tool 列表，Blueprint §6.0 渐进披露；空 = 回退 id—name）。
     #[serde(default)]
     pub summary: String,
 }
@@ -285,7 +292,7 @@ pub struct YangPrompt {
     pub parent_deliverables: Vec<String>,
     /// V30 会盟：sibling 贡品索引——同级子任务（兄弟）deliverables/ 的绝对路径
     /// 清单，由 `recursive_decompose` 分封时注入（BTreeMap 有序扫描，排除自身，
-    /// spawn 时点快照）。贡品跨兄弟公开可发现可读（§8.20）；中间记忆仍隔离。
+    /// spawn 时点快照）。贡品跨兄弟公开可发现可读（§1.5）；中间记忆仍隔离。
     #[serde(default)]
     pub sibling_deliverables: Vec<String>,
 }
@@ -393,11 +400,11 @@ pub struct PromptAsset {
     #[serde(default)]
     pub success_rate: f64,
 
-    /// V35/MVP-6 任务级 MCTS 统计（BCP §6.2 契约补齐——与 verifications 共用
+    /// V35/MVP-6 任务级 MCTS 统计（Blueprint §5.2 契约补齐——与 verifications 共用
     /// CheckStats 四维；backprop_prompts 写入，UCB 检索 n 数据源）。
     #[serde(default)]
     pub stats: CheckStats,
-    /// 同源变体组 id（fork 树分组，MCTS 演化用——四算子对称，§8.21 V35）。
+    /// 同源变体组 id（fork 树分组，MCTS 演化用——四算子对称，§5.3 V35）。
     #[serde(default)]
     pub variant_of: Option<String>,
     /// fork 来源（None = 根资产）。
@@ -460,7 +467,7 @@ impl PromptAsset {
     }
 }
 
-/// 阴轨验证契约资产（V33 归藏本体论重构 — §6.0/§8.22）。
+/// 阴轨验证契约资产（V33 归藏本体论重构 — §5.0/AGENTS.md）。
 ///
 /// `content` 为契约语义描述（人读），`checks` 为结构化检查项（机器执行）。
 /// 平铺字段风格对齐 [`PromptAsset`]（`asset_type` 经 `CognitiveAsset` tag 传达，
@@ -504,11 +511,11 @@ pub struct VerificationAsset {
     /// `"active"` 参与加载/回传；`"pruned"` 被 δ-prune 淘汰（不再加载/回传，保留审计）。
     #[serde(default = "VerificationAsset::default_status")]
     pub status: String,
-    /// MCTS fork 树链接（§8.21）：指向被 fork 的源资产 id（根资产为 None）。
+    /// MCTS fork 树链接（§5.3）：指向被 fork 的源资产 id（根资产为 None）。
     /// 变体与源资产构成演化组，组内统计对比驱动 merge/prune。
     #[serde(default)]
     pub variant_of: Option<String>,
-    /// 环境维度（V50 §6.3.1）：空 = 环境无关；模型类（flash/strong）隔离变体。
+    /// 环境维度（V50 §5.4）：空 = 环境无关；模型类（flash/strong）隔离变体。
     #[serde(default)]
     pub env_tags: Vec<String>,
     /// V50 危险隔离：只有 true 的资产允许进入主动学习探索候选（默认 false）。

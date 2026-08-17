@@ -64,13 +64,13 @@ struct MetaComposeResult {
     /// V46 短路：应答类任务（产出不改变世界）直接回答；非空即短路（跳过阳阴）。
     #[serde(default)]
     pub answer: Option<String>,
-    /// V50 §6.6 实体链接输出：任务语义视图（domain/action/objects/env）。
+    /// V50 §5.7 实体链接输出：任务语义视图（domain/action/objects/env）。
     /// None = 未识别（回退纯 UCB，状态分支非错误）。
     #[serde(default)]
     pub ontology: Option<TaskOntologyView>,
 }
 
-/// V50 §6.6 类型级软查询（纯符号，零 LLM）：任务 objects 命中 relations 的
+/// V50 §5.7 类型级软查询（纯符号，零 LLM）：任务 objects 命中 relations 的
 /// type→type 边 → 注入对侧类型的资产（硬依赖候选，进候选池仍走 UCB）。
 /// MVP-1：资产只含 prompt（`asset_type_map` 现只映射 prompts）。
 fn ontology_expand(
@@ -101,7 +101,7 @@ fn ontology_expand(
     refs
 }
 
-/// V50 §6.6 约束校验（纯符号）：返回匹配任务语义视图的规则（阴 checklist 硬约束）。
+/// V50 §5.7 约束校验（纯符号）：返回匹配任务语义视图的规则（阴 checklist 硬约束）。
 fn ontology_validate(view: &TaskOntologyView, rules: &[OntologyRule]) -> Vec<OntologyRule> {
     rules.iter().filter(|r| rule_matches(r, view)).cloned().collect()
 }
@@ -128,8 +128,8 @@ fn rule_matches(r: &OntologyRule, view: &TaskOntologyView) -> bool {
     dom && env && act
 }
 
-/// V50 §6.6 本体消费（零 LLM）：expand 硬依赖注入 + validate 规则注入。
-/// 失败上抛（调用方 warn；ontology 缺失 = 状态分支回退纯 UCB，§6.6 无降级）。
+/// V50 §5.7 本体消费（零 LLM）：expand 硬依赖注入 + validate 规则注入。
+/// 失败上抛（调用方 warn；ontology 缺失 = 状态分支回退纯 UCB，§5.7 无降级）。
 async fn apply_ontology(
     guizang: &GuizangClient,
     view: &TaskOntologyView,
@@ -208,7 +208,7 @@ pub struct MetaAgentBuilder {
     /// Process-wide SafetyHook (or a default-configured instance) — always
     /// mounted on the Rig agent.
     safety_hook: Arc<SafetyHook>,
-    /// V37：异源裁判开关（BCP §8.8 相位级）——true 且路由候选 ≥2 时决策
+    /// V37：异源裁判开关（Blueprint §4.3 相位级）——true 且路由候选 ≥2 时决策
     /// `MetaContext.verify_model`（Yin 专用验证模型）。
     heterogeneous_verifier: bool,
 }
@@ -238,7 +238,7 @@ impl MetaAgentBuilder {
         }
     }
 
-    /// V37：异源裁判开关（BCP §8.8 相位级）——true 且路由候选 ≥2 时，
+    /// V37：异源裁判开关（Blueprint §4.3 相位级）——true 且路由候选 ≥2 时，
     /// Yin 验证相位使用与执行相位不同的模型（裁判 ≠ 运动员）。
     /// 默认 false（行为与 V36 一致）。由工厂从
     /// `runtime.model_routing.heterogeneous_verifier` 传入。
@@ -295,7 +295,7 @@ impl MetaAgentBuilder {
     /// - `task_description` — the task the downstream agents will execute.
     /// - `task_type_tags` — tags for 归藏 prompt search.  Empty tags produce no
     ///   matches, triggering the fallback path.
-    /// - `handoff` — V28 前一瞬态产出（交接文件内容，§8.18）：BACK_TO_META 重跑时
+    /// - `handoff` — V28 前一瞬态产出（交接文件内容，§1.5）：BACK_TO_META 重跑时
     ///   注入作产出校准（基于失败产物调整权重与资产）；首次运行传 None。
     pub async fn run(
         &self,
@@ -303,9 +303,9 @@ impl MetaAgentBuilder {
         task_type_tags: &[&str],
         handoff: Option<&str>,
     ) -> Result<MetaOutcome, TaijiError> {
-        // ── 0. 模型路由（V36，BCP §8.8 第 1 步——纯符号层）──
+        // ── 0. 模型路由（V36，Blueprint §4.3 第 1 步——纯符号层）──
         // 读根级 model_stats 元权重表 → UCB 决策 model_key（全部无统计 → 默认）；
-        // 模型键只影响路由与统计回传（V44 去分区化，§10.1——资产树共享）。
+        // 模型键只影响路由与统计回传（V44 去分区化，§6.1——资产树共享）。
         // model_stats 损坏 → 空表（load_model_stats 内 warn），
         // 路由退化为默认模型。
         let model_key = {
@@ -317,7 +317,7 @@ impl MetaAgentBuilder {
             model_key = %model_key,
             "MetaAgent: model routed"
         );
-        // V37 异源裁判（BCP §8.8 相位级）：开关开启时从非主候选按 UCB 同公式
+        // V37 异源裁判（Blueprint §4.3 相位级）：开关开启时从非主候选按 UCB 同公式
         // 选 Yin 专用验证模型（裁判 ≠ 运动员，§1.3 偏置对抗）；候选 <2 →
         // None（继承主模型，warn 提示）。
         let verify_model = if self.heterogeneous_verifier {
@@ -372,16 +372,16 @@ impl MetaAgentBuilder {
             return Ok(MetaOutcome::Context(empty));
         }
 
-        // ── 2.5 UCB 排序（V35/MVP-5 检索数学化，§6.3 实现层定稿）──
+        // ── 2.5 UCB 排序（V35/MVP-5 检索数学化，§5.2 实现层定稿）──
         // 后验均值 μ + 探索项 C·√(ln N_total/(n+1))；n=0 冷启动退化为先验 μ 降序。
-        // prior_strength 取 LianshanConfig 默认（MetaAgentBuilder 无 config——与 §6.4.1 默认一致）。
+        // prior_strength 取 LianshanConfig 默认（MetaAgentBuilder 无 config——与 §5.3 默认一致）。
         let models = self.guizang.load_all_models().await?;
         let ranked = crate::infra::knowledge::rank_prompts_by_ucb(
             &matched,
             &models,
             crate::orchestration::active_learning::UCB_C,
             10.0,
-            // V50 环境维度轴（§6.3.1）：current_env_tags 源 = 路由模型类
+            // V50 环境维度轴（§5.4）：current_env_tags 源 = 路由模型类
             //（flash/strong）——同维度变体优先，异维度变体 ×0.5 降权。
             &[crate::agents::factory::model_class(&model_key).to_string()],
         );
@@ -409,7 +409,7 @@ impl MetaAgentBuilder {
             &matched_refs,
         );
         // V28 产出校准：注入前一瞬态产出（handoff.md 全文）——元基于失败产物
-        // 校准权重与认知资产，不再空手重跑（BCP §8.18 BACK_TO_META 语义）。
+        // 校准权重与认知资产，不再空手重跑（Blueprint §1.5 BACK_TO_META 语义）。
         let llm_prompt = match handoff {
             Some(h) if !h.trim().is_empty() => format!(
                 "{llm_prompt}\n\n## 前一瞬态产出（V28 产出校准）\n{h}"
@@ -491,7 +491,7 @@ impl MetaAgentBuilder {
 
         match composed {
             Some(result) => {
-                // V46 短路（BCP §8.8）：answer 非空 → 应答类任务直接产出，跳过阳阴。
+                // V46 短路（Blueprint §4.3）：answer 非空 → 应答类任务直接产出，跳过阳阴。
                 if let Some(answer) = result.answer.filter(|a| !a.trim().is_empty()) {
                     tracing::info!(
                         task_id = %self.task_id,
@@ -519,11 +519,11 @@ impl MetaAgentBuilder {
                     mode: result.mode,
                     degraded: None,
                     assets_used,
-                    // V36：模型路由结果（BCP §8.8 第 7 步——降级路径也保持路由
+                    // V36：模型路由结果（Blueprint §4.3 第 7 步——降级路径也保持路由
                     // 结果：模型选择与资产编排解耦，Yang/Yin 仍按路由模型
                     // 执行；仅路由异常时 None = 配置默认）。
                     model: Some(model_key.clone()),
-                    // V37：异源裁判（BCP §8.8 相位级）——Yin 专用验证模型；
+                    // V37：异源裁判（Blueprint §4.3 相位级）——Yin 专用验证模型；
                     // 开关关闭 / 候选不足时 None = 继承主模型。
                     verify_model,
                     yang_system_prompt: result.yang_system_prompt,
@@ -534,11 +534,18 @@ impl MetaAgentBuilder {
                     temperature: result.temperature.map(|v| v as f64),
                     // 批18 P2：任务类型标签透传（zhouyi 提取 → 阴 load_truths）。
                     task_type_tags: task_type_tags.iter().map(|s| s.to_string()).collect(),
+                    // V57 实体链接透传：compose 产出的 ontology.objects → 阴 relations
+                    // 因果对碰（零新增 LLM）；None/空 = 阴跳过 relations 对碰。
+                    ontology_objects: result
+                        .ontology
+                        .as_ref()
+                        .map(|v| v.objects.clone())
+                        .unwrap_or_default(),
                 };
 
-                // V50 §6.6 本体消费：实体链接 → 类型级软查询（expand）+ 约束校验
+                // V50 §5.7 本体消费：实体链接 → 类型级软查询（expand）+ 约束校验
                 // （validate）。失败仅 warn（增强层）；ontology None/空 domain =
-                // 状态分支回退纯 UCB（§6.6 无降级）。
+                // 状态分支回退纯 UCB（§5.7 无降级）。
                 if let Some(view) = result.ontology.filter(|v| !v.domain.is_empty()) {
                     if let Err(e) = apply_ontology(self.guizang.as_ref(), &view, &mut ctx).await {
                         tracing::warn!(
@@ -577,7 +584,7 @@ impl MetaAgentBuilder {
                 empty.degraded = Some(format!(
                     "MetaAgent compose failed after {COMPOSE_ATTEMPTS} attempts: {reason}"
                 ));
-                // V36：降级路径保持模型路由结果（§8.8 第 8 步——模型选择与
+                // V36：降级路径保持模型路由结果（§4.3 第 8 步——模型选择与
                 // 资产编排解耦；None 仅当路由异常/未执行）。
                 empty.model = Some(model_key.clone());
                 // V37：降级路径保持异源裁判决策。
@@ -640,7 +647,7 @@ const META_COMPOSE_SYSTEM_PROMPT: &str = r#"你是权重更新专家 (Weight Upd
 - 若任务需要产生文件/执行命令/改变世界（写代码、跑脚本、生成文档到文件）：
   answer 置 null，按上述模式决策走完整流程。
 
-## 实体链接（V50 §6.6，先于模式决策）
+## 实体链接（V50 §5.7，先于模式决策）
 将任务映射到语义本体结构（供系统按**类型**查依赖边与约束规则，非路由标签）：
 - domain：领域分类（Security | Infra | Data | Finance | General）
 - action：动作类型（Create | Read | Update | Delete | Debug | Fix）
@@ -995,7 +1002,7 @@ mod tests {
         assert!(matches!(back2, MetaOutcome::Answer(ref s) if s == "答案"));
     }
 
-    // ── V50 §6.6 本体消费（纯符号）──
+    // ── V50 §5.7 本体消费（纯符号）──
 
     #[test]
     fn ontology_expand_injects_opposite_type_assets() {
@@ -1048,7 +1055,7 @@ mod tests {
 
     #[test]
     fn meta_compose_result_ontology_serde_default() {
-        // V50 §6.6：ontology 字段 serde default 零迁移；旧 JSON 无 ontology 也能 parse。
+        // V50 §5.7：ontology 字段 serde default 零迁移；旧 JSON 无 ontology 也能 parse。
         let legacy = r#"{"mode":"Execution","answer":null}"#;
         let r: MetaComposeResult = serde_json::from_str(legacy).expect("legacy parse");
         assert!(r.ontology.is_none());

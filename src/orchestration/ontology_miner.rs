@@ -1,4 +1,4 @@
-//! V50 §6.6 本体挖掘（OntologyMiner）——连山纯符号挖掘（零 LLM）。
+//! V50 §5.7 本体挖掘（OntologyMiner）——连山纯符号挖掘（零 LLM）。
 //!
 //! 三个挖掘态射（纯函数，可单测）：
 //! - `accumulate_cooccur` + `merge_cooccur`：任务级资产共现 → 持久累积（零新采集，
@@ -7,7 +7,7 @@
 //! - `mine_dependencies`：type→type 共现 → 依赖边（联合通过率 ≥ 阈值 + 样本达标）。
 //! - `mine_constraints`：失败 × env_tags 分组 → type-level 约束规则。
 //!
-//! 红线（§6.6）：连山纯符号（本模块零 LLM）；互斥边不挖（Forbid 留 SafetyHook/人工）；
+//! 红线（§5.7）：连山纯符号（本模块零 LLM）；互斥边不挖（Forbid 留 SafetyHook/人工）；
 //! 先验≠后验（产出边/规则是「先验智能」，进候选池仍走 UCB）。
 
 use crate::types::agent::AssetRef;
@@ -17,7 +17,7 @@ use crate::types::ontology::{
 use crate::types::verification::{CheckKind, CheckResult, CheckSeverity};
 use std::collections::HashMap;
 
-/// 挖掘样本门槛（§6.6：≥ 50，防稀疏共现噪声）。
+/// 挖掘样本门槛（§5.7：≥ 50，防稀疏共现噪声）。
 /// 测试用纯函数可传自定义阈值；生产 hook 用此常量。
 pub(crate) const ONTOLOGY_MIN_SAMPLES: u64 = 50;
 /// 依赖边联合通过率阈值（MVP：≥ 0.8）。
@@ -62,7 +62,7 @@ pub fn merge_cooccur(existing: &[CooccurPair], deltas: &[CooccurPair]) -> Vec<Co
     out
 }
 
-/// **类型抽象**（§6.6 关键定论）：把 id 级共现对映射为 type 级共现对。
+/// **类型抽象**（§5.7 关键定论）：把 id 级共现对映射为 type 级共现对。
 ///
 /// 资产 id 无类型映射 → 跳过（状态分支，非错误）；同 type 对聚合 co/pass。
 pub fn abstract_to_types(
@@ -176,7 +176,7 @@ fn check_kind_name(kind: CheckKind) -> String {
         .unwrap_or_default()
 }
 
-/// 连山本体挖掘入口（零 LLM；增强层——失败上抛由调用方 warn，§6.6）。
+/// 连山本体挖掘入口（零 LLM；增强层——失败上抛由调用方 warn，§5.7）。
 ///
 /// 数据源全部复用既有 pending 负载：`assets_used × passed × checks × model_key`。
 /// 流程：共现累积 → 类型抽象 → 依赖边 → relations.yaml；

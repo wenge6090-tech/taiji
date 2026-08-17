@@ -36,7 +36,7 @@ impl LianshanConsumer {
     /// * `evolver` — shared cognition evolver for δ₀–δ₃ operations.
     /// * `cancel` — cancellation token; the loop exits when this is signalled.
     /// * `data_root` — root directory containing the `pending/` subdirectory.
-    /// * `lianshan_config` — V33/MVP-3 演化配置（§6.3/§6.4/§8.12）。
+    /// * `lianshan_config` — V33/MVP-3 演化配置（§5.2/§5.3/AGENTS.md）。
     pub fn new(
         evolver: Arc<CognitionEvolver>,
         cancel: CancellationToken,
@@ -124,6 +124,19 @@ impl LianshanConsumer {
 
             // ── No files → backoff ──────────────────────────────────────
             if files.is_empty() {
+                // V53 编译演化算子：空闲窗口 fork 低通过率 Python skill → 入队
+                // compile 变体（连山发现，符号零 LLM）。幂等——已存在变体跳过，
+                // 空闲窗口重复调用安全；入队后由 compile 执行器在空闲窗口消费。
+                if let Err(e) = self
+                    .evolver
+                    .fork_python_skills(&self.lianshan_config, &self.data_root)
+                    .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "[lianshan] fork_python_skills failed — idle window continues"
+                    );
+                }
                 tracing::debug!(
                     "[Lianshan Consumer] no pending files, sleeping {} ms",
                     backoff_ms,
@@ -193,25 +206,20 @@ impl LianshanConsumer {
                     .and_then(|v| v.as_str())
                     .unwrap_or(&file_name);
 
-                // ── V33/MVP-2 分发：pending 携带 checks → backprop 检查项统计；
-                //    无 checks → 既有 evolve（δ₀-δ₂ 占位路径，MVP-3 统一重构）──
-                // backprop 单次执行（不重试）：统计累加不可重复，失败进死信供人工诊断。
-                // V35/MVP-6: assets_used → backprop_prompts（任务级信号，§8.21）——
-                // 与 checks 同 pending 负载，同一单次不重试语义（统计不可重复累加）。
-                let is_backprop = value.get("checks").is_some();
+                // ── V59 分发：pending 携带 checks → 深层压缩（拓扑/语义/编译/演化）；
+                //    统计回传（stats/αβ）已移交阴实时录入（zhouyi record_judgment），
+                //    连山不再 backprop。深层压缩单次执行（不重试）：语义压缩幂等。──
+                let is_deep_compress = value.get("checks").is_some();
                 let mut evolve_result: Result<
                     crate::orchestration::cognition_evolver::EvolutionReport,
                     TaijiError,
-                > = if is_backprop {
+                > = if is_deep_compress {
                     match serde_json::from_value::<Vec<crate::types::verification::CheckResult>>(
                         value["checks"].clone(),
                     ) {
                         Ok(checks) => {
-                            // V44 去分区化（§10.1）：pending 携带 model_key 仅作统计键
-                            // ——回传与演化统一落根级资产树；None = 未指定模型。
+                            // V44 去分区化（§6.1）：pending 携带 model_key 仅作统计键。
                             let model_key = value.get("model_key").and_then(|v| v.as_str());
-                            // V35/MVP-6: prompts 任务级回传（assets_used + passed；
-                            // 失败仅 warn 不阻断 checks 路径——prompts 回传是增强层）
                             let assets_used: Vec<crate::types::agent::AssetRef> = value
                                 .get("assets_used")
                                 .and_then(|v| serde_json::from_value(v.clone()).ok())
@@ -220,136 +228,73 @@ impl LianshanConsumer {
                                 .get("passed")
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(true);
-                            if !assets_used.is_empty() {
-                                match self
-                                    .evolver
-                                    .backprop_prompts(
-                                        &task_id,
-                                        &assets_used,
-                                        passed,
-                                        &checks,
-                                        &self.lianshan_config,
-                                        model_key,
-                                    )
-                                    .await
-                                {
-                                    Ok(_) => {}
+
+                            // ── 蓝图文件·迹拓扑（Blueprint §5.0 契约）：压缩任务目录树
+                            // → manifold/{root_task}.yaml。增强层：失败仅 warn 不阻断。──
+                            if let Some(td) = value.get("task_dir").and_then(|v| v.as_str()) {
+                                match crate::orchestration::manifold::compress_task_tree_to_topology(
+                                    Path::new(td),
+                                    &assets_used,
+                                    &checks,
+                                ) {
+                                    Ok(topo) => {
+                                        if let Err(e) = self
+                                            .evolver
+                                            .guizang()
+                                            .save_topology(task_id, &topo)
+                                            .await
+                                        {
+                                            tracing::warn!(
+                                                task_id = %task_id,
+                                                error = %e,
+                                                "[lianshan] save_topology failed — continues"
+                                            );
+                                        }
+                                    }
                                     Err(e) => {
                                         tracing::warn!(
                                             task_id = %task_id,
                                             error = %e,
-                                            "[lianshan] backprop_prompts failed — checks path continues"
+                                            "[lianshan] compress_task_tree_to_topology failed — continues"
                                         );
                                     }
                                 }
-                            }
-                            match self
-                                .evolver
-                                .backprop_checks(&task_id, &checks, &self.lianshan_config, model_key)
+                                // ── V50 编译任务入队（§6.0）：拓扑产出后入队
+                                // compile/{root_task}.json。增强层：失败仅 warn。──
+                                if let Err(e) = crate::orchestration::compile::enqueue_compile_task(
+                                    &self.data_root,
+                                    task_id,
+                                )
                                 .await
-                            {
-                                Ok(_updated) => {
-                                    // ── V36: model_stats 元权重表回传（BCP §6.4——路由数据源；
-                                    // V44：model_key 仅作统计键，表存根级）。
-                                    // checks 首项聚合（同任务摊派值一致）；失败仅 warn（增强层，
-                                    // 不阻断 backprop 主流程——频率统计已持久化）。
-                                    if let Some(key) = model_key {
-                                        let first = checks.first();
-                                        let signal =
-                                            crate::orchestration::model_router::ModelStatsSignal {
-                                                passed,
-                                                cost_tokens: first.map(|c| c.cost_tokens).unwrap_or(0),
-                                                verify_rounds: first.map(|c| c.verify_rounds).unwrap_or(0),
-                                                quality: first.map(|c| c.quality).unwrap_or(0.0),
-                                            };
-                                        if let Err(e) = crate::orchestration::model_router::update_model_stats(
-                                            &self.evolver.guizang(),
-                                            &crate::types::agent::ModelKey(key.to_string()),
-                                            &signal,
-                                        )
-                                        .await
-                                        {
-                                            tracing::warn!(
-                                                task_id = %task_id,
-                                                model_key = %key,
-                                                error = %e,
-                                                "[lianshan] model_stats update failed — checks path continues"
-                                            );
-                                        }
-                                    }
-                                    // ── 蓝图文件·迹拓扑（BCP §6.0 契约）：backprop 成功后压缩
-                                    // 任务目录树 → manifold/{root_task}.yaml。增强层：失败仅
-                                    // warn 不阻断 backprop 主流程（与 model_stats 同构）。
-                                    if let Some(td) = value.get("task_dir").and_then(|v| v.as_str()) {
-                                        match crate::orchestration::manifold::compress_task_tree_to_topology(
-                                            Path::new(td),
-                                            &assets_used,
-                                            &checks,
-                                        ) {
-                                            Ok(topo) => {
-                                                if let Err(e) = self
-                                                    .evolver
-                                                    .guizang()
-                                                    .save_topology(task_id, &topo)
-                                                    .await
-                                                {
-                                                    tracing::warn!(
-                                                        task_id = %task_id,
-                                                        error = %e,
-                                                        "[lianshan] save_topology failed — backprop continues"
-                                                    );
-                                                }
-                                            }
-                                            Err(e) => {
-                                                tracing::warn!(
-                                                    task_id = %task_id,
-                                                    error = %e,
-                                                    "[lianshan] compress_task_tree_to_topology failed — backprop continues"
-                                                );
-                                            }
-                                        }
-                                        // ── V50 编译任务入队（§6.0）：拓扑产出后入队
-                                        // compile/{root_task}.json。增强层：失败仅 warn
-                                        // 不阻断 backprop 主流程（与 model_stats 同构）。
-                                        if let Err(e) = crate::orchestration::compile::enqueue_compile_task(
-                                            &self.data_root,
-                                            task_id,
-                                        )
-                                        .await
-                                        {
-                                            tracing::warn!(
-                                                task_id = %task_id,
-                                                error = %e,
-                                                "[lianshan] compile enqueue failed — backprop continues"
-                                            );
-                                        }
-                                    }
-                                    // ── V50 §6.6 本体挖掘：共现→依赖边 + 失败×model_class→规则。
-                                    // 增强层：失败仅 warn 不阻断 backprop 主流程（与 model_stats 同构）。
-                                    if let Err(e) = crate::orchestration::ontology_miner::run_ontology_mining(
-                                        self.evolver.guizang().as_ref(),
-                                        &assets_used,
-                                        passed,
-                                        &checks,
-                                        model_key,
-                                    )
-                                    .await
-                                    {
-                                        tracing::warn!(
-                                            task_id = %task_id,
-                                            error = %e,
-                                            "[lianshan] ontology mining failed — backprop continues"
-                                        );
-                                    }
-                                    // ── V33/MVP-3: backprop 后尝试契约演化（单次、激活门槛内）──
-                                    // 演化失败（I/O）→ 错误上抛 → pending 进死信：backprop 已成功
-                                    // 统计已回传，死信移动防止重复 backprop（幂等性保持）。
-                                    self.evolver
-                                        .evolve_contracts(&self.lianshan_config, model_key)
-                                        .await
+                                {
+                                    tracing::warn!(
+                                        task_id = %task_id,
+                                        error = %e,
+                                        "[lianshan] compile enqueue failed — continues"
+                                    );
                                 }
-                                Err(e) => Err(e),
                             }
+                            // ── V50 §5.7 本体挖掘：共现→依赖边 + 失败×model_class→规则。
+                            // 增强层：失败仅 warn 不阻断。──
+                            if let Err(e) = crate::orchestration::ontology_miner::run_ontology_mining(
+                                self.evolver.guizang().as_ref(),
+                                &assets_used,
+                                passed,
+                                &checks,
+                                model_key,
+                            )
+                            .await
+                            {
+                                tracing::warn!(
+                                    task_id = %task_id,
+                                    error = %e,
+                                    "[lianshan] ontology mining failed — continues"
+                                );
+                            }
+                            // ── 深层压缩后尝试契约演化（单次、激活门槛内）。──
+                            self.evolver
+                                .evolve_contracts(&self.lianshan_config, model_key)
+                                .await
                         }
                         Err(e) => Err(TaijiError::Other(format!(
                             "pending checks parse failed: {e}"
@@ -360,10 +305,10 @@ impl LianshanConsumer {
                 };
 
                 // Evolve with retry (3 attempts for transient errors) —
-                // backprop 路径不重试（统计不可重复累加）。
+                // 深层压缩路径不重试（语义压缩幂等，重试无益且扰动演化门槛）。
                 const MAX_EVOLVE_RETRIES: u32 = 3;
                 for attempt in 1..=MAX_EVOLVE_RETRIES {
-                    if evolve_result.is_ok() || is_backprop {
+                    if evolve_result.is_ok() || is_deep_compress {
                         break;
                     }
                     if attempt > 1 {
@@ -632,8 +577,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_backprop_updates_model_stats_in_root() {
-        // V36 元权重表回传（BCP §6.4）：pending 带 model_key + checks →
+    async fn test_pending_consumed_without_model_stats_backprop() {
+        // V36 元权重表回传（Blueprint §5.3）：pending 带 model_key + checks →
         // backprop 后根级 model_stats.yaml 出现该 model_key 行（首项四维聚合）。
         let data_root = create_test_root("model_stats_backprop").await;
         let pending = data_root.join("pending");
@@ -681,14 +626,13 @@ mod tests {
             .expect("consumer did not shut down")
             .expect("consumer panicked");
 
-        // model_stats.yaml 根级生成，含路由 model_key 行
+        // V59：model_stats 不再由连山 backprop 更新（移交阴实时录入）——断言不更新
         assert!(!task_file.exists(), "expected processed file to be deleted");
         let stats = client.load_model_stats().await.unwrap();
-        let row = stats.get("deepseek-deepseek-v4-flash").expect("model stats row");
-        assert_eq!(row.n, 1);
-        assert_eq!(row.pass_count, 1);
-        assert_eq!(row.cost_sum, 100);
-        assert_eq!(row.rounds_sum, 2);
+        assert!(
+            stats.is_empty(),
+            "V59: model_stats must NOT be updated by lianshan backprop"
+        );
 
         cleanup(&data_root).await;
         cleanup(&knowledge_dir).await;
@@ -696,7 +640,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_backprop_produces_topology_file() {
-        // BCP §6.0 蓝图文件契约：pending 带 task_dir → backprop 成功后
+        // Blueprint §5.0 蓝图文件契约：pending 带 task_dir → backprop 成功后
         // 压缩任务目录树 → manifold/{task_id}.yaml（节点含 task/asset/deliverable）。
         use crate::types::task::{Task, TaskStatus};
 
@@ -847,7 +791,7 @@ mod tests {
     // ── V33/MVP-2: checks 格式 pending 处理（backprop 闭环）──
 
     #[tokio::test]
-    async fn test_process_checks_pending_backprops_stats() {
+    async fn test_process_checks_pending_no_backprop() {
         use crate::types::agent::VerificationAsset;
         use crate::types::verification::{
             CheckKind, CheckSeverity, CheckSpec,
@@ -919,7 +863,7 @@ mod tests {
             .expect("consumer did not shut down")
             .expect("consumer panicked");
 
-        // 断言：pending 已删除（处理成功）+ 归藏统计更新
+        // 断言：pending 已删除（处理成功）+ V59 不再 backprop 统计（移交阴实时录入）
         assert!(!task_file.exists(), "expected processed file to be deleted");
         let loaded = client
             .load_verification("v-closed-loop")
@@ -931,8 +875,10 @@ mod tests {
             .iter()
             .find(|c| c.id == "check-loop")
             .unwrap();
-        assert_eq!(check.stats.n, 1, "check stats must be backpropagated");
-        assert_eq!(check.stats.pass_count, 1);
+        assert_eq!(
+            check.stats.n, 0,
+            "V59: check stats must NOT be backpropagated by lianshan"
+        );
 
         cleanup(&data_root).await;
         cleanup(&knowledge_dir).await;

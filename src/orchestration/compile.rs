@@ -52,6 +52,39 @@ pub async fn enqueue_compile_task(data_root: &Path, root_task: &str) -> Result<(
     Ok(())
 }
 
+/// V53 重编译变体入队（单写者 = Lianshan fork，§6.0 V53 定论）。
+///
+/// 低通过率 Python skill → fork 变体 → **不 clone 执行体**，而是入队 compile
+/// 重新生成执行体。幂等：同 variant_id 已存在（含 .failed）→ 跳过。
+pub async fn enqueue_compile_task_variant(
+    data_root: &Path,
+    variant_id: &str,
+    variant_of: &str,
+    failure_detail: &str,
+) -> Result<(), TaijiError> {
+    let compile_dir = data_root.join("compile");
+    tokio::fs::create_dir_all(&compile_dir).await?;
+    let path = compile_dir.join(format!("{variant_id}.json"));
+    if path.exists() {
+        return Ok(());
+    }
+    let payload = serde_json::json!({
+        "root_task": variant_id,
+        "variant_of": variant_of,
+        "recompile": true,
+        "failure_detail": failure_detail,
+        "retries": 0,
+        "enqueued_at_ms": now_ms(),
+    });
+    save_json_atomic(&payload, &path)?;
+    tracing::info!(
+        variant_id = %variant_id,
+        variant_of = %variant_of,
+        "[compile] recompile variant queued"
+    );
+    Ok(())
+}
+
 /// 编译执行器入口（main.rs `--with-lianshan` 时 spawn；`compile_enabled` 关 → 不启动）。
 pub fn spawn_compiler(
     factory: Arc<AgentFactory>,
@@ -146,14 +179,35 @@ async fn run_compile_queue(
         };
         let retries = value.get("retries").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
-        // 读 manifold/{root_task}.yaml（缺失 = 不可编译，终态失败）
-        let Some(topo) = guizang.load_topology(root_task).await? else {
-            final_fail(&path, &file_name, &format!("manifold/{root_task}.yaml missing")).await;
-            continue;
+        // 构建编译任务描述：重编译变体（V53）| 成功迹拓扑（V50）
+        let recompile = value.get("recompile").and_then(|v| v.as_bool()).unwrap_or(false);
+        let desc = if recompile {
+            let variant_of = value
+                .get("variant_of")
+                .and_then(|v| v.as_str())
+                .unwrap_or(root_task);
+            let failure_detail = value
+                .get("failure_detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let Some(skill) = find_skill(&guizang, variant_of).await? else {
+                final_fail(
+                    &path,
+                    &file_name,
+                    &format!("skill {variant_of} not found for recompile"),
+                )
+                .await;
+                continue;
+            };
+            compile_recompile_description(&skill, root_task, failure_detail)
+        } else {
+            let Some(topo) = guizang.load_topology(root_task).await? else {
+                final_fail(&path, &file_name, &format!("manifold/{root_task}.yaml missing"))
+                    .await;
+                continue;
+            };
+            compile_task_description(&topo)
         };
-
-        // 构建编译任务描述（标准 skill 编写规范模板 + 拓扑注入）
-        let desc = compile_task_description(&topo);
 
         // 执行编译任务 = 一次周易任务执行（阳 LLM 编程 + 阴符号复跑验证）
         match runner.execute_with_context(&desc, None, None).await {
@@ -180,13 +234,91 @@ async fn run_compile_queue(
                             .await;
                             continue;
                         }
+                        // V55 判据类强制归阴（机械护栏）：编译 LLM 易按来源任务分类，
+                        // 把「检查/判定」类误标 exec（实测 check-file-exists）。
+                        enforce_judgment_category(&mut skill);
+                        // V52：提取 Python 脚本（声明 python implementation 则必须有脚本）。
+                        let has_python = skill.implementations.iter().any(|i| {
+                            i.kind == crate::types::verification::SkillKind::Python
+                        });
+                        let script = match extract_skill_script(&task_dir).await {
+                            Ok(s) => s,
+                            Err(e) => {
+                                handle_retry_or_fail(
+                                    &path,
+                                    &file_name,
+                                    root_task,
+                                    retries,
+                                    &e.to_string(),
+                                )
+                                .await;
+                                continue;
+                            }
+                        };
+                        if has_python && script.is_none() {
+                            handle_retry_or_fail(
+                                &path,
+                                &file_name,
+                                root_task,
+                                retries,
+                                "python implementation 缺 deliverables/skill.py",
+                            )
+                            .await;
+                            continue;
+                        }
+                        // V53 冒烟压测：save_skill 前用 python_engine 跑空 params
+                        // 确认脚本可执行（连山符号裁决第一道闸，§6.0 V53 定论）。
+                        // 脚本 crash / 非法 JSON / 超时 = 编译失败重试。
+                        if has_python {
+                            let smoke_path = task_dir.join("deliverables").join("skill.py");
+                            if smoke_path.exists() {
+                                match crate::orchestration::python_engine::run_python_skill(
+                                    &smoke_path,
+                                    &serde_json::json!({}),
+                                    &task_dir,
+                                    &[],
+                                )
+                                .await
+                                {
+                                    Ok(_) => {}
+                                    Err(e) => {
+                                        handle_retry_or_fail(
+                                            &path,
+                                            &file_name,
+                                            root_task,
+                                            retries,
+                                            &format!("smoke test failed: {e}"),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
+                            }
+                        }
                         match guizang.save_skill(&mut skill).await {
                             Ok(()) => {
+                                // 旁车脚本落盘（skill.yaml 已 commit；脚本再 commit 一次——MVP 边界）。
+                                if let Some(content) = script {
+                                    if let Err(e) =
+                                        guizang.save_skill_script(&skill, &content).await
+                                    {
+                                        handle_retry_or_fail(
+                                            &path,
+                                            &file_name,
+                                            root_task,
+                                            retries,
+                                            &e.to_string(),
+                                        )
+                                        .await;
+                                        continue;
+                                    }
+                                }
                                 tokio::fs::remove_file(&path).await?;
                                 processed += 1;
                                 tracing::info!(
                                     task_id = %result.task_id,
                                     skill_id = %skill.id,
+                                    has_python,
                                     "[compile] skill compiled + saved"
                                 );
                             }
@@ -312,6 +444,16 @@ async fn extract_skill(task_dir: &Path, fallback_content: &str) -> Result<SkillA
     parse_skill_deliverable(fallback_content)
 }
 
+/// V52：提取编译产出的 Python 脚本（`deliverables/skill.py`）；无脚本返回 None。
+async fn extract_skill_script(task_dir: &Path) -> Result<Option<String>, TaijiError> {
+    let script = task_dir.join("deliverables").join("skill.py");
+    if !script.exists() {
+        return Ok(None);
+    }
+    let content = tokio::fs::read_to_string(&script).await?;
+    Ok(Some(content))
+}
+
 /// 解析 LLM 产出的 skill 内容（容忍 markdown 围栏 + 叙述前后缀）。
 ///
 /// 顺序：去围栏 → YAML → JSON → `parse_llm_json`（首尾大括号切片）。
@@ -331,6 +473,63 @@ pub fn parse_skill_deliverable(raw: &str) -> Result<SkillAsset, TaijiError> {
     }
 }
 
+/// V55 编译分类修正——判据类 skill 强制归阴（exec/orch → verify）。
+///
+/// 实测：编译 LLM 按「来源任务类型」（写脚本 → exec）分类，把「检查文件是否存在」
+/// 这类**判据**（输出 passed 布尔、机械判定是否满足）误标成 exec 落到阳面；且 dual
+/// 也选了同侧同类（file-exists，verify 侧）——非互补。本函数是机械护栏：
+/// description 命中强判据词 且 pass_condition 含 passed 布尔判定 → 强制
+/// category=verify + agent_target=YinAgent；dual 若仍同侧（verify）→ 取其对偶
+/// exec skill（如 file-exists.dual = write）。返回是否改写（供 warn 审计）。
+fn enforce_judgment_category(skill: &mut SkillAsset) -> bool {
+    use crate::types::verification::SkillCategory;
+    let Some(cat) = skill.effective_category() else {
+        return false;
+    };
+    if !matches!(cat, SkillCategory::Exec | SkillCategory::Orch) {
+        return false;
+    }
+    // 强判据词——动作类（执行/编排）skill 极少使用；弱词（检查/判断）易误伤不取。
+    const JUDGMENT_WORDS: [&str; 6] =
+        ["判定", "验证", "存在性", "当且仅当", "合法性", "一致性"];
+    let desc = skill.description.to_lowercase();
+    if !JUDGMENT_WORDS.iter().any(|w| desc.contains(w)) {
+        return false;
+    }
+    let pc = skill
+        .implementations
+        .first()
+        .map(|i| i.pass_condition.to_lowercase())
+        .unwrap_or_default();
+    if !pc.contains("passed") {
+        return false;
+    }
+    // 强制归阴：verify + YinAgent。
+    let old = cat;
+    skill.category = Some(SkillCategory::Verify);
+    if skill.agent_target.to_lowercase().contains("yang") {
+        skill.agent_target = "YinAgent".into();
+    }
+    // dual 修正：verify 类 skill 的 dual 必须 exec 侧；原 dual 若同侧 → 取其自身对偶。
+    if let Some(d) = crate::infra::meta_skills::meta_skill(&skill.dual) {
+        if d.effective_category() == Some(SkillCategory::Verify) {
+            let counter = d.dual.as_str();
+            if let Some(c) = crate::infra::meta_skills::meta_skill(counter) {
+                if c.effective_category() == Some(SkillCategory::Exec) {
+                    skill.dual = counter.to_string();
+                }
+            }
+        }
+    }
+    tracing::warn!(
+        id = %skill.id,
+        old = ?old,
+        dual = %skill.dual,
+        "[compile] 判据类 skill 强制归阴（exec→verify）"
+    );
+    true
+}
+
 /// 提取 ``` 围栏内容（跳过语言标签行），无围栏返回原文 trim。
 fn strip_fences(raw: &str) -> String {
     let raw = raw.trim();
@@ -344,6 +543,20 @@ fn strip_fences(raw: &str) -> String {
     }
     raw.to_string()
 }
+
+/// V52 Python skill 脚本契约（编译模板 few-shot——教 LLM 生成资产层执行体）。
+const PYTHON_SKILL_CONTRACT: &str = r#"import sys, json
+
+def execute(params):
+    # params: LLM 工具调用参数（JSON 对象，stdin 传入）
+    # 确定性操作经 subprocess 调 Rust 种子层原语（用户态调 syscall）：
+    #   subprocess.run(["taiji", "builtin", "write", "--args", json.dumps(...)])
+    # return: {"passed": bool, "detail": str, ...}
+    return {"passed": True, "detail": "..."}
+
+if __name__ == "__main__":
+    print(json.dumps(execute(json.loads(sys.stdin.read())), ensure_ascii=False))
+"#;
 
 /// 「标准 skill 编写规范」模板（§6.0 编译任务契约）——教 LLM 按 SkillAsset 契约产出。
 pub fn compile_task_description(topo: &ManifoldTopology) -> String {
@@ -371,7 +584,29 @@ taiji 把一个成功任务的执行迹压缩成了「迹拓扑」（离散状�
 - `verify` 边（task → check）= 如何验证产出
 提炼一个**原子可复用能力**：它做什么、产出什么、如何机械验证。
 
-## 输出：用 write 工具写 deliverables/skill.yaml（YAML，必须含 `type: skill`）
+## 输出：用 write 工具写三个文件
+
+1. `deliverables/skill.py`——可执行 Python 脚本（资产层执行体）
+2. `deliverables/skill.yaml`——SkillAsset 契约（YAML，必须含 `type: skill`）
+3. `deliverables/handoff.md`——标准交接文档（**必须以 YAML front matter 开头**，见硬约束 6）
+
+**路径纪律（最重要，违反必失败）**：`deliverables/skill.py` / `deliverables/skill.yaml` / `deliverables/handoff.md`
+是**相对路径**，由 write 工具自动解析到**本任务目录**下——不要拼绝对路径、不要写
+`/home/...` 前缀。写产物**只用 write 工具**；**禁止**用 bash 执行 `cp` / `mkdir` /
+`echo >` 把文件写到绝对路径或项目根目录——bash 只用于读源码、跑测试，不用它落盘。
+（阴验证扫的是本任务目录的 deliverables/，写到别处 = 收不到产物 = 编译失败。）
+
+### skill.py 脚本契约（V52 资产层统一 Python）
+
+```python
+{PYTHON_SKILL_CONTRACT}
+```
+
+- 脚本内拿不到 OPENAI_API_KEY（env_clear 第一闸门）——**禁止**尝试调 LLM
+- 30s 超时硬截止，禁止死循环 / 长网络操作
+- 确定性操作一律经 `taiji builtin <name>` 原语（write/bash/read/search/webfetch），不自行重写
+
+### skill.yaml 契约
 
 ```yaml
 type: skill
@@ -386,8 +621,8 @@ output_modes: ["text"]
 category: <orch|exec|verify|converge>
 dual: <对偶 skill id，见下表硬约束>
 implementations:
-  - kind: <SkillKind>
-    target: <相对 task_dir 路径，阴判据用；阳执行体留空>
+  - kind: python             # 资产层统一 Python 执行体
+    target: skill.py         # 脚本相对路径（skill 文件夹内）
     params: {{}}
     severity: <hard|soft>
     pass_condition: <人读判据>
@@ -397,11 +632,25 @@ version: 0
 status: active
 ```
 
-## SkillKind 表
+## SkillKind 表（V52 资产层统一 Python）
 
-- 阴（YinAgent 机械/裁决判据）：file_exists / schema_valid / reference_resolves /
-  command_succeeds / trace_consistency / llm_judgement
-- 阳（YangAgent builtin 执行体）：bash / write / read / search / webfetch / recursive_decompose
+- builtin：Rust 种子层（builtin 名 = skill.id）——阳 write/bash/read/search/webfetch/recursive-decompose；阴 file-exists/schema-valid/reference-resolves/command-succeeds/trace-consistency
+- python：资产层 Python 脚本（脚本相对路径 = impl.target，默认 skill.py）
+- llm_judgement：唯一 LLM 裁决 kind
+
+## skill 分类规则（按功能本质，不是按来源任务——硬约束）
+
+编译 skill 的 category 由**它自己的功能本质**决定，**不是**由编译任务/主任务的类型决定。
+
+- **判据类**：输入「目标/引用/内容」，输出「passed 布尔 + detail」，机械判定是否满足
+  （文件存在、格式合法、引用可解析、内容一致）→ `category: verify`，`agent_target: YinAgent`，dual 从 exec 侧选（write/read/bash/search/webfetch）
+- **执行类**：主动操作（写文件、跑命令、搜索、抓取、生成内容）→ `category: exec`，`agent_target: YangAgent`，dual 从 verify 侧选（file-exists/schema-valid/reference-resolves/command-succeeds/trace-consistency）
+- **拆解类** → `category: orch`；**收敛类** → `category: converge`
+
+**反例（已实测踩坑）**：「检查文件是否存在的脚本」功能本质是**判据**（输出 passed 布尔判定文件存在性），
+必须 `category: verify` + `agent_target: YinAgent` + dual 选 exec 侧（如 write）——
+**不是** exec！不要因为它由「写脚本的任务」编译而来就归 exec，也不要因为名字含
+file/exists 就把 dual 也选成 verify 侧的 file-exists（dual 必须是**对侧互补**，不是同侧同类）。
 
 ## 类别-对偶互补（硬约束）
 
@@ -415,9 +664,12 @@ status: active
 
 ## 硬约束
 
-1. 本任务是编译任务：直接产出 skill.yaml，**不拆解、不递归、控制篇幅、完成即止**。
+1. 本任务是编译任务：直接产出 skill.py + skill.yaml，**不拆解、不递归、控制篇幅、完成即止**。
 2. 只产出能机械执行的判据/执行体，不虚构不存在的验证能力。
-3. 产出后简述你编译了什么 skill + 为什么它可复用。
+3. skill.py 必须是可独立执行的脚本（`execute(params)` 入口，stdin JSON / stdout JSON）。
+4. 产出后简述你编译了什么 skill + 为什么它可复用。
+5. 写文件只用 write 工具（相对路径），禁止 bash cp/mkdir/重定向写产物。
+6. `deliverables/handoff.md` **必须以 YAML front matter 开头**（首行 `---` 起、第二段 `---` 止），字段至少含 `task`、`result`、`status: complete`、`output_refs: [deliverables/skill.py, deliverables/skill.yaml]`——reference-resolves 机械检查解析 front matter 的 output_refs 逐项验存在，缺 front matter 或 output_refs 会导致阴验证 FAIL 重跑。
 "#
     )
 }
@@ -437,6 +689,120 @@ fn build_dual_candidates() -> String {
         .join("\n")
 }
 
+/// V53 重编译任务描述——优化低通过率 Python skill 的执行体（变体重生）。
+///
+/// 与 [`compile_task_description`] 同源（都教 LLM 按 SkillAsset 契约产出），但
+/// 输入是「原 skill 契约 + 失败详情」，产出是**变体**（新 id = variant_id，
+/// 继承原 dual/parent_id）——连山发现（符号）、周易生成（神经）、连山裁决（符号）。
+pub fn compile_recompile_description(
+    skill: &SkillAsset,
+    variant_id: &str,
+    failure_detail: &str,
+) -> String {
+    let skill_yaml = serde_yaml::to_string(skill).unwrap_or_else(|_| format!("{skill:#?}"));
+    format!(
+        r#"你是「技能编译专家」（Skill Compiler · 连山重编译任务）。
+
+## 背景
+
+归藏 skill「{id}」（{name}）在运行中被调用 {n} 次，通过率低于阈值（{failure}）。
+这是一个**重编译任务**：fork 变体 `{variant_id}`，重新生成 Python 执行体，
+解决失败原因。
+
+## 失败详情
+
+{failure_detail}
+
+## 当前 skill 契约（原根资产，只读参考）
+
+```yaml
+{skill_yaml}
+```
+
+## 输出：用 write 工具写三个文件（变体）
+
+1. `deliverables/skill.py`——优化后的 Python 脚本（执行体重生）
+2. `deliverables/skill.yaml`——变体契约（YAML，必须含 `type: skill`）
+3. `deliverables/handoff.md`——标准交接文档（**必须以 YAML front matter 开头**，见硬约束 5）
+
+**路径纪律（最重要，违反必失败）**：`deliverables/skill.py` / `deliverables/skill.yaml` / `deliverables/handoff.md`
+是**相对路径**，由 write 工具自动解析到**本任务目录**下——不要拼绝对路径。写产物**只用
+write 工具**；**禁止**用 bash 执行 `cp` / `mkdir` / `echo >` 写到绝对路径或项目根目录
+（bash 只用于读源码、跑测试，不用它落盘）。
+
+### 变体契约硬约束
+
+- `id` 必须 = `{variant_id}`（不要用原 id）
+- `dual` 必须 = `{dual}`（继承原根）
+- `parent_id` 填 `{parent}`（溯源）
+- `category` 继承原根类别（若原根是判据类但类别误标 exec，应修正为 verify——按功能本质分类，规则见下）
+- `agent_target` 与 category 一致：verify/converge → YinAgent；orch/exec → YangAgent
+
+### skill 分类规则（按功能本质，不是按来源任务）
+
+- **判据类**（输入目标，输出 passed 布尔，机械判定是否满足：文件存在/格式合法/引用可解析/内容一致）→ `category: verify` + `agent_target: YinAgent`
+- **执行类**（主动操作：写文件/跑命令/搜索/抓取/生成内容）→ `category: exec` + `agent_target: YangAgent`
+- **拆解类** → orch；**收敛类** → converge
+- dual 必须与 category **类别互补**（verify↔exec、orch↔converge），不能同侧同类别
+- 反例：「检查文件是否存在的脚本」是判据 → verify + YinAgent + dual 选 exec 侧（如 write），不是 exec
+- `implementations` 的 kind 用 `python`，target = skill.py
+
+### skill.py 脚本契约
+
+```python
+{PYTHON_SKILL_CONTRACT}
+```
+
+- 脚本内拿不到 OPENAI_API_KEY——禁止调 LLM
+- 30s 超时硬截止，禁止死循环/长网络
+- 确定性操作经 `taiji builtin <name>` 调 Rust 原语，或 `taiji skill <id>` 复用其他 skill
+
+### 优化方向
+
+- 修复失败详情指出的问题（判据过松/过严、边界未处理、参数解析错误等）
+- 保持确定性、机械可执行
+
+## 硬约束
+
+1. 本任务是重编译任务：直接产出 skill.py + skill.yaml，不拆解、不递归、完成即止。
+2. 只产出能机械执行的判据/执行体，不虚构不存在的验证能力。
+3. 完成后简述你优化了什么 + 为什么能提高通过率。
+4. 写文件只用 write 工具（相对路径），禁止 bash cp/mkdir/重定向写产物。
+5. `deliverables/handoff.md` **必须以 YAML front matter 开头**（`---` 起止围栏），字段至少含 `task`、`result`、`status: complete`、`output_refs: [deliverables/skill.py, deliverables/skill.yaml]`——reference-resolves 机械检查解析 front matter 的 output_refs 逐项验存在。
+"#,
+        id = skill.id,
+        name = skill.name,
+        n = skill.stats.n,
+        failure = failure_detail,
+        variant_id = variant_id,
+        failure_detail = failure_detail,
+        skill_yaml = skill_yaml,
+        dual = skill.dual,
+        parent = skill.id,
+    )
+}
+
+/// 四类扫描找 skill（重编译输入；合并视图元层∪资产层）。
+async fn find_skill(
+    guizang: &GuizangClient,
+    id: &str,
+) -> Result<Option<SkillAsset>, TaijiError> {
+    use crate::infra::skill_catalog::{load_skill_catalog, ToolProfile};
+    use crate::types::verification::SkillCategory;
+    for category in [
+        SkillCategory::Exec,
+        SkillCategory::Orch,
+        SkillCategory::Verify,
+        SkillCategory::Converge,
+    ] {
+        let catalog = load_skill_catalog(guizang, category, ToolProfile::Full).await?;
+        if let Some(s) = catalog.into_iter().find(|s| s.id == id) {
+            return Ok(Some(s));
+        }
+    }
+    Ok(None)
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -448,6 +814,7 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::types::manifold::{TopologyNode, TopologyNodeKind};
+    use crate::types::verification::SkillCategory;
 
     fn mk_topo() -> ManifoldTopology {
         ManifoldTopology {
@@ -471,8 +838,9 @@ name: 编译报告
 summary: 生成报告
 description: 测试技能
 dual: write
+category: verify
 implementations:
-  - kind: file_exists
+  - kind: builtin
     target: deliverables/*
     severity: hard
     pass_condition: 产出存在
@@ -485,13 +853,13 @@ status: active
         assert_eq!(skill.id, "compile-report");
         assert_eq!(skill.dual, "write");
         assert_eq!(skill.implementations.len(), 1);
-        assert_eq!(skill.implementations[0].kind, crate::types::verification::SkillKind::FileExists);
+        assert_eq!(skill.implementations[0].kind, crate::types::verification::SkillKind::Builtin);
         assert_eq!(skill.effective_category(), Some(crate::types::verification::SkillCategory::Verify));
     }
 
     #[test]
     fn parse_skill_deliverable_handles_fence() {
-        let raw = "分析如下：\n```yaml\ntype: skill\nid: x\nname: X\nsummary: s\ndual: write\nimplementations:\n  - kind: file_exists\nconfidence: 0.5\nversion: 0\n```\n完毕。";
+        let raw = "分析如下：\n```yaml\ntype: skill\nid: x\nname: X\nsummary: s\ndual: write\nimplementations:\n  - kind: builtin\nconfidence: 0.5\nversion: 0\n```\n完毕。";
         let skill = parse_skill_deliverable(raw).expect("fenced skill yaml");
         assert_eq!(skill.id, "x");
     }
@@ -513,6 +881,91 @@ status: active
         assert_eq!(strip_fences("plain text"), "plain text");
     }
 
+    /// 构造 SkillAsset 字面量（测试用最小字段集）。
+    fn mk_skill(id: &str, category: SkillCategory, desc: &str, pc: &str, dual: &str) -> SkillAsset {
+        use crate::types::verification::{SkillImpl, SkillKind};
+        SkillAsset {
+            id: id.into(),
+            name: id.into(),
+            summary: "s".into(),
+            description: desc.into(),
+            detail: None,
+            tags: vec![],
+            examples: vec![],
+            input_modes: vec!["json".into()],
+            output_modes: vec!["text".into()],
+            category: Some(category),
+            dual: dual.into(),
+            implementations: vec![SkillImpl {
+                kind: SkillKind::Python,
+                target: "skill.py".into(),
+                params: serde_json::json!({}),
+                severity: None,
+                pass_condition: pc.into(),
+            }],
+            agent_target: "YangAgent".into(),
+            confidence: 0.9,
+            version: 0,
+            status: "active".into(),
+            stats: Default::default(),
+            env_tags: vec![],
+            safe_for_exploration: false,
+            parent_id: None,
+            variant_of: None,
+        }
+    }
+
+    /// V55 实测样本：判据类（检查文件存在）被误标 exec + 同侧 dual（file-exists）→
+    /// 机械强制 verify + dual 改 write + agent_target 改 YinAgent。
+    #[test]
+    fn enforce_judgment_category_rewrites_verify() {
+        use crate::types::verification::SkillCategory;
+        let mut skill = mk_skill(
+            "check-file-exists",
+            SkillCategory::Exec,
+            "机械检查目标文件是否存在，返回 passed 布尔判定与详情，适用于验证交付物是否落盘、路径引用是否有效等存在性场景",
+            "stdout 返回 JSON 含 passed 布尔值，passed=true 当且仅当目标文件存在",
+            "file-exists",
+        );
+        assert!(enforce_judgment_category(&mut skill), "应触发判据归阴");
+        assert_eq!(skill.effective_category(), Some(SkillCategory::Verify));
+        assert_eq!(skill.agent_target, "YinAgent");
+        // dual 修正：file-exists（verify 同侧）→ 其对偶 write（exec 侧）
+        assert_eq!(skill.dual, "write");
+    }
+
+    /// 执行类（动作）skill 不受影响——描述无强判据词。
+    #[test]
+    fn enforce_judgment_category_keeps_action_skill() {
+        use crate::types::verification::SkillCategory;
+        let mut skill = mk_skill(
+            "write-report",
+            SkillCategory::Exec,
+            "将报告内容写入目标路径，支持相对/绝对路径解析，返回写入结果",
+            "脚本将内容写入目标路径并返回成功或失败",
+            "file-exists",
+        );
+        assert!(!enforce_judgment_category(&mut skill), "动作类不应改写");
+        assert_eq!(skill.effective_category(), Some(SkillCategory::Exec));
+        assert_eq!(skill.dual, "file-exists");
+        assert_eq!(skill.agent_target, "YangAgent");
+    }
+
+    /// 已是 verify 的 skill 不受影响。
+    #[test]
+    fn enforce_judgment_category_keeps_verify() {
+        use crate::types::verification::SkillCategory;
+        let mut skill = mk_skill(
+            "already-verify",
+            SkillCategory::Verify,
+            "检查交付物存在性，输出 passed 判定",
+            "passed=true 当且仅当目标存在",
+            "write",
+        );
+        assert!(!enforce_judgment_category(&mut skill));
+        assert_eq!(skill.effective_category(), Some(SkillCategory::Verify));
+    }
+
     #[tokio::test]
     async fn enqueue_compile_task_writes_and_is_idempotent() {
         let dir = std::env::temp_dir().join(format!(
@@ -531,5 +984,59 @@ status: active
         assert_eq!(value["retries"], 0);
 
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[tokio::test]
+    async fn enqueue_compile_task_variant_writes_and_is_idempotent() {
+        let dir = std::env::temp_dir().join(format!(
+            "taiji_compile_var_{}_{}",
+            std::process::id(),
+            now_ms()
+        ));
+        enqueue_compile_task_variant(&dir, "skill-x-v1", "skill-x", "pass_rate 0.3 < 0.6")
+            .await
+            .unwrap();
+        let path = dir.join("compile").join("skill-x-v1.json");
+        assert!(path.exists(), "variant queue file written");
+
+        // 幂等：同 variant_id 已存在 → 不覆盖（retries 保持 0）
+        enqueue_compile_task_variant(&dir, "skill-x-v1", "skill-x", "another detail")
+            .await
+            .unwrap();
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(value["retries"], 0);
+        assert_eq!(value["variant_of"], "skill-x");
+        assert_eq!(value["recompile"], true);
+        assert_eq!(value["failure_detail"], "pass_rate 0.3 < 0.6", "first write preserved");
+
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    #[test]
+    fn compile_recompile_description_includes_variant_constraints() {
+        let skill = parse_skill_deliverable(
+            r#"type: skill
+id: check-x
+name: 检查X
+summary: s
+dual: write
+category: verify
+implementations:
+  - kind: python
+    target: skill.py
+    severity: hard
+confidence: 0.7
+version: 0
+status: active
+"#,
+        )
+        .expect("valid skill");
+        let desc = compile_recompile_description(&skill, "check-x-v1", "pass_rate 0.3 < 0.6");
+        assert!(desc.contains("check-x-v1"), "variant id injected");
+        assert!(desc.contains("parent_id"), "parent instruction present");
+        assert!(desc.contains("pass_rate 0.3 < 0.6"), "failure detail injected");
+        assert!(desc.contains("skill.py"), "script contract present");
+        assert!(desc.contains("dual"), "dual inheritance instruction present");
     }
 }

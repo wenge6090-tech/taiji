@@ -39,10 +39,10 @@ pub struct YangHookSet<M> {
     safety: SafetyHook,
     trace: TraceHook,
     snapshot: ChatHistorySnapshotHook,
-    /// V29 上下文窗口预算（BCP §8.19）：最后执行——Terminate 前 trace 与
+    /// V29 上下文窗口预算（AGENTS.md §14）：最后执行——Terminate 前 trace 与
     /// snapshot 已完整记录本轮 LLM 调用，不丢审计。
     limiter: ContextLimiter,
-    /// V30 封地边界（BCP §8.20 能看不能写）：write 工具目标路径必须落在
+    /// V30 封地边界（AGENTS.md §13 能看不能写）：write 工具目标路径必须落在
     /// 本任务 task_dir 内（兄弟/父/无关路径写入拒绝）——SafetyHook 黑名单
     /// 只拦 `..`/`~`/`/etc`，绝对路径直写兄弟目录不触发，域校验兜底。
     task_dir: PathBuf,
@@ -73,7 +73,7 @@ impl<M> YangHookSet<M> {
     }
 }
 
-/// V30 封地边界（BCP §8.20 能看不能写）：write 工具目标路径归一化后必须
+/// V30 封地边界（AGENTS.md §13 能看不能写）：write 工具目标路径归一化后必须
 /// 落在本任务 task_dir 内（词法级，无需文件系统访问——目标文件可能尚不存在）。
 /// 相对路径按 task_dir 解析（sandbox 语义：相对路径永不出封地）。
 /// 非 write 工具放行；args 非 JSON 或缺 path → 拒绝（工具契约 §15 违反）。
@@ -184,7 +184,7 @@ impl<M: CompletionModel> PromptHook<M> for YangHookSet<M> {
         args: &str,
     ) -> ToolCallHookAction {
         fwd!(SafetyHook, self.safety, on_tool_call, ToolCallHookAction::Continue, tool_name, tool_call_id.clone(), internal_call_id, args);
-        // V30 封地边界（BCP §8.20 能看不能写）：safety 黑名单后追加 write
+        // V30 封地边界（AGENTS.md §13 能看不能写）：safety 黑名单后追加 write
         // 域校验——write 目标必须在 task_dir 内，兄弟/父/无关路径写入拒绝。
         if let Err(e) = check_write_domain(&self.task_dir, tool_name, args) {
             tracing::warn!(

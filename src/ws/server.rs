@@ -200,6 +200,14 @@ impl WsServer {
                     let r = crate::ws::handler::handle_plan_message(&description, &st).await;
                     to_response(&request_id, r)
                 }
+                ClientMessage::GetGuizangGraph { .. } => {
+                    let r = crate::ws::handler::handle_get_guizang_graph(&st).await;
+                    to_response(&request_id, r)
+                }
+                ClientMessage::GetOntologyView { .. } => {
+                    let r = crate::ws::handler::handle_get_ontology_view(&st).await;
+                    to_response(&request_id, r)
+                }
                 ClientMessage::ChatMessage {
                     message,
                     session_id,
@@ -262,6 +270,8 @@ fn request_id_of(msg: &ClientMessage) -> &str {
         | ClientMessage::GetTaskTree { request_id, .. }
         | ClientMessage::GetZhouyiState { request_id, .. }
         | ClientMessage::PlanMessage { request_id, .. }
+        | ClientMessage::GetGuizangGraph { request_id }
+        | ClientMessage::GetOntologyView { request_id }
         | ClientMessage::ChatMessage { request_id, .. } => request_id,
     }
 }
@@ -454,9 +464,11 @@ mod tests {
             ClientMessage::GetZhouyiState { request_id: "e".into(), task_id: "t".into() },
             ClientMessage::PlanMessage { request_id: "f".into(), description: "p".into() },
             ClientMessage::ChatMessage { request_id: "g".into(), message: "m".into(), session_id: None, context_task_id: None },
+            ClientMessage::GetGuizangGraph { request_id: "h".into() },
+            ClientMessage::GetOntologyView { request_id: "i".into() },
         ];
         let ids: Vec<&str> = msgs.iter().map(request_id_of).collect();
-        assert_eq!(ids, vec!["a", "b", "c", "d", "e", "f", "g"]);
+        assert_eq!(ids, vec!["a", "b", "c", "d", "e", "f", "g", "h", "i"]);
     }
 
     #[test]

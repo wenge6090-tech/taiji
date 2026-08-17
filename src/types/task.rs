@@ -31,7 +31,7 @@ pub struct SubtaskSpec {
     /// enforcement). Defaults to Orchestration for robustness.
     #[serde(default)]
     pub mode: crate::types::agent::AgentMode,
-    /// V37：子任务模型覆盖（BCP §8.8 子任务级路由）。父 LLM 拆解时可按
+    /// V37：子任务模型覆盖（Blueprint §4.3 子任务级路由）。父 LLM 拆解时可按
     /// 子任务难度/领域分配不同模型；None = 继承父模型（子 ZhouyiCycle 注入父
     /// MetaContext，`model` 默认继承）。serde default：旧 decompose_result
     /// 零迁移。
@@ -60,12 +60,12 @@ pub struct ChildResultSummary {
     pub tools_used: Vec<String>,
     #[serde(default)]
     pub deliverables: Vec<String>,
-    /// V31 失败汇报（BCP §8.18）：任务级失败的子任务原因文本（供父阳再指导）。
+    /// V31 失败汇报（Blueprint §1.5）：任务级失败的子任务原因文本（供父阳再指导）。
     /// 成功子任务为 None。失败子任务的 deliverables 含 handoff.md 交接产物路径
     /// （残缺产出，父阳可读后精准 rerun_of + 修正指导）。
     #[serde(default)]
     pub failure_reason: Option<String>,
-    /// V31 失败分类（§8.18 词汇表扩展）：context_overflow / hard_cutoff /
+    /// V31 失败分类（§1.5 词汇表扩展）：context_overflow / hard_cutoff /
     /// llm_failed / io / cognitive / constraint_violation / other。
     #[serde(default)]
     pub failure_kind: Option<String>,

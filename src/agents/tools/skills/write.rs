@@ -43,7 +43,7 @@ impl BuiltinSkill for WriteTool {
             )));
         }
 
-        // V47 P0：相对路径按 task_dir 解析（封地基准，BCP §8.20），非进程 cwd。
+        // V47 P0：相对路径按 task_dir 解析（封地基准，AGENTS.md §13），非进程 cwd。
         // 此前用 std::env::current_dir()（项目根）解析，导致 "deliverables/x.md"
         // 被写到项目根而非任务目录，父层 converge 扫 task_dir 收不到产出物。
         let raw = common::expand_tilde(path_str);
@@ -105,7 +105,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_write_relative_path_resolves_to_task_dir() {
-        // V47 P0 回归：相对路径必须按 task_dir 解析（封地基准，BCP §8.20），
+        // V47 P0 回归：相对路径必须按 task_dir 解析（封地基准，AGENTS.md §13），
         // 而非进程 cwd（项目根）——否则父层 converge 扫 task_dir 收不到产出物。
         let task_dir = std::env::temp_dir().join(format!(
             "taiji_write_p0_{}_{}",

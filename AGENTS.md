@@ -156,7 +156,7 @@
 
 ## 15. 蓝图文件·迹拓扑（V50）
 
-- **数据源双轨**：统计压缩读 `trace.jsonl`（度量·「干了什么」）；迹拓扑读任务目录树（结构·「要干什么/产出什么」：`meta.json` + `deliverables/` + `handoff.md`），**不碰 trace.jsonl**（§6.0 三层定论）。
+- **数据源双轨**：统计压缩读 `trace.jsonl`（度量·「干了什么」）；迹拓扑读任务目录树（结构·「要干什么/产出什么」：`meta.json` + `deliverables/` + `handoff.md`），**不碰 trace.jsonl**（Blueprint §5.0 三层定论）。
 - **拓扑契约**：`knowledge/manifold/{root_task}.yaml`（**serde YAML**，与资产文件一致，非 JSON）；节点 `Task/Asset/Deliverable/Handoff`，边 `Decompose/Invoke/Dataflow/Handoff/Verify`。`decompose` 边来自 `meta.json.parent_id`（精确，非 depth 近似）；deliverable 节点 id = 相对 root task_dir 的路径（树内唯一）。
 - **`enqueue_lianshan_pending` 新增 `task_dir: &Path` 参数**（4 处调用点：zhouyi 生产 + active_learning + zhouyi 测试×2）——pending 负载加 `task_dir` 字段（`task_dir.display().to_string()`），Lianshan 经此获得任务树入口。
 - **拓扑是增强层**：backprop 成功后压缩，失败仅 warn 不阻断 backprop 主流程（与 model_stats/backprop_prompts 同构）；`compress_task_tree_to_topology` 是纯函数（同步、零 LLM），`save_topology`/`load_topology` 复用 save_asset 的 tmp+rename+git commit 模式。
@@ -167,22 +167,22 @@
 - **safe_for_exploration 字段**：`SkillAsset`（types/verification）+ `VerificationAsset`（types/agent）各加 `safe_for_exploration: bool`（serde default false）；`skill_asset_to_verification` 透传。`pick_exploration_target` 过滤 `!safe_for_exploration`（危险隔离）。**所有构造点**（meta_skills、knowledge 转换、测试）已补 false。
 - **主动学习冷启动**：`exploration_score` 的 `n=0 → f64::MAX` 改为 `confidence` 先验映射 μ（α=1+10c, β=1+10(1−c)）+ C·√(ln n_total)——非最大探索分（与 prompts 路径同构）。
 - **env_tags 降权**：`rank_prompts_by_ucb` 新增 `current_env_tags: &[String]` 参数——当前环境指纹非空、候选 env_tags 非空且无交集 → ×0.5（降权非过滤；候选 env_tags 空 = 环境无关不降权）。**源已接（§18）**：`meta_ctx.model` → `model_class()` → `["flash"|"strong"]`。
-- **漂移检测 / 退化诊断 / compile 调度**：定论已写（Blueprint §6.4/§6.5），实现待 /plan 阶段三；SW-UCB / Pareto-MCTS / 奖励归一化为已知边界延后（§6.5）。
+- **漂移检测 / 退化诊断 / compile 调度**：定论已写（Blueprint §5.5/§5.6），实现待 /plan 阶段三；SW-UCB / Pareto-MCTS / 奖励归一化为已知边界延后（§5.6）。
 - **待补**：safe_for_exploration 的「人工/流程标记」机制 + fork_variants 继承标记（当前全默认 false → 主动学习需标记后才激活）。
 
-## 17. 编译任务 = 一次周易任务执行（V50，§6.0 契约）
+## 17. 编译任务 = 一次周易任务执行（V50，Blueprint §5.0 契约）
 
 - **新模块** `src/orchestration/compile.rs`：`enqueue_compile_task`（单写者入队 `compile/{root_task}.json`，幂等：同 root_task 已存在不覆盖）/ `spawn_compiler`（main.rs `--with-lianshan` 时 spawn，`compile_enabled` 关不启动）/ `run_compile_queue`（空闲窗口消费）/ `parse_skill_deliverable`（去围栏 → YAML → JSON → parse_llm_json）/ `compile_task_description`（「标准 skill 编写规范」模板 + 拓扑注入 + 元层对偶候选表）。
 - **入队位置**：lianshan.rs backprop 成功后 `save_topology` 之后调 `enqueue_compile_task(&self.data_root, task_id)`（增强层 warn-only）。
-- **调度**（§6.0 定稿）：compile/ 与 pending/ 分离，单写者 = Lianshan Consumer；执行触发 = pending 空（空闲窗口）+ `compile_enabled`（config `runtime.lianshan.compile_enabled`，默认 false）。
+- **调度**（Blueprint §5.0 定稿）：compile/ 与 pending/ 分离，单写者 = Lianshan Consumer；执行触发 = pending 空（空闲窗口）+ `compile_enabled`（config `runtime.lianshan.compile_enabled`，默认 false）。
 - **不写 model_stats**：编译任务 PASS 后 zhouyi 会入队 pending → compile runner 立即删 `pending/{compile_task_id}.json`（只产 skill YAML，不污染路由统计、不触发二次拓扑/编译）。
 - **阴验证 = save_skill 机械判据**：解析 deliverables/skill.yaml → `save_skill`（内建 dual 存在 + 类别互补 + git commit）+ `implementations` 非空校验。失败重试 ≤3 → `.failed` + `.error` 日志（记录 manifold 引用 + 错误）。
 - **测试基线**：`cargo test --lib` → **321 passed, 0 failed**（compile.rs 5 测试 + lianshan 拓扑测试加 compile 入队断言）。
 - **遗留（已知边界）**：①「原任务变体复跑」未实现（阴验证只做机械判据，未重跑原任务验证复现）；② `compile_budget` 字段已加（config）但未强制执行——token 预算仍由既有 ContextLimiter 承担；③ 删 pending 与 Lianshan consumer 存在极短竞态窗口（空闲窗口下 consumer backoff 已增长，实际风险低）。
 
-## 18. 环境维度轴（env_tags = 模型类，V50 §6.3.1 定稿）
+## 18. 环境维度轴（env_tags = 模型类，V50 §5.4 定稿）
 
-- **定论**（Blueprint §6.3.1）：`env_tags` 是统一环境维度轴，模型类（flash/strong）是首要维度；4 类归藏资产（prompts/skills/verifications）共用「env_tags 隔离 + UCB 维度内排序 + 四算子维度内演化」一条轴，不给每类各写一套主动学习。
+- **定论**（Blueprint §5.4）：`env_tags` 是统一环境维度轴，模型类（flash/strong）是首要维度；4 类归藏资产（prompts/skills/verifications）共用「env_tags 隔离 + UCB 维度内排序 + 四算子维度内演化」一条轴，不给每类各写一套主动学习。
 - **模型类指纹**：`factory::model_class(&ModelKey)` / `model_class_from_str(&str)`——key 含 flash/lite/mini/small → "flash"，其余 → "strong"（与 `profile_for_model` 同一检测源，零新判定逻辑）。
 - **检索层源已接**：meta.rs `rank_prompts_by_ucb` 传 `[model_class(&model_key)]`（路由模型类 → current_env_tags）——同维度变体优先，异维度 ×0.5 降权。
 - **`VerificationAsset` 补 `env_tags` 字段**（serde default）+ `skill_asset_to_verification` 透传 `s.env_tags`（与 safe_for_exploration 同构）。
@@ -191,7 +191,7 @@
 - **边界**：Rust 硬编码元层宪法（meta.rs/yang/yin 模板）不参与主动学习，宪法自适应靠资产层变体覆盖（V45 双轨同 id 优先）。
 - **测试基线**：`cargo test --lib` → **323 passed, 0 failed**（+2：model_class 检测 + fork env_tags 标签）。
 
-## 19. 本体挖掘（OntologyMiner，V50 §6.6）
+## 19. 本体挖掘（OntologyMiner，V50 §5.7）
 
 - **类型层** `src/types/ontology.rs`（新）：`SemanticType`/`TypeSource`（词汇表）+ `OntologyEdge`（**type→type**，from/to 是 SemanticType id，`evidence` 审计支撑资产 id）+ `OntologyEdgeKind`（只 WeakDependency/Sequence，**不挖 Forbid**）+ `OntologyRule`/`RuleCondition`（type-level 规则）+ `TaskOntologyView`（实体链接输出）+ `CooccurPair`/`FailureGroup`（挖掘输入）。
 - **归藏存取** `infra/knowledge.rs`：`load/save_semantic_types`（types.yaml，`SemanticTypeFile{types}` 包装）、`load/save_relations`（relations.yaml）、`load/save_rules`（rules.yaml）、`load/save_cooccur`（cooccur.yaml）、`load/save_failures`（failures.yaml）——全部经 `load_ontology_yaml`/`save_ontology_yaml` 私有 helper（原子写 + git commit）；`asset_type_map`（资产 id → 语义类型 id，扫 tags 匹配词表，MVP-1 只映射 prompts）。
@@ -211,3 +211,119 @@
 - **归藏资产缺失用 `TaijiError::KnowledgeAssetNotFound { id }` 变体匹配**（`matches!`），禁 `e.to_string().contains("failed to read asset")`（字符串匹配脆弱）。
 - **`save_model_stats` 有意不 commit**（高频统计衍生，非资产契约——避免快照爆炸 + 污染回滚语义）；资产写路径（save_asset/save_skill/ontology_yaml）仍必须 tmp+rename+git commit。
 - **LLM 围栏解析走 `json_util::find_json_fence`**（case-insensitive + 允许空格，覆盖 ```JSON / ``` json）；所有 LLM 响应解析一律经 `parse_llm_json<T>`。
+
+## 21. 资产层统一 Python（V52，Blueprint §6.0/§5.0/§3）
+
+- **SkillKind 12→3 坍缩**（`types/verification.rs`）：`Builtin`（Rust 种子层，**builtin 名 = skill.id**）/ `Python`（资产层脚本，**脚本相对路径 = impl.target**）/ `LlmJudgement`（唯一 LLM kind）。`target` 语义三分：阴 builtin=检查目标 / Python=脚本路径 / 阳 builtin=留空。
+- **单一映射源**：`builtin_check_kind(name) -> Option<CheckKind>`（file-exists→FileExists…，阳 builtin 返回 None）+ `builtin_category(name)`（→SkillCategory）。**新增阴机械判据必须同步这两个函数**，否则 `knowledge.rs::skill_asset_to_verification` 与 `skill_engine.rs::impl_to_check_spec` 静默丢失（旧两处手写同构映射已删除）。
+- **`is_yin()`/`is_yang()` 已移除**——`Builtin` 二义（write 是阳 / file-exists 是阴），阴阳判定改用 `skill.effective_category()`（Orch/Exec=阳，Verify/Converge=阴）。`run_checks_assets` 只执行 `builtin_check_kind(skill.id)` 命中的 Builtin 实现。
+- **Python 执行引擎** `orchestration/python_engine.rs`：`run_python_skill(script, params, task_dir)`——`python3` 子进程，stdin JSON 进 / stdout JSON 出，`env_clear`（只留 PATH/HOME，**去掉 OPENAI_API_KEY = §1.3 第一闸门**）+ 30s 超时（内部 `run_python_skill_with_timeout` 可注入短超时供测试）+ cwd=task_dir。脚本契约：`def execute(params) -> dict` + `if __name__ == "__main__": print(json.dumps(execute(json.loads(sys.stdin.read()))))`。
+- **`taiji builtin <name> --args <json> [--task-dir <dir>]` syscall 子命令**（main.rs）：资产层 Python skill 经 `subprocess.run(["taiji","builtin",<name>,"--args",json])` 调 Rust 种子层原语（用户态调 syscall）。`skills::lookup_builtin` 公开为免费函数，CLI 与 SkillTool 共用同一注册表。
+- **SkillTool 双 runner**（`skills/mod.rs`）：`SkillRunner::Builtin(Arc<dyn BuiltinSkill>) | Python(PathBuf)`。`SkillTool::new_python` / `SkillRegistry::load_python_skills`。**Python skill 用通用对象 schema**（`additionalProperties: true`，参数直传 execute(params)，不经 normalize_args 双 JSON 转义）。
+- **YangAgent 接线**（yang.rs `load_python_skills` 免费函数）：加载 `load_skill_catalog(Exec|Orch)` → 只取 `kind: python` 实现 → `guizang.skill_script_path(cat, id, target)` 解析脚本 → 注册。**脚本缺失仅 warn 跳过**（资产层损坏不阻断 builtin 种子层闭环）。
+- **YinAgent 接线**（`skill_engine.rs::run_checks_assets` 签名新增 `guizang: Option<&GuizangClient>`）：阴面类别（Verify/Converge）的 `Python` 实现经 `python_engine` 子进程执行，产出 `CheckResult { kind: CheckKind::Python, passed, detail }`；`passed=false` + Hard → hard 短路。**`CheckKind` 新增 `Python` 变体**（serde `python`，仅运行时产生，不落盘到 `VerificationAsset.checks`——`skill_asset_to_verification` 对 Python kind 返回 None）。yin.rs 两处调用点（verify/converge）传 `self.guizang.as_deref()` / `Some(guizang.as_ref())`。
+- **编译管道产出 Python**（compile.rs）：模板教 LLM 写 `deliverables/skill.py`（`PYTHON_SKILL_CONTRACT` 常量注入 few-shot）+ `skill.yaml`（`kind: python` + `target: skill.py`）。`extract_skill_script` 读脚本；`save_skill_script` 落盘旁车文件 `{cat}/{id}/skill.py`（tmp+rename+git commit）。
+- **种子 YAML 迁移**：`.taiji/knowledge/yin/skills/verify/{file-exists,schema-valid,reference-resolves,trace-consistency}/skill.yaml` 的 `kind: file_exists|schema_valid|reference_resolves|trace_consistency` → `kind: builtin`（llm_judgement 不变）。**旧 kind 名无 serde alias**（§10 规则）——资产层旧 YAML 需手动迁移。
+- **避坑**：① Rust 2024 `std::env::set_var/remove_var` 是 unsafe（测试里包 unsafe 块）；② `save_skill`（skill.yaml）与 `save_skill_script`（skill.py）分两次 git commit——非原子，已知边界；③ `load_skill_catalog` 返回元层∪资产层合并视图，YangAgent 接线只取 `kind: python`（builtin 元层已注册，勿重复）。
+- **测试基线**：`cargo test --lib` → **360 passed, 0 failed**（+7：python_engine 4 + SkillTool Python 1 + save_skill_script 1 + run_checks_assets Python verify 1）。
+
+## 22. 归藏星云图（GetGuizangGraph，WS 协议）
+
+- **数据源必须用 `load_skill_catalog`（元层∪资产层合并视图），禁止只扫 `load_skill_assets`（仅磁盘资产层）**：磁盘技能的对偶边（如 `file-exists.dual=write`）引用的是 Rust 元层技能 `write`——磁盘上不存在，只扫磁盘会导致 dual 边悬空/丢失。合并视图保证对偶边全解析。
+- **节点键带类型前缀** `{type}:{id}`（prompt:xxx / skill:xxx / model:xxx）：prompt 与 model 可同名（如 `orch-yang` 提示词 ↔ `orch-yang` 贝叶斯后验），不加前缀撞键。
+- **dual 边去重**：`skill.dual` 双向对称（write↔file-exists 双方都填对偶），只保留字典序小的一端（`s.id < s.dual`），避免 A↔B 重复线。
+- **模型样本数**：`stats_n = (α+β−2).max(0)`（Beta(1,1) 先验下的等效采样次数，对齐前端节点尺寸）。
+- **前端力导向零依赖手写**（`taiji-web/GuizangGraph.tsx`）：排斥 O(n²)（资产量级几十个可忽略）+ 向心引力防爆炸 + 阻尼收敛 + 160 帧 rAF 定帧停止（非无限动画，省 CPU）。
+- **空库态**：`load_all_prompts`/`load_skill_assets` 过滤 `status != active`（pruned 留盘审计不入图）；知识库为空 → 前端「归藏知识库为空」提示，非错误。
+
+## 23. 语义层视图（GetOntologyView，元的先验智能可视化）
+
+- **`OntologyView` 直接透传 ontology 类型（字段 snake_case），不另造 camelCase 视图层**：字段与磁盘 `types.yaml`/`relations.yaml`/`rules.yaml`/`cooccur.yaml`/`failures.yaml` 契约一致（`env_tags`/`check_kind`/`weak_dependency`），转换层只会引入字段名两套并存。前端 TS 类型注释标明「snake_case 透传」。
+- **种子词表是启动钥匙（鸡生蛋）**：`asset_type_map` 扫 assets tags 匹配 `types.yaml` 词表；词表空 → 映射空 → `abstract_to_types` 全跳过 → 无边/无规则 → `apply_ontology` 注入零先验。**种子必须对齐现有资产 tags 的实际值**（现有 4 个 prompt 的 tags 是 `orchestration`/`execution`/`verify`/`converge` 全称，非 SkillCategory 的 `orch`/`exec`）——乱种领域类型（如 `deploy-action`）会因无资产打该 tag 而映射仍空。当前种子 6 类型：4 动作（orchestration/execution/verify/converge，立即映射 4 prompt）+ 2 领域前瞻（code-safety/data-query，空映射）。
+- **「无规则/无边」是常态非 bug**：挖掘门槛高——依赖边需共现 ≥ `ONTOLOGY_MIN_SAMPLES`(50) 且联合通过率 ≥0.8；约束规则需失败样本 ≥50 且失败率=1.0。可视化里规则/边为空是「先验未激活」，不是错误（状态分支回退纯 UCB，§5.7 红线 3）。
+- **`apply_ontology` 失败仅 warn（meta.rs 调用点），语义层是增强层**：本体读失败 = 归藏 I/O 硬错误上抛，但调用方 catch 后 warn 继续（增强层失败不阻断主循环）；「ontology 缺失/空 domain」是状态分支，非降级。
+
+## 24. skill 嵌套 + 编译即演化（V53，Blueprint §5.0/§6.0 V53 定论）
+
+- **`taiji skill <id>` 子命令（main.rs cmd_skill）——用户态调用户态**：与 `taiji builtin`（用户态调 syscall）正交。四类扫描（Exec/Orch/Verify/Converge）`load_skill_catalog` 找 `kind: python` 实现 → `skill_script_path` 解析 → `run_python_skill` 执行。**只查资产层 Python skill，不回落 builtin**。
+- **循环/深度护栏载体 = `TAIJI_SKILL_CHAIN` 环境变量（JSON 数组）**：`cmd_skill` 读它判循环（id 已在链中→拒绝）+ 深度（链长 ≥ `runtime.max_depth`→拒绝）；`python_engine::run_python_skill` 在 `env_clear` 后注入（空链不注入）。**改 run_python_skill 签名（新增 `chain: &[String]`）后，所有调用点（SkillTool / SkillEngine / 测试）必须传 `&[]`，否则 E0061**。
+- **Python skill 统计走 `SkillAsset.stats`（非 `VerificationAsset.checks`）**：V52 定论 `CheckKind::Python` 不落盘 VerificationAsset.checks，故 `backprop_checks` 末尾新增 `backprop_python_skills` 独立路径——按 `check_id` 前缀（`{skill.id}#{idx}`）匹配 SkillAsset，更新其 `stats`（n/pass/cost/rounds/quality）。**只有 `kind: python` 的资产层 skill 被更新（元层 builtin 无 Python 执行体，过滤跳过）**。
+- **阳面 Python skill 统计信号链（损失函数 pass 分量，V53）**：阴面 skill 经 SkillEngine 产 CheckResult（已有）；阳面 skill（exec/orch）经 `SkillTool` 工具调用，结果不进 verify_state——故新增 `SkillTool::execute` Python 分支记录 `{task_dir}/tool_calls.jsonl`（每行 JSON：skill_id/passed/detail，同步 append 失败仅 warn），`zhouyi.rs` PASS 时 `load_tool_calls` 读它转 CheckResult（check_id=`{skill_id}#0`）合并进 checks → `backprop_python_skills` 回传。**cost/rounds/quality 留 0（工具调用级无 token 信号，任务级摊派在 verify_state 分支已做，MVP 边界）**。
+- **fork 对象类型分裂（两个 fork 不混）**：`fork_variants` 操作 VerificationAsset（llm_judgement 判据改 strictness 参数）；`fork_python_skills` 操作 SkillAsset（Python 执行体，低通过率时**入队 compile 变体重新生成执行体**，非 clone+改参数）。**不要试图合并两者——V52 定论 CheckKind::Python 不落盘 VerificationAsset，Python skill 的演化必须走 SkillAsset 路径**。
+- **编译演化算子闭环**：`fork_python_skills`（空闲窗口，lianshan `files.is_empty()` 分支）发现低通过率（`stats.n ≥ min_samples` 且 `pass_rate < FORK_PASS_RATE_THRESHOLD=0.6`）Python skill → `enqueue_compile_task_variant(data_root, variant_id={id}-v1, variant_of, failure_detail)`（幂等：compile 文件已存在跳过）→ `run_compile_queue` 消费 `recompile: true` payload → `compile_recompile_description` 教 LLM 产出变体（id=variant_id、继承 dual/parent_id）→ **save_skill 前冒烟压测**（python_engine 跑空 params，crash/非法 JSON/超时 = 编译失败重试）。
+- **冒烟压测是「主动学习压测」的 MVP 形态**：连山符号裁决第一道闸（零 LLM），验证脚本可执行，非复跑原任务；「原任务变体复跑」仍是后续（AGENTS.md §17 遗留①）。
+- **测试基线**：`cargo test --lib` → **367 passed, 0 failed**（+6：chain 注入 / compile 变体幂等 / 重编译模板 / python skill 回传 / fork 入队 / 阳面 tool_calls 解析）。
+
+## 25. 损失函数全修（V51，四维回报接线 + cost 归一化 + 摊派修复）
+
+- **`CheckStats::reward(w, cost_norm)` 签名加 `cost_norm`**（[0,1] 归一化成本）——原始 token 量级（~1e5）不归一化会以 4 个数量级碾压 pass/quality 项，回报退化为 `≈ −w_cost·avg_cost`（实测 file-exists：0.5+0.29−48754−0.1 = −48753）。归一化对齐 model_router 的 `avg_cost/max_group_avg_cost` 模式。**原生产路径零调用**（fork/merge/prune 只用 pass_rate；model_router 内联自己一份归一化实现）——现统一。
+- **四维回报接线**：fork/merge/prune 六算子（variants + prompts）决策值由单一 pass_rate 升级为 `decision_value(stats, mu, cost_norm, w) = w_pass·μ + w_quality·avg_quality − w_cost·cost_norm − w_rounds·avg_rounds`（pass 项用后验 μ，空 map 回退频率 pass_rate）。阈值：`FORK_REWARD_THRESHOLD=0.3`（≈旧 pass_rate 0.6）、`MERGE_REWARD_DIFF=0.05`（≈旧 pass 差 0.1）。`FORK_PASS_RATE_THRESHOLD=0.6` 保留给 `fork_python_skills`（Python 执行体路径）。
+- **cost 摊派除以 check 数**：`backprop_checks`/`backprop_python_skills` 的 `cost_sum += cost_tokens / n_checks`（修「同任务全额摊派给每个 check → 一笔成本记 N 次」的 4× 重复）。model_stats 仍取 `checks.first().cost_tokens`（全额，不受影响）。
+- **观测事实（两套 stats 分家）**：backprop 回传**扁平** `*.yaml`（legacy VerificationAsset），不回传 V45 文件夹 `{id}/skill.yaml`（其 stats 恒 0）——Python skill 走 `backprop_python_skills`，builtin 判据走扁平。改 stats 语义前先确认改哪套。
+- **测试基线**：`cargo test --lib` → **367 passed, 0 failed**。
+
+## 26. 编译管线实测修复（V54：路径纪律 + 冒烟压测 + handoff 契约）
+
+- **编译 prompt 路径纪律**（`compile.rs` 的 `compile_task_description` + `compile_recompile_description` 模板）：显式要求「写产物只用 write 工具（相对路径），禁止 bash cp/mkdir/重定向写到绝对路径或项目根」。起因：编译任务 LLM 用 `bash cp` 把 skill.py 拷到项目根（bash 按设计忽略 task_dir、scope 只到项目根），绕过 write 工具的 task_dir scope → 阴验证收不到产物。
+- **`run_python_skill` 脚本路径 canonicalize**（`python_engine.rs`）：入口把 script_path canonicalize 成绝对路径（相对路径按进程 cwd=项目根解析）。起因：调用方传 `.taiji/...` 相对路径时被 cwd=task_dir 二次拼接成 `.taiji/tasks/<id>/.taiji/...`（冒烟压测 can't open file）。**这是 SkillTool / SkillEngine / 冒烟压测所有调用点的共用修复**（测试用绝对 tmp 目录所以此前没暴露）。回归测试 `run_python_skill_relative_path_resolves_absolutely`。
+- **编译模板要求 handoff.md front matter**：阴验证 reference-resolves 解析 handoff.md 的 output_refs 逐项验存在；编译模板必须要求 LLM 写标准 front matter（task/result/status/output_refs），否则 LLM 写纯 markdown → YAML 解析失败 → BackToZhouyi 死循环。编译输出三文件 = skill.py + skill.yaml + handoff.md。
+- **观测：bash 冒烟自测污染项目根**：编译任务 LLM 用 bash（cwd=项目根，设计使然）冒烟自测时往项目根 `deliverables/` 落 check_file_exists.py + `__pycache__` 垃圾——不阻断管线，但与 cp 污染同类，会干扰后续任务 LLM 视野（实测已两次撞上，污染目录需人工清理）。
+- **测试基线**：`cargo test --lib` → **367 passed, 0 failed**（+1：python_engine 相对路径回归）。
+
+## 27. 编译 skill 分类（V55：判据类强制归阴 + 模板教学）
+
+- **实测 bug**：编译任务 LLM 按「来源任务类型」（写脚本 → exec）给 skill 分类，把「检查文件是否存在」这类**判据**（输出 passed 布尔、机械判定是否满足）误标 `category: exec` + `agent_target: YangAgent` 落到阳面，且 dual 选了同侧同类（file-exists，verify 侧）——非互补。save_skill 的 dual 互补校验拦不住（exec↔verify 表面互补），只靠 LLM 自觉。
+- **模板教学**（`compile.rs` 两处模板 `compile_task_description` + `compile_recompile_description` 的「skill 分类规则」段）：按**功能本质**分类——判据类（输入目标/引用/内容，输出 passed 布尔）→ `verify` + `YinAgent` + dual 从 exec 侧选（write/read/bash/search/webfetch）；执行类（主动操作）→ `exec` + `YangAgent` + dual 从 verify 侧选；拆解 → orch；收敛 → converge。反例教学：检查文件存在的脚本 = 判据 → verify，不是 exec。
+- **机械护栏**（`compile.rs::enforce_judgment_category`，runner 在 extract_skill 后调用）：description 命中强判据词（判定/验证/存在性/当且仅当/合法性/一致性）**且** pass_condition 含 passed 布尔判定 → 强制 `category=verify` + `agent_target=YinAgent`；dual 若仍同侧（verify）→ 取其对偶 exec skill（如 file-exists.dual = write）。改动用 warn 审计。保守性：只取强判据词，弱词（检查/判断）不取防误伤动作类；已 verify 或动作类不动。
+- **已落库错误资产修正方式**：直接改 yaml（category/agent_target/dual）+ `mv` 目录（yang/skills/exec → yin/skills/verify）；`.history` 旧快照保留作审计，下次任何 save_* 全量快照自然包含修正。
+- **测试基线**：`cargo test --lib` → **370 passed, 0 failed**（+3：判据类强制归阴 / 动作类不动 / 已 verify 不动）。
+
+## 28. serde(default) 结构体级 vs 字段级（V55：LianshanConfig 默认值全部退化为 0 的 bug）
+
+- **规则**：Rust serde 的 `#[serde(default)]` 在**结构体级**（struct 上方）= 缺失字段取**容器类型 Default::default() 的对应值**；在**字段级** = 缺失字段取**字段类型 Default**（u64/usize/f64/bool → 0/false/0.0）。需要语义默认值的配置结构必须用**结构体级**（与 LlmConfig/ContextLimits/ModelRoutingConfig 同模式）。
+- **实测 bug**：`LianshanConfig` 全是字段级 `#[serde(default)]`，而 `.taiji/config.json` 的 `runtime.lianshan` 只显式写了 `compile_enabled` → 其余字段反序列化为 0：
+  - `min_samples=0` → `fork_python_skills` 对 **n=0 刚落库的 skill** 也入队重编译（实测：check-file-exists 刚编译落库就被 fork 成 check-file-exists-v1，`failure_detail: "pass_rate 0.00 < 0.6 (n=0)"`）——白白消耗一次 LLM 编译。
+  - `activation_min_samples=0` + `activation_min_assets=0` → **演化激活门槛失效**（S2 实验的 fork→prune FIRED 就是在零门槛下观察到的，修复后行为更保守，旧观察结论需重估）。
+  - `prior_strength=0.0` → 冷启动先验 α=1+0·c 退化为均匀 Beta(1,1)，confidence 先验失效。
+- **回归测试**：`config.rs::lianshan_missing_fields_use_container_default`（对象存在但缺字段 → 3/5/50/10.0/20000）+ `lianshan_whole_object_missing_uses_default`（整个对象缺失 → 整体 Default）。注意 RuntimeConfig 的 max_concurrent_agents/max_depth/max_rounds/max_cycles/max_subtasks 与 TaijiConfig.version 是**必填无默认**——测试 JSON 必须补全。
+- **测试基线**：`cargo test --lib` → **372 passed, 0 failed**（+2 回归）。
+
+## 29. V56-V59 实现（阴判断节点 + 实时录入 + 连山收缩 + 晶体归藏 + V51 恢复）
+
+> 本次为跨版本架构过渡（Blueprint V57/V58/V59 落地），修改面大。以下四条按子版本分述，最后是事故恢复与测试基线。
+
+### V57 阴判断节点（半符号半 LLM，非 Agent）
+
+- **阴不是 Agent**：不持有 skill、不注册工具、不跑 SkillEngine、不持有 system prompt（资产层）。`SkillEngine` 已删除（`orchestration/skill_engine.rs` 移除，`pub mod skill_engine` 同步删除）；`YinHookSet`（`hooks/yin_hook_set.rs`）变死代码（保留未删，V57 后阴无 hook 挂载点）。
+- **阴 = 半符号半 LLM 判断节点**（`agents/yin.rs` `YinJudge`）：符号层优先恒在（LLM 不可翻案），LLM 层兑底（唯一 LLM 介入点，**不注册工具**——read/webfetch 移除）。
+- **判断依据三层**：逻辑层（`load_truths` + `check_yin_output` 机械对碰阳产出，hard 违反 → `BackToMeta` 认知偏差）+ 因果层（`match_relations` 因果先验注入 LLM 兑底 prompt）+ 运行保障（`check_atomics` 无条件 Rust 原子判据，hard 失败 → `BackToZhouyi` 执行偏差）。
+- **无系统提示资产**：硬编码 `VERIFY_FALLBACK_PROMPT` / `CONVERGE_FALLBACK_PROMPT`（与元「半 LLM 半符号」对称、顺序相反：元先语义后符号，阴先符号后语义）。
+- **AgentFactory**：`create_yin_verify_agent`/`create_yin_converge_agent` → 单一 `create_yin_judge`（zhouyi/yin_verify/recursive_decompose 调用点同步）。
+- **`check_atomics` 返回 `(Vec<CheckResult>, bool)`**（结果 + hard 失败旗标）；`MetaContext` 新增 `ontology_objects`（compose 实体链接产物透传阴，零新增 LLM）。
+- **已知边界（V33 路径停止）**：V33 的 llm_judgement 判据变体树（fork/merge/prune 演化主要对象）在 V57 后失去数据源——SkillEngine 删除（判据不再逐条执行）+ backprop_checks 删除（stats 不再回传）。`load_all_verifications()` 的 llm_judgement 资产 stats 恒 0 → `total_n < min_samples` → 永不触发演化。这是 V57「判据从资产层 llm_judgement 迁移到 ontology 三层 + 原子判据」的自然结果，演化焦点转移到 Python skill + prompts + ontology 因果。非 bug，是架构迁移的既定边界。
+
+### V59 实时录入 + 连山收缩（C 方案）
+
+- **实时录入**（替代连山 backprop）：`GuizangClient::record_prompt_signal`/`record_python_skill_stats`/`update_posterior`（knowledge.rs，贝叶斯 α/β 更新自 `CognitionEvolver::bayesian_update` 迁移）——PASS 时 zhouyi 调 `record_judgment` 写入 stats + 后验（非阻塞：失败仅 warn）。
+- **连山收缩**：`lianshan.rs` 去 backprop（`backprop_prompts`/`backprop_checks`/`model_stats` 移除），只保留深压缩：拓扑压缩（`save_topology`）+ compile 入队 + 本体挖掘（`run_ontology_mining`）+ `evolve_contracts`。
+- **C 方案（字段级写隔离 + git commit 互斥）**：`GitBackend` 加 `commit_lock: tokio::sync::Mutex<()>`（`init()` 初始化），`commit()` 顶部加锁序列化全量快照——阴实时写与连山异步写不再竞态。
+- **死代码删除**：`cognition_evolver.rs` 的 `backprop_checks`/`backprop_prompts`/`backprop_python_skills` 已删（§24/§25 中 backprop_* 相关描述**过时**）；`bayesian_update`/`partition_guizang` 保留（evolve/fork 仍用）。
+
+### V58 晶体归藏（撤销概率化，观测坍缩二值）
+
+- **定论**：归藏是晶体智能——确定、可观测、二值，不是概率性的东西。`OntologyEdge`/`OntologyRule` **无** `alpha`/`beta`/`p()`（撤销阶段一的概率化字段，回到 V50 晶体版）。
+- **二值存在**：边/规则存在性由挖掘判定二值决定（`strength ≥ 阈值 && samples ≥ min_samples` → 存在，否则不存在）。无「半存在」中间态。
+- **观测强度 ≠ 存在概率**：`strength`（联合通过率）是「观测 N 次通过 M 次」的精确统计（晶体数据），非「边存在的信念强度」（气体概率）。
+- **概率分层**：概率只活在决策瞬间（阳阴循环、UCB 路由），不 commit 进归藏（与 §20「save_model_stats 有意不 commit」同原则）。
+- **消费端本就二值**：`ontology_expand`/`load_truths`/`match_relations` 只做存在性消费（边存在 → 生效），未用 p() 加权——撤销概率化后自动回到晶体语义，无消费端改动。
+
+### V51 四维回报恢复（git checkout 事故后重建）
+
+- **事故**：`git checkout src/orchestration/cognition_evolver.rs` 误恢复到 HEAD（V52 提交），静默丢弃工作区 V51-V55 未提交修改（`fork_python_skills`/`backprop_python_skills`/`decision_value` 等）。
+- **恢复**：`fork_python_skills`（V53，lianshan 空闲窗口 fork 低通过率 Python skill → `enqueue_compile_task_variant`）从 §24 描述重建；`decision_value` 四维回报 + `FORK_REWARD_THRESHOLD=0.3`/`MERGE_REWARD_DIFF=0.05` + 六算子接线（fork/merge/prune × variants/prompts，组内 cost 归一化）从 §25 描述重建；`FORK_PASS_RATE_THRESHOLD=0.6` 保留给 fork_python_skills。
+- **避坑（硬约束）**：工作区有未提交的跨版本修改时，`git checkout <file>` 会静默丢弃它们（恢复到 HEAD/索引）。操作前必须先 `git status` 确认 + 备份；项目 HEAD 滞后于工作区时尤其危险（本次 HEAD=V52，工作区=V55）。
+
+### 测试基线
+
+- **当前**：`cargo test --lib` → **360 passed, 0 failed, 4 ignored**。
+- 变化链：V55 372 → 阶段一（V57）360（skill_engine 删除 + backprop/旧 yin 测试移除）→ +V51 decision_value 测试 361 → −V58 概率化测试（ontology_edge_p）360。

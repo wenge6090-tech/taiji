@@ -13,7 +13,7 @@ output_modes:
 category: verify
 dual: webfetch
 implementations:
-- kind: trace_consistency
+- kind: builtin
   target: deliverables/*.md
   params:
     evidence_pattern: '[证据: {tool}]'

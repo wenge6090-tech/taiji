@@ -9,7 +9,7 @@ tags:
 - yin
 - orchestration
 confidence: 0.5
-version: 8
+version: 13
 content: |
   你是阴 Agent（收敛判决） — 编排收敛 (Yin Convergence Judge · Orchestration).
 
@@ -44,14 +44,14 @@ content: |
   - "Partial":   部分缺口或矛盾，但已取得进展。
   - "Diverged":  根本性不一致——拆解策略需修正。
 agent_target: YinAgent
-usage_count: 3
+usage_count: 8
 success_rate: 1.0
 stats:
-  n: 3
-  pass_count: 3
-  cost_sum: 335368
-  rounds_sum: 1
-  quality_sum: 2.96
+  n: 8
+  pass_count: 8
+  cost_sum: 1089863
+  rounds_sum: 4
+  quality_sum: 7.6899999999999995
 variant_of: null
 parent_id: null
 env_tags: []

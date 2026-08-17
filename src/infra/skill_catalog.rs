@@ -1,4 +1,4 @@
-//! V45 Skill 合并视图（BCP §10.2 双轨——元层 ∪ 资产层）。
+//! V45 Skill 合并视图（AGENTS.md §9 双轨——元层 ∪ 资产层）。
 //!
 //! 加载源 = [`crate::infra::meta_skills`]（Rust 硬编码元层）
 //!        ∪ [`GuizangClient::load_skill_assets`]（资产层 `skills/{cat}/{id}/skill.yaml`）
@@ -7,7 +7,7 @@
 use crate::types::verification::{SkillAsset, SkillCategory, SkillKind};
 use std::collections::HashMap;
 
-/// 工具集路由画像（V45 §8.14——弱模型最小集 vs 完整集）。
+/// 工具集路由画像（V45 AGENTS.md §9——弱模型最小集 vs 完整集）。
 ///
 /// 默认 `Full`；已知弱模型在 [`factory::profile_for_model`] 映射为 `Minimal`
 /// （隐藏 recursive-decompose/webfetch 等高代价工具，保 read/write/bash + search + 全部阴判据）。
@@ -50,7 +50,7 @@ pub async fn load_skill_catalog(
 
 /// Minimal profile 下隐藏的 Skill（弱模型路由）。
 ///
-/// V47（BCP §8.14）：仅隐藏 webfetch（高代价联网）；recursive-decompose 不再
+/// V47（AGENTS.md §9）：仅隐藏 webfetch（高代价联网）；recursive-decompose 不再
 /// 隐藏——拆解正是弱模型（小上下文）规避上下文超限的核心手段。保留
 /// read/write/bash + search 基础集——任务基础执行与验证闭环仍可用。
 fn is_profile_hidden(s: &SkillAsset) -> bool {
@@ -59,10 +59,10 @@ fn is_profile_hidden(s: &SkillAsset) -> bool {
     if !matches!(cat, Some(SkillCategory::Orch) | Some(SkillCategory::Exec)) {
         return false;
     }
-    // 仅隐藏高代价联网工具。
+    // 仅隐藏高代价联网工具（V52：Builtin kind，builtin 名 = skill.id）。
     s.implementations
         .iter()
-        .any(|i| matches!(i.kind, SkillKind::Webfetch))
+        .any(|i| matches!(i.kind, SkillKind::Builtin) && s.id == "webfetch")
 }
 
 /// 合并视图域 dual 解析：在已加载的 catalog 中查找对偶资产。

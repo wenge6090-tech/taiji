@@ -91,7 +91,8 @@ pub enum ClientMessage {
         request_id: String,
         intervention: crate::types::frontend::YinIntervention,
     },
-    /// List root task ids (newest first).
+    /// List root tasks (newest first), each with its `meta.json` description
+    /// for the multi-task dropdown.
     ListTasks {
         request_id: String,
     },
@@ -110,6 +111,16 @@ pub enum ClientMessage {
     PlanMessage {
         request_id: String,
         description: String,
+    },
+    /// Fetch the 归藏 knowledge graph (prompts / skills / models + dual /
+    /// model / fork edges) for the nebula view.
+    GetGuizangGraph {
+        request_id: String,
+    },
+    /// Fetch the semantic (ontology) layer state — types / type→type edges /
+    /// rules / cooccur / failures + asset→type map. 元的先验智能视图。
+    GetOntologyView {
+        request_id: String,
     },
     /// Chat with the long-lived ChatAgent (streaming).
     ///

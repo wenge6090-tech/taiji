@@ -1,4 +1,4 @@
-//! V33/MVP-3 主动学习（BCP §6.4 空闲窗口 — 契约假设验证版）。
+//! V33/MVP-3 主动学习（Blueprint §5.3 空闲窗口 — 契约假设验证版）。
 //!
 //! Lianshan 在 pending 空 + `runtime.lianshan.active_learning_enabled` 开时：
 //! 1. 选高不确定性变体契约节点（UCB 探索项最大者，§6.3 —— 低 N / 高方差优先）；
@@ -6,7 +6,7 @@
 //! 3. 写 `experiments/{ts}.json` 队列；
 //! 4. 执行器（`spawn_runner`，main.rs 独立 spawn）消费队列：RecursiveRunner
 //!    以 Execution 最小预算执行 → 对任务产出跑变体契约（SkillEngine 机械检查，
-//!    零 LLM 裁决 —— 探索裁决符号化，与三权分立 §6.6 一致）→ CheckResult 入队
+//!    零 LLM 裁决 —— 探索裁决符号化，与三权分立 §5.7 一致）→ CheckResult 入队
 //!    pending（enqueue_lianshan_pending 幂等）→ 删除 experiments 文件。
 //!
 //! 护栏：探索任务不产生新探索任务（无递归）；默认关闭（config 开关）；每窗口限量
@@ -16,7 +16,7 @@ use crate::agents::factory::AgentFactory;
 use crate::infra::error::TaijiError;
 use crate::infra::knowledge::GuizangClient;
 use crate::infra::trace::save_json_atomic;
-use crate::orchestration::skill_engine::SkillEngine;
+use crate::orchestration::constraint_engine::check_atomics;
 use crate::orchestration::runner::RecursiveRunner;
 use crate::types::agent::VerificationAsset;
 use crate::types::verification::RewardWeights;
@@ -33,7 +33,7 @@ pub(crate) const UCB_C: f64 = 1.414;
 /// UCB 探索分最高者。`score = avg_reward + C·√(ln N_total / N_node)`（§6.3）；
 /// N_node = 0（变体无采样）→ 最大探索分（f64::MAX）。
 ///
-/// V33/MVP-3.5: avg_reward 的 pass 分量用**贝叶斯后验均值**（§6.4.1，
+/// V33/MVP-3.5: avg_reward 的 pass 分量用**贝叶斯后验均值**（§5.3，
 /// posterior 传入；无后验 → 频率回退）。
 ///
 /// 根资产不参与探索（已积累统计，走利用路径）；无候选返回 None。
@@ -69,7 +69,7 @@ pub fn pick_exploration_target(
 }
 
 /// UCB 探索分（§6.3）。N_node = 0 → f64::MAX（最大探索——变体尚未被验证过）。
-/// reward 的 pass 分量 = 后验均值（§6.4.1；无后验 → 频率 pass_rate 回退）。
+/// reward 的 pass 分量 = 后验均值（§5.3；无后验 → 频率 pass_rate 回退）。
 fn exploration_score(
     a: &VerificationAsset,
     n_total: f64,
@@ -79,7 +79,7 @@ fn exploration_score(
     let n_node: f64 = a.checks.iter().map(|c| c.stats.n as f64).sum();
     if n_node < 1.0 {
         // V50：冷启动 = 先验 μ + 有限探索分（非 f64::MAX）——
-        // 先验 μ 由 confidence 映射（α=1+k·c, β=1+k·(1−c)，k=10 与 §6.4.1 一致），
+        // 先验 μ 由 confidence 映射（α=1+k·c, β=1+k·(1−c)，k=10 与 §5.3 一致），
         // 探索项 = C·√(ln n_total / (0+1))。避免「最大探索分」粗暴遍历。
         let c = a.confidence.clamp(0.0, 1.0);
         let alpha = 1.0 + 10.0 * c;
@@ -155,7 +155,7 @@ pub async fn enqueue_exploration_task(
     }
 
     let assets = guizang.load_all_verifications().await?;
-    // V33/MVP-3.5: 贝叶斯后验 map（id → 后验均值；§6.4.1 探索分升级）
+    // V33/MVP-3.5: 贝叶斯后验 map（id → 后验均值；§5.3 探索分升级）
     let posterior: BTreeMap<String, f64> = guizang
         .load_all_models()
         .await?
@@ -195,7 +195,6 @@ pub fn spawn_runner(
     config: TaijiConfig,
     data_root: &Path,
     cancel: CancellationToken,
-    guizang: Arc<GuizangClient>,
 ) -> Option<tokio::task::JoinHandle<()>> {
     if !config.runtime.lianshan.active_learning_enabled {
         return None;
@@ -208,7 +207,7 @@ pub fn spawn_runner(
                 tracing::info!("[active_learning] runner cancelled, exiting");
                 return;
             }
-            match run_experiment_queue(&runner, &guizang, &data_root, &cancel).await {
+            match run_experiment_queue(&runner, &data_root, &cancel).await {
                 Ok(processed) if processed == 0 => {
                     // 空闲等待
                     tokio::select! {
@@ -240,7 +239,6 @@ pub fn spawn_runner(
 /// 本次处理的探索任务数。
 async fn run_experiment_queue(
     runner: &RecursiveRunner,
-    guizang: &GuizangClient,
     data_root: &Path,
     cancel: &CancellationToken,
 ) -> Result<u32, TaijiError> {
@@ -290,29 +288,27 @@ async fn run_experiment_queue(
         // 执行探索任务（Execution 最小预算 —— runner 默认配置；不递归由描述教学层保证）
         match runner.execute_with_context(desc, None, None).await {
             Ok(result) => {
-                // 对产物跑变体契约（机械检查，零 LLM 裁决 —— §6.6 L0/L1）
+                // V57：探索产物验证 = 原子判据（运行保障），不再读 VerificationAsset
+                // 判据（yin/skills 废弃）。机械检查零 LLM。
                 let task_dir = data_root.join("tasks").join(&result.task_id);
-                if let Some(asset) = guizang.load_verification(asset_id).await? {
-                    let report = SkillEngine::run_checks(&[asset], &task_dir).await;
-                    let checks = report.results;
-                    // CheckResult 入队 pending（幂等覆盖写；同任务重复探索覆盖不重复学习）。
-                    // V44 去分区化：回传统一落根（model_key 由 pending 内字段承载）。
-                    if let Err(e) = crate::orchestration::zhouyi::enqueue_lianshan_pending(
-                        data_root,
-                        &task_dir,
-                        &result.task_id,
-                        &checks,
-                        &[],
-                        true,
-                        None,
-                    )
-                    .await
-                    {
-                        tracing::warn!(
-                            error = %e,
-                            "[active_learning] pending enqueue failed for exploration task"
-                        );
-                    }
+                let (checks, _hard_failed) = check_atomics(&task_dir).await;
+                // CheckResult 入队 pending（幂等覆盖写；同任务重复探索覆盖不重复学习）。
+                // V44 去分区化：回传统一落根（model_key 由 pending 内字段承载）。
+                if let Err(e) = crate::orchestration::zhouyi::enqueue_lianshan_pending(
+                    data_root,
+                    &task_dir,
+                    &result.task_id,
+                    &checks,
+                    &[],
+                    true,
+                    None,
+                )
+                .await
+                {
+                    tracing::warn!(
+                        error = %e,
+                        "[active_learning] pending enqueue failed for exploration task"
+                    );
                 }
                 tokio::fs::remove_file(&path).await.map_err(|e| {
                     TaijiError::Other(format!("failed to remove experiment {:?}: {e}", path))

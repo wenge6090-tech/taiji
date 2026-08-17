@@ -136,20 +136,20 @@ impl YangAgentBuilder {
             self.engine_ctx.context_dir.as_deref(),
             self.mode,
         );
-        // V29 预算纪律（高效语义，BCP §8.19）：上下文窗口是单次拟合的采样空间，
+        // V29 预算纪律（高效语义，AGENTS.md §14）：上下文窗口是单次拟合的采样空间，
         // 不是可自由消耗的仓库——上限是保险丝，不是配额。LLM 必须感知硬约束
         // 并主动收敛（对归藏资产与 Base 模板两条路径统一生效）。
         system_prompt.push_str(&build_budget_discipline(
             self.factory.config.runtime.context_limits,
         ));
-        // V30 分封制（BCP §8.20）：任务自我认知——身份与地位段。
+        // V30 分封制（Blueprint §1.5）：任务自我认知——身份与地位段。
         // 无降级：读册失败 → Err 上抛（数据损坏必须暴露，不用默认值掩盖）。
         system_prompt.push_str(&build_identity_section(
             &self.engine_ctx,
             &self.meta_ctx,
             max_depth,
         )?);
-        // V34/MVP-4 断言分级教学（BCP §8.22）：证据断言必须附 [证据: 工具名]（引用
+        // V34/MVP-4 断言分级教学（AGENTS.md）：证据断言必须附 [证据: 工具名]（引用
         // 真实工具调用）、推测必须标 (推测)、禁止编造证据引用——与 SkillEngine
         // TraceConsistency 检查构成双保险：教学层降低违规频率，检查层独立判定。
         system_prompt.push_str(&build_assertion_discipline_prompt());
@@ -160,7 +160,7 @@ impl YangAgentBuilder {
             self.factory.providers.client_for(&self.provider_name)?;
 
         // ── Build Rig agent with preamble, max_turns, max_tokens, temperature ──
-        // V29 上下文预算（BCP §8.19）：max_turns 不再承担上下文管理——轮次与
+        // V29 上下文预算（AGENTS.md §14）：max_turns 不再承担上下文管理——轮次与
         // token 消耗不对应（一次工具调用可返回 10k tokens 结果）。此值仅作
         // 防工具死循环的防御性兜底（200 轮），真正的窗口管理由 ContextLimiter
         // 按 usage.input_tokens 精准控制（250k 交接 / 300k 硬截止）。
@@ -208,9 +208,9 @@ impl YangAgentBuilder {
         let snapshot_hook = crate::hooks::chat_history_snapshot::ChatHistorySnapshotHook::new(
             &self.engine_ctx.task_dir,
         );
-        // V29 上下文窗口预算：精确 token 统计替换 max_turns（BCP §8.19）。
+        // V29 上下文窗口预算：精确 token 统计替换 max_turns（AGENTS.md §14）。
         let limits = self.factory.config.runtime.context_limits;
-        // V48：编排/执行统一窗口比例阈值（BCP §8.19）。V32 的编排 60k 快拆
+        // V48：编排/执行统一窗口比例阈值（AGENTS.md §14）。V32 的编排 60k 快拆
         // 特例已废除——编排节点生命周期含「拆解 + 综合」两个阶段，静态低
         // 预算导致综合阶段（读子任务产出、写最终 deliverable）即超限，反噬
         // 制造「纯信息收集子任务」失焦。预算语义已改为单次窗口占用，无需
@@ -225,7 +225,7 @@ impl YangAgentBuilder {
             trace_hook.clone(),
             snapshot_hook,
             limiter.clone(),
-            // V30 封地边界（BCP §8.20 能看不能写）：write 目标必须在本任务域内
+            // V30 封地边界（AGENTS.md §13 能看不能写）：write 目标必须在本任务域内
             self.engine_ctx.task_dir.clone(),
         );
         let agent_builder = agent_builder.hook(hook_set);
@@ -250,13 +250,25 @@ impl YangAgentBuilder {
             self.meta_ctx.clone(),
         );
 
-        // ── Register L1 Skills (V45 profile 路由 §8.14) ──
+        // ── Register L1 Skills (V45 profile 路由 AGENTS.md §9) ──
         // SkillRegistry 硬编码 5 builtin（read/write/bash/search/webfetch）；
         // recursive_decompose / yin_verify 是独立 rig Tool，不在 registry 内。
         let profile = crate::agents::factory::profile_for_model(
             self.meta_ctx.model.as_ref().unwrap_or(&crate::types::agent::ModelKey("default".into())),
         );
-        let skill_registry = SkillRegistry::new(&self.engine_ctx.task_dir);
+        let mut skill_registry = SkillRegistry::new(&self.engine_ctx.task_dir);
+        // V52：加载资产层可演化 Python skill（exec/orch 阳面执行体）。
+        // 资产层是增强层——失败仅 warn，builtin 种子层保底闭环不断。
+        match load_python_skills(&mut skill_registry, &self.factory.guizang, profile).await {
+            Ok(n) if n > 0 => {
+                tracing::debug!(count = n, "registered asset-layer Python skills")
+            }
+            Ok(_) => {}
+            Err(e) => tracing::warn!(
+                error = %e,
+                "failed to load asset-layer Python skills (builtin seed layer still active)"
+            ),
+        }
         let skill_tools: Vec<Box<dyn ToolDyn>> = skill_registry
             .tools()
             .iter()
@@ -272,7 +284,7 @@ impl YangAgentBuilder {
             .collect();
 
         // recursive_decompose：仅 Orchestration 模式注册（独立 Tool，非 registry）。
-        // V47（BCP §8.14）：Minimal profile 不再隐藏 recursive_decompose——
+        // V47（AGENTS.md §9）：Minimal profile 不再隐藏 recursive_decompose——
         // 拆解正是弱模型（小上下文）规避上下文超限的核心手段。
         let agent = if self.mode == AgentMode::Orchestration {
             agent_builder
@@ -326,7 +338,7 @@ impl YangAgentBuilder {
 
             // V28 产出即交接 / V29 上下文预算：LLM 循环结束后（无论 Ok/Err）先检查
             // ContextLimiter 是否触发——触发即写交接文件并返回对应错误。
-            // 禁止裸 LLMCallFailed 上抛（残缺产出 > 无产出，BCP §8.18）。
+            // 禁止裸 LLMCallFailed 上抛（残缺产出 > 无产出，Blueprint §1.5）。
             if let Some(kind) = limiter.triggered() {
                 let info = crate::infra::handoff::HandoffInfo {
                     phase: "yang".into(),
@@ -343,7 +355,7 @@ impl YangAgentBuilder {
                         &self.engine_ctx.task_dir,
                     ),
                 };
-                // V29+ LLM 压缩收尾（BCP §8.18 交接 = 压缩产物）：把对话压缩为
+                // V29+ LLM 压缩收尾（Blueprint §1.5 交接 = 压缩产物）：把对话压缩为
                 // 结构化环境事实作交接正文；失败/超时降级静态正文（仅 warn）。
                 // 注意：Terminate 早于首次 completion 时 Rig chat() 不追加消息到
                 // 内存 history——压缩输入必须读磁盘快照（chat_history.json）。
@@ -487,7 +499,7 @@ fn build_system_prompt(
     prompt
 }
 
-/// V29 预算纪律段（BCP §8.19 高效语义）：注入 system prompt，让 LLM 感知
+/// V29 预算纪律段（AGENTS.md §14 高效语义）：注入 system prompt，让 LLM 感知
 /// token 预算为**保险丝而非配额**——目标是远低于阈值完成、消耗越少越好。
 /// 纯函数便于单测；对归藏资产路径与 Base 模板路径统一追加。
 fn build_budget_discipline(limits: crate::infra::config::ContextLimits) -> String {
@@ -506,7 +518,7 @@ fn build_budget_discipline(limits: crate::infra::config::ContextLimits) -> Strin
     )
 }
 
-/// V34/MVP-4 断言分级教学段（BCP §8.22）：让 LLM 感知产出断言必须与执行
+/// V34/MVP-4 断言分级教学段（AGENTS.md）：让 LLM 感知产出断言必须与执行
 /// 轨迹绑定——证据断言附 `[证据: 工具名]`（引用真实工具调用）、推测断言
 /// 标 `(推测)`、禁止编造证据引用。教学层与 SkillEngine TraceConsistency
 /// 检查构成双保险：教学层降低违规频率，检查层独立判定（LLM 不遵循时
@@ -526,11 +538,11 @@ fn build_assertion_discipline_prompt() -> String {
         .to_string()
 }
 
-/// V30 分封制（BCP §8.20）：任务自我认知——「身份与地位」段。
+/// V30 分封制（Blueprint §1.5）：任务自我认知——「身份与地位」段。
 ///
 /// 全部要素系统确定性赋予，禁止 LLM 分类或运行时推断：
 /// - 身份册 meta.json（内容/父/子——创建时入册）
-/// - MetaContext.mode（类别：编排/执行——元权重更新阶段确定，V27 §8.8）
+/// - MetaContext.mode（类别：编排/执行——元权重更新阶段确定，V27 §4.3）
 /// - 会盟索引（兄弟贡品——分封时快照注入）
 ///
 /// 无降级原则：身份册读取/解析失败 → `Err` 上抛（数据损坏必须暴露，
@@ -545,7 +557,7 @@ fn build_identity_section(
     let task_path = engine_ctx.task_dir.join("meta.json");
     let task = parse_task_roll(&task_path)?;
 
-    // 类别：元权重更新阶段确定（V27 阴阳配对，BCP §8.8/§8.20）
+    // 类别：元权重更新阶段确定（V27 阴阳配对，Blueprint §4.3/§1.5）
     let category = match meta_ctx.mode {
         AgentMode::Orchestration => "编排模式（可递归拆解）",
         AgentMode::Execution => "执行模式（直接产出）",
@@ -578,7 +590,7 @@ fn build_identity_section(
         task.subtask_ids.join("、")
     };
 
-    // 兄弟贡品陈列室：会盟注入的目录（分封时快照，BCP §8.20）——
+    // 兄弟贡品陈列室：会盟注入的目录（分封时快照，Blueprint §1.5）——
     // 同批并行兄弟的贡品陆续陈列，执行中可经 read 工具随时发现。
     let sibling_line = if meta_ctx.yang_prompt.sibling_deliverables.is_empty() {
         "无".to_string()
@@ -615,7 +627,7 @@ fn parse_task_roll(path: &std::path::Path) -> Result<Task, TaijiError> {
     })
 }
 
-/// V29+ 收尾压缩（BCP §8.18「交接 = 压缩产物」）：一次聚焦的瞬态调用，把本拟合
+/// V29+ 收尾压缩（Blueprint §1.5「交接 = 压缩产物」）：一次聚焦的瞬态调用，把本拟合
 /// 对话压缩为结构化交接正文（## 进度 / ## 剩余工作 / ## 决策 / ## 约束状态 / ## 已产出文件）。
 ///
 /// - 输入：chat_history 序列化 → 截断到 `compress_input_tokens`（首部 2k 目标 + 尾部
@@ -824,6 +836,55 @@ fn build_execution_prompt(
 }
 
 // ---------------------------------------------------------------------------
+// V52 资产层 Python skill 加载（YangAgent 工具注册接线）
+// ---------------------------------------------------------------------------
+
+/// 加载 exec/orch 资产层 Python skill 并注册进 SkillRegistry。
+///
+/// 仅注册 `kind: python` 的资产层执行体（builtin 已在元层注册）；脚本缺失
+/// 仅 warn 跳过（资产层损坏不阻断闭环——§10 双轨原则）。返回注册数。
+async fn load_python_skills(
+    registry: &mut SkillRegistry,
+    guizang: &crate::infra::knowledge::GuizangClient,
+    profile: crate::infra::skill_catalog::ToolProfile,
+) -> Result<usize, crate::infra::error::TaijiError> {
+    use crate::types::verification::{SkillCategory, SkillKind};
+    let mut count = 0usize;
+    for category in [SkillCategory::Exec, SkillCategory::Orch] {
+        let catalog =
+            crate::infra::skill_catalog::load_skill_catalog(guizang, category, profile).await?;
+        for skill in &catalog {
+            let Some(impl_) = skill
+                .implementations
+                .iter()
+                .find(|i| i.kind == SkillKind::Python)
+            else {
+                continue; // builtin 元层已注册；非 Python 执行体跳过
+            };
+            let script = guizang.skill_script_path(category, &skill.id, &impl_.target);
+            if !script.exists() {
+                tracing::warn!(
+                    skill_id = %skill.id,
+                    path = %script.display(),
+                    "Python skill script missing — skipped"
+                );
+                continue;
+            }
+            let skill_ref = crate::types::agent::SkillRef {
+                id: skill.id.clone(),
+                name: skill.id.clone(),
+                tool_name: skill.id.clone(),
+                match_weight: skill.confidence.clamp(0.0, 1.0),
+                summary: skill.summary.clone(),
+            };
+            registry.load_python_skills(vec![(skill_ref, script)]);
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
@@ -927,6 +988,7 @@ summary: String::new(),
             converge_system_prompt: None,
             temperature: None,
             task_type_tags: vec![],
+            ontology_objects: vec![],
         }
     }
 
@@ -1270,7 +1332,7 @@ summary: String::new(),
     }
 }
 
-    /// V34/MVP-4：断言分级教学段注入断言（教学层与检查层双保险，§8.22）。
+    /// V34/MVP-4：断言分级教学段注入断言（教学层与检查层双保险，AGENTS.md）。
     #[test]
     fn assertion_discipline_prompt_injected() {
         let text = build_assertion_discipline_prompt();

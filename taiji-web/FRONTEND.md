@@ -32,7 +32,10 @@ taiji-web/                          ← 独立前端项目（与 taiji 核心平
 │   │   ├── PhaseDetail.tsx         ← 弹窗内单相详情面板
 │   │   ├── YinIntervene.tsx        ← 阴极审批输入框（驳回 + 建议注入）
 │   │   ├── ChatPanel.tsx           ← 侧边栏前端 Agent 聊天面板
-│   │   └── GuizangGraph.tsx        ← 归藏星云图（3D 力导向，备选）
+│   │   ├── LianshanPanel.tsx       ← 连山演化浮层（归藏四算子最近演化）
+│   │   ├── StatusLegend.tsx        ← 底部状态图例 + 各状态计数
+│   │   ├── GuizangGraph.tsx        ← 归藏星云图（2D 力导向：prompts/skills/models + 对偶/后验/变体边）
+│   │   └── OntologyPanel.tsx       ← 语义层·本体视图（词汇表/type→type 边/规则/共现/失败 + 资产映射）
 │   ├── hooks/
 │   │   ├── useWebSocket.ts         ← WebSocket 连接 + 事件分发 + 请求/响应
 │   │   ├── useTaskTree.ts          ← 任务树状态管理（TaskTreeSnapshot → React Flow 节点）
@@ -81,12 +84,16 @@ pub enum ClientMessage {
     ExecuteTask { request_id: String, description: String, max_depth: Option<u32> },
     /// 阴极审批提交。
     SubmitReview { request_id: String, intervention: YinIntervention },
-    /// 列出所有根任务 ID。
+    /// 列出所有根任务（新到旧），每条携带 `meta.json` 描述（`TaskListItem{id,description}`）。
     ListTasks { request_id: String },
     /// 获取指定根任务的任务树快照。
     GetTaskTree { request_id: String, root_task_id: String },
     /// 获取指定任务的 Zhouyi 相位详情。
     GetZhouyiState { request_id: String, task_id: String },
+    /// 拉取归藏知识图（prompts/skills/models + dual/model/fork 边）供星云图渲染。
+    GetGuizangGraph { request_id: String },
+    /// 拉取语义层（本体）状态：types/relations/rules/cooccur/failures + asset_type_map。
+    GetOntologyView { request_id: String },
     /// 内嵌 Agent 聊天（完整 Rig Agent + 流式输出）。
     ChatMessage { request_id: String, message: String, session_id: Option<String>, context_task_id: Option<String> },
 }
@@ -199,7 +206,8 @@ pub struct ServeState {
 - **布局**：纺锤形——depth=0 顶部、中间深度最宽、max_depth 底部收窄（`spread = sin(π·depth/max_depth)`）
 - **节点**：圆角矩形卡片，status 决定颜色（绿/黄/红），Framer Motion 过渡动画
 - **连线**：父子贝塞尔曲线，颜色跟随子节点状态，新建连线有生长动画
-- **交互**：悬停放大+tooltip；点击弹出 ZhouyiPopup；双击缩放归位
+- **交互**：悬停放大+tooltip（含深度/轮次/周期/子任务/产出/工具）；点击弹出 ZhouyiPopup；**滚轮缩放（光标为锚点）+ 拖拽平移 + 双击/「适配」按钮归位**（CSS transform 实现，无依赖）
+- **底部工具栏**：放大/缩小/适配；**底部图例**（StatusLegend）显示状态色含义 + 各状态计数
 
 ### 6.3 Zhouyi 三相流程弹窗（ZhouyiPopup）
 - **布局**：左侧三相流程图（Meta→Yang→Yin 垂直排列）+ 右侧详情面板（随选中相切换）+ 底部阴极干预区
@@ -234,10 +242,14 @@ pub struct ServeState {
 ## 8. MVP 范围
 
 - ✅ 纺锤状递归树可视化 + 节点状态颜色
+- ✅ 树视图平移/缩放/适配（滚轮 + 拖拽 + 双击 + 工具栏）
+- ✅ 状态图例 + 各状态计数（StatusLegend）
 - ✅ Zhouyi 三相流程弹窗（含详情面板 + 阴极审批输入框）
 - ✅ 背景太极图（静态旋转 + 状态联动光晕）
 - ✅ WebSocket 双向通信（事件广播 + 请求响应）
 - ✅ 纯浏览器运行（核心进程 `taiji serve` 启动 HTTP + WS + 自动开浏览器）
 - ✅ 前端 Agent 聊天面板（完整 Rig Agent：5 Skills + 工具循环 + 流式输出 + 对话记忆 + 任务感知）
-- ❌ 归藏星云图 3D 可视化（延迟到 V2）
+- ⚠️ 连山演化浮层（LianshanPanel）：前端已就绪，但后端 `lianshan_activity` 恒为 `None`（`task_tree_builder` 的 `read_lianshan_activity` 读的 `lianshan_evolution.log` 无人写入）——待后端接上后浮层自动生效
+- ✅ 归藏星云图（2D 力导向：`GetGuizangGraph` 拉取 prompts/skills/models，渲染对偶/后验/变体边 + 节点详情侧栏；3D 增强延迟到 V2）
+- ✅ 语义层·本体视图（`GetOntologyView` 拉取 types/relations/rules/cooccur/failures + asset_type_map，力导向渲染类型节点 + type→type 边 + 规则/共现/失败/映射面板 + 先验状态摘要；空态如实展示「先验未激活」）
 - ❌ 多任务并行视图（MVP 单任务聚焦）

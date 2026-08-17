@@ -1,4 +1,4 @@
-//! V45 文本调用块解释器（BCP §8.14 通道 B——弱模型 Tool Calls fallback）。
+//! V45 文本调用块解释器（AGENTS.md §9 通道 B——弱模型 Tool Calls fallback）。
 //!
 //! 弱模型原生 function calling 训练不足时，LLM 可能在纯文本输出中嵌入
 //! 类 JSON 调用块（```json {"tool": "write", "arguments": {...}} ```）。

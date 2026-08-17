@@ -117,7 +117,7 @@ pub struct ConstraintViolation {
 }
 
 // ---------------------------------------------------------------------------
-// V43 Skill 类别（BCP §10.1-10.2 归藏 Skills 子树）
+// V43 Skill 类别（Blueprint §6.1 归藏 Skills 子树）
 // ---------------------------------------------------------------------------
 
 /// Skill 四类别——与归藏目录 yang/skills/{orch,exec}/ + yin/skills/{verify,converge}/ 对应。
@@ -135,78 +135,63 @@ pub enum SkillCategory {
 }
 
 // ---------------------------------------------------------------------------
-// V45 统一 Skill 资产（BCP §10.2 定稿——A2A 兼容层 + taiji 演化层）
+// V45 统一 Skill 资产（AGENTS.md §9 定稿——A2A 兼容层 + taiji 演化层）
 // ---------------------------------------------------------------------------
 
-/// Skill 机械执行体 kind。
+/// Skill 机械执行体 kind（V52 资产层统一 Python）。
 ///
-/// 阴 kind（FileExists..TraceConsistency）由 SkillEngine 机械执行；
-/// 阳 kind（Bash..RecursiveDecompose）映射 Rust 元层 builtin 执行体（V45 双轨）。
+/// `Builtin` = Rust 种子层（builtin 名 = skill.id，bootstrap 安全网，零资产依赖）；
+/// `Python` = 资产层脚本（脚本相对路径 = impl.target，默认 `skill.py`，
+/// SkillEngine 子进程执行）；`LlmJudgement` = 唯一允许 LLM 的 kind（§1.3 例外项）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum SkillKind {
-    // ── 阴·机械判据（SkillEngine 执行）──
-    /// 文件/目录存在性（target 支持单段 `*` 通配）。
-    FileExists,
-    /// 结构校验：params = {format: "json"|"yaml", required_fields: ["a.b"]}。
-    SchemaValid,
-    /// 引用解析：target 的 YAML front matter 内路径必须真实存在。
-    ReferenceResolves,
-    /// 命令执行成功（白名单 + 30s 超时）。
-    CommandSucceeds,
-    /// LLM 裁决：不机械执行，判据注入 verify/converge prompt（§6.6）。
+    /// Rust 种子层 builtin（read/write/bash/search/webfetch/recursive-decompose +
+    /// file-exists/schema-valid/reference-resolves/command-succeeds/trace-consistency）。
+    /// builtin 名 = skill.id，分发见 [`builtin_category`] / [`builtin_check_kind`]。
+    Builtin,
+    /// 资产层 Python 脚本（fork 变体 / 编译产出 / 主动学习实验体）。
+    /// 脚本相对路径 = impl.target（默认 "skill.py"）。
+    Python,
+    /// 唯一允许 LLM 的 kind——不机械执行，判据注入 verify/converge prompt（§5.7）。
     LlmJudgement,
-    /// 断言证据链：产出中 `[证据: 工具名]` 引用 → trace 工具调用存在性。
-    TraceConsistency,
-    // ── 阳·执行体（Rust builtin 注册表）──
-    /// shell 命令执行（builtin: bash）。
-    Bash,
-    /// 原子文件写入（builtin: write）。
-    Write,
-    /// 文件读取（builtin: read）。
-    Read,
-    /// 代码搜索（builtin: search）。
-    Search,
-    /// 网页抓取（builtin: webfetch）。
-    Webfetch,
-    /// 递归分解（builtin: recursive_decompose，orch 阳面——V45 增补 §10.2）。
-    RecursiveDecompose,
 }
 
 impl From<CheckKind> for SkillKind {
-    fn from(k: CheckKind) -> Self {
-        match k {
-            CheckKind::FileExists => SkillKind::FileExists,
-            CheckKind::SchemaValid => SkillKind::SchemaValid,
-            CheckKind::ReferenceResolves => SkillKind::ReferenceResolves,
-            CheckKind::CommandSucceeds => SkillKind::CommandSucceeds,
-            CheckKind::LlmJudgement => SkillKind::LlmJudgement,
-            CheckKind::TraceConsistency => SkillKind::TraceConsistency,
-        }
+    fn from(_k: CheckKind) -> Self {
+        // V52：CheckKind 全部坍缩为 Builtin——builtin 名 = 资产 id，
+        // 分发在调用点（skill_asset_to_verification 反向走 builtin_check_kind）。
+        SkillKind::Builtin
     }
 }
 
-impl SkillKind {
-    /// 是否为阴面机械/裁决判据（SkillEngine 执行域）。
-    pub fn is_yin(self) -> bool {
-        matches!(
-            self,
-            SkillKind::FileExists
-                | SkillKind::SchemaValid
-                | SkillKind::ReferenceResolves
-                | SkillKind::CommandSucceeds
-                | SkillKind::LlmJudgement
-                | SkillKind::TraceConsistency
-        )
-    }
-
-    /// 是否为阳面执行体（builtin 注册表域）。
-    pub fn is_yang(self) -> bool {
-        !self.is_yin()
+/// Builtin 名 → 阴机械判据 [`CheckKind`]（阳 builtin 返回 None）。
+///
+/// 单一映射源——消除 knowledge.rs / skill_engine.rs 两处手写同构映射（V52 收敛）。
+pub fn builtin_check_kind(name: &str) -> Option<CheckKind> {
+    match name {
+        "file-exists" => Some(CheckKind::FileExists),
+        "schema-valid" => Some(CheckKind::SchemaValid),
+        "reference-resolves" => Some(CheckKind::ReferenceResolves),
+        "command-succeeds" => Some(CheckKind::CommandSucceeds),
+        "trace-consistency" => Some(CheckKind::TraceConsistency),
+        _ => None,
     }
 }
 
-/// Skill 机械可执行体（BCP §10.2 SkillImpl）。
+/// Builtin 名 → Skill 类别（元层注册表分发；未知名返回 None）。
+pub fn builtin_category(name: &str) -> Option<SkillCategory> {
+    match name {
+        "recursive-decompose" => Some(SkillCategory::Orch),
+        "write" | "bash" | "read" | "search" | "webfetch" | "yin-verify" => Some(SkillCategory::Exec),
+        "file-exists" | "schema-valid" | "reference-resolves" | "command-succeeds"
+        | "trace-consistency" | "semantic-coherence" => Some(SkillCategory::Verify),
+        "mece-check" | "cross-consistency" | "granularity-check" => Some(SkillCategory::Converge),
+        _ => None,
+    }
+}
+
+/// Skill 机械可执行体（AGENTS.md §9 SkillImpl）。
 ///
 /// 阳 kind：`params.builtin` 可指定执行体名（默认 = kind 小写）；
 /// 阴 kind：`target`/`params`/`severity`/`pass_condition` 为机械判据。
@@ -227,7 +212,7 @@ pub struct SkillImpl {
     pub pass_condition: String,
 }
 
-/// V45 统一 Skill 资产（BCP §10.2 定稿）。
+/// V45 统一 Skill 资产（AGENTS.md §9 定稿）。
 ///
 /// 双轨：元层（Rust 硬编码保底）∪ 资产层（`skills/{cat}/{id}/skill.yaml`
 /// 可演化覆盖，同 id 资产优先）。A2A 兼容字段（examples/inputModes/outputModes）
@@ -239,13 +224,13 @@ pub struct SkillAsset {
     pub id: String,
     /// 人类可读名称。
     pub name: String,
-    /// 层 0：一句话摘要（进 tool 列表/检索候选，最小上下文占用，BCP §10.2 渐进披露）。
+    /// 层 0：一句话摘要（进 tool 列表/检索候选，最小上下文占用，Blueprint §6.0 渐进披露）。
     #[serde(default)]
     pub summary: String,
     /// 层 1：Skill 功能描述（自然语言，供 LLM 理解何时调用）。
     #[serde(default)]
     pub description: String,
-    /// 层 2：完整涌现文本（LLM 决定调用后按需加载；None = 无额外 detail，BCP §10.2）。
+    /// 层 2：完整涌现文本（LLM 决定调用后按需加载；None = 无额外 detail，AGENTS.md §9）。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub detail: Option<String>,
     /// 分类标签。
@@ -255,7 +240,7 @@ pub struct SkillAsset {
     #[serde(default)]
     pub examples: Vec<String>,
     /// 支持的输入模式：["json"]（多参数扁平 schema）| ["text"]（单参 input）|
-    /// ["json","text"]（双通道，V45 §8.14）。
+    /// ["json","text"]（双通道，V45 AGENTS.md §9）。
     #[serde(default = "default_modes")]
     pub input_modes: Vec<String>,
     /// 支持的输出模式（默认 ["text"]）。
@@ -311,30 +296,27 @@ impl SkillAsset {
         self
     }
 
-    /// 推导类别：显式 category 优先，缺省时按第一个 implementation kind 归属。
+    /// 推导类别：显式 category 优先；缺省时按 builtin 名 / kind 归属。
     pub fn effective_category(&self) -> Option<SkillCategory> {
         if let Some(c) = self.category {
             return Some(c);
         }
-        self.implementations.first().map(|i| match i.kind {
-            SkillKind::RecursiveDecompose => SkillCategory::Orch,
-            SkillKind::Bash | SkillKind::Write | SkillKind::Read | SkillKind::Search | SkillKind::Webfetch => {
-                SkillCategory::Exec
-            }
-            SkillKind::LlmJudgement => SkillCategory::Converge, // 缺省按 converge（裁决类）
-            _ => SkillCategory::Verify,
+        self.implementations.first().and_then(|i| match i.kind {
+            SkillKind::Builtin => builtin_category(&self.id),
+            SkillKind::Python => None, // 资产层 Python 必须显式 category（目录推导）
+            SkillKind::LlmJudgement => Some(SkillCategory::Converge), // 缺省按 converge（裁决类）
         })
     }
 }
 
 // ---------------------------------------------------------------------------
-// V33 验证契约类型（归藏本体论重构 — §6.0/§6.6/§8.22）
+// V33 验证契约类型（归藏本体论重构 — §5.0/§5.7/AGENTS.md）
 // ---------------------------------------------------------------------------
 
 /// 验证契约检查项类型（CheckSpec.kind）。
 ///
 /// 前四种为**机械可判定断言**（SkillEngine 执行，LLM 不可翻案）；
-/// `LlmJudgement` 是唯一留给 LLM 的检查项类型（§6.6）。
+/// `LlmJudgement` 是唯一留给 LLM 的检查项类型（§5.7）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum CheckKind {
@@ -347,12 +329,16 @@ pub enum CheckKind {
     ReferenceResolves,
     /// 命令执行成功：params = {command: "cargo check"}——白名单前缀 + 30s 超时。
     CommandSucceeds,
-    /// LLM 裁决：不机械执行，由 YinAgent 收集注入 verify prompt（§6.6）。
+    /// LLM 裁决：不机械执行，由 YinAgent 收集注入 verify prompt（§5.7）。
     LlmJudgement,
     /// V34/MVP-4 断言证据链：产出中 `[证据: 工具名]` 引用 → 任务 trace.jsonl
-    /// `tool_call::*` 记录存在性校验（引用完整性，reference_resolves 推广，§8.22）。
+    /// `tool_call::*` 记录存在性校验（引用完整性，reference_resolves 推广，AGENTS.md）。
     /// 纯机械零 LLM；只对精确格式引用做存在性判定，无匹配视为推测（宁漏勿误）。
     TraceConsistency,
+    /// V52 资产层 Python 脚本判据：`SkillEngine` 经 `python_engine` 子进程执行
+    /// （stdin JSON / stdout JSON），非 `run_check` 机械函数。仅运行时产生，
+    /// 不落盘到 `VerificationAsset.checks`（Python skill 不进 Lianshan 桥）。
+    Python,
 }
 
 impl Default for CheckKind {
@@ -390,13 +376,13 @@ pub struct CheckSpec {
     pub severity: CheckSeverity,
     /// 人读判据（llm_judgement 类注入 LLM prompt）。
     pub pass_condition: String,
-    /// 检查项级统计（MVP-2 Lianshan backprop 回传 — BCP §6.4 V33 统计粒度）。
+    /// 检查项级统计（MVP-2 Lianshan backprop 回传 — Blueprint §5.3 V33 统计粒度）。
     /// serde default：旧契约 YAML 零迁移。
     #[serde(default)]
     pub stats: CheckStats,
 }
 
-/// 检查项级统计块（MVP-2 通过率一维 → MVP-3 四维回报，BCP §6.4）。
+/// 检查项级统计块（MVP-2 通过率一维 → MVP-3 四维回报，Blueprint §5.3）。
 /// 四维：pass_rate（pass_count/n）/ avg_quality / avg_cost / avg_verify_rounds——
 /// 全部来自既有数据（CheckResult 携带，零新增持久化文件）。
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
@@ -455,12 +441,17 @@ impl CheckStats {
         }
     }
 
-    /// 回报函数（BCP §6.4 写死，config `runtime.lianshan.reward_weights` 可覆盖）：
-    /// `reward = w_pass·pass_rate + w_quality·avg_quality − w_cost·avg_cost − w_rounds·avg_verify_rounds`
-    pub fn reward(&self, w: &RewardWeights) -> f64 {
+    /// 回报函数（Blueprint §5.3 写死，config `runtime.lianshan.reward_weights` 可覆盖）：
+    /// `reward = w_pass·pass_rate + w_quality·avg_quality − w_cost·cost_norm − w_rounds·avg_verify_rounds`
+    ///
+    /// `cost_norm` 为**归一化成本**（[0,1]，如 `avg_cost / max_group_avg_cost`，
+    /// 对齐 model_router §6.4）——原始 token 量级（~1e5）不归一化会以 4 个数量级
+    /// 碾压 pass/quality 项，使回报退化为 `≈ −w_cost·avg_cost`（V51 修复）。
+    /// `rounds` 量级小（1~3）无需归一化。
+    pub fn reward(&self, w: &RewardWeights, cost_norm: f64) -> f64 {
         w.pass * self.pass_rate()
             + w.quality * self.avg_quality()
-            - w.cost * self.avg_cost()
+            - w.cost * cost_norm
             - w.rounds * self.avg_rounds()
     }
 }
@@ -485,7 +476,7 @@ impl Default for RewardWeights {
     }
 }
 
-/// 契约执行记录（随 verify_state.json 持久化，零新增文件 — §6.6）。
+/// 契约执行记录（随 verify_state.json 持久化，零新增文件 — §5.7）。
 /// MVP-3 扩展：任务级信号（cost/rounds/quality）摊派给同任务所有检查项。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckResult {
@@ -506,7 +497,7 @@ pub struct CheckResult {
     pub quality: f64,
 }
 
-/// SkillEngine 输出（机械判据 + 契约校验，§8.22）。
+/// SkillEngine 输出（机械判据 + 契约校验，AGENTS.md）。
 /// 仅含机械检查项结果；llm_judgement 项由调用方（YinAgent）收集。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SkillReport {
@@ -583,13 +574,14 @@ pass_condition: 产出必须存在
         assert_eq!(w.quality, 0.3);
         assert_eq!(w.cost, 0.2);
         assert_eq!(w.rounds, 0.1);
-        // reward = 0.5·0.75 + 0.3·0.7 − 0.2·2000 − 0.1·1.0
-        let expected = 0.5 * 0.75 + 0.3 * 0.7 - 0.2 * 2000.0 - 0.1 * 1.0;
-        assert!((stats.reward(&w) - expected).abs() < 1e-9);
-        // 无采样：avg 全部 0.0，reward 0.0
+        // V51：cost 归一化——cost_norm = avg_cost / max_avg_cost = 2000/2000 = 1.0（单资产组）。
+        // reward = 0.5·0.75 + 0.3·0.7 − 0.2·1.0 − 0.1·1.0
+        let expected = 0.5 * 0.75 + 0.3 * 0.7 - 0.2 * 1.0 - 0.1 * 1.0;
+        assert!((stats.reward(&w, 1.0) - expected).abs() < 1e-9);
+        // 无采样：avg 全部 0.0，reward 0.0（cost_norm 0 时）
         let empty = CheckStats::default();
         assert_eq!(empty.avg_cost(), 0.0);
-        assert_eq!(empty.reward(&w), 0.0);
+        assert_eq!(empty.reward(&w, 0.0), 0.0);
     }
 
     /// V33/MVP-3：四维 stats 完整 serde roundtrip（含 quality_sum 浮点）。

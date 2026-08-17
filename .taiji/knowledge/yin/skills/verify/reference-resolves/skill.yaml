@@ -13,7 +13,7 @@ output_modes:
 category: verify
 dual: search
 implementations:
-- kind: reference_resolves
+- kind: builtin
   target: deliverables/handoff.md
   params:
     field: output_refs

@@ -20,16 +20,22 @@ use crate::infra::error::TaijiError;
 use crate::infra::knowledge::{GuizangClient, ModelAsset};
 use crate::infra::trace::TraceRecord;
 use crate::types::agent::{AssetRef, PromptAsset, VerificationAsset};
-use crate::types::verification::{CheckKind, CheckResult, CheckStats};
+use crate::types::verification::{CheckKind, CheckResult, CheckStats, RewardWeights};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-/// fork 触发阈值：资产级通过率 < 0.6 且采样 ≥ min_samples → 生成严格度变体。
+/// fork 触发阈值（Python 执行体路径专用，V53）：资产级通过率 < 0.6 且采样
+/// ≥ min_samples → 入队 compile 变体重新生成执行体。
 /// （MVP-3 定稿，沉淀 AGENTS.md；BCP §8.21「低回报资产扩展变体」的定量化）
+/// V51 起 variants/prompts 的 fork 改用四维回报 `FORK_REWARD_THRESHOLD`。
 const FORK_PASS_RATE_THRESHOLD: f64 = 0.6;
-/// merge 触发阈值：组内通过率差 < 0.1 视为无显著差异 → 合并到最优。
-const MERGE_PASS_RATE_DIFF: f64 = 0.1;
+/// V51 四维回报 fork 触发阈值：决策值 < 0.3（≈旧 pass_rate 0.6）且采样 ≥
+/// min_samples → 生成变体（AGENTS.md §25）。
+const FORK_REWARD_THRESHOLD: f64 = 0.3;
+/// V51 四维回报 merge 触发阈值：组内决策值差 < 0.05 视为无显著差异 → 合并
+/// 到最优（≈旧 pass 差 0.1，AGENTS.md §25）。
+const MERGE_REWARD_DIFF: f64 = 0.05;
 
 /// Aggregate report produced by a full evolution cycle.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -532,8 +538,9 @@ impl CognitionEvolver {
     }
 
     /// δ-fork（prompts）：根资产（无 variant_of）低决策值 → 生成变体。
-    /// 与 fork_variants 同构：n ≥ min_samples、决策值 < FORK_PASS_RATE_THRESHOLD、
-    /// 已 fork 防重复；变体 confidence×0.8 + stats 清零 + ModelAsset 独立初始化。
+    /// 与 fork_variants 同构：n ≥ min_samples、四维回报决策值 <
+    /// FORK_REWARD_THRESHOLD、已 fork 防重复；变体 confidence×0.8 + stats
+    /// 清零 + ModelAsset 独立初始化。
     async fn fork_prompts(
         &self,
         guizang: &GuizangClient,
@@ -543,6 +550,13 @@ impl CognitionEvolver {
     ) -> Result<u64, TaijiError> {
         let prompts = guizang.load_all_prompts().await?;
         let mut forked = 0u64;
+        // V51 四维回报：全局 cost 归一化基准（所有根候选的 max avg_cost）
+        let max_cost = prompts
+            .iter()
+            .filter(|p| p.variant_of.is_none())
+            .map(|p| p.stats.avg_cost())
+            .fold(0.0_f64, f64::max);
+        let w = &config.reward_weights;
 
         for p in prompts.iter().filter(|p| p.variant_of.is_none()) {
             if prompts.iter().any(|v| v.variant_of.as_deref() == Some(p.id.as_str())) {
@@ -553,7 +567,13 @@ impl CognitionEvolver {
                 .get(&p.id)
                 .map(|m| m.0)
                 .unwrap_or_else(|| Self::stats_pass_rate(&p.stats));
-            if total_n < config.min_samples || mu >= FORK_PASS_RATE_THRESHOLD {
+            let cost_norm = if max_cost > 0.0 {
+                p.stats.avg_cost() / max_cost
+            } else {
+                0.0
+            };
+            let dv = Self::decision_value(&p.stats, mu, cost_norm, w);
+            if total_n < config.min_samples || dv >= FORK_REWARD_THRESHOLD {
                 continue;
             }
 
@@ -587,8 +607,75 @@ impl CognitionEvolver {
         Ok(forked)
     }
 
-    /// δ-merge（prompts）：同组决策值差 < MERGE_PASS_RATE_DIFF → 统计并入最优，
-    /// 次者 pruned（同分根优先——read_dir 顺序确定性，与 merge_variants 同构）。
+    /// V53 编译演化算子：空闲窗口 fork 低通过率 Python skill → 入队 compile
+    /// 变体（连山发现，符号零 LLM）。只处理资产层 Python skill（执行体），
+    /// 低通过率（n ≥ min_samples 且 pass_rate < FORK_PASS_RATE_THRESHOLD）时
+    /// 入队 recompile 变体重新生成执行体。幂等——compile 文件已存在跳过。
+    pub async fn fork_python_skills(
+        &self,
+        config: &LianshanConfig,
+        data_root: &std::path::Path,
+    ) -> Result<u64, TaijiError> {
+        use crate::infra::skill_catalog::{load_skill_catalog, ToolProfile};
+        use crate::types::verification::{SkillCategory, SkillKind};
+
+        let mut forked = 0u64;
+        for category in [
+            SkillCategory::Verify,
+            SkillCategory::Converge,
+            SkillCategory::Exec,
+            SkillCategory::Orch,
+        ] {
+            let catalog = load_skill_catalog(self.guizang.as_ref(), category, ToolProfile::Full).await?;
+            for skill in catalog.iter().filter(|s| s.variant_of.is_none()) {
+                // 只处理资产层 Python skill（元层 builtin 无 Python 执行体）
+                if !skill
+                    .implementations
+                    .iter()
+                    .any(|i| i.kind == SkillKind::Python)
+                {
+                    continue;
+                }
+                // 已 fork 过（存在指向本 skill 的变体）→ 跳过，防链式 fork
+                // （变体不 fork 变体，与 fork_variants/fork_prompts 同构）。
+                if catalog
+                    .iter()
+                    .any(|v| v.variant_of.as_deref() == Some(skill.id.as_str()))
+                {
+                    continue;
+                }
+                let n = skill.stats.n;
+                let pass_rate = skill.stats.pass_rate();
+                if n < config.min_samples || pass_rate >= FORK_PASS_RATE_THRESHOLD {
+                    continue;
+                }
+                let variant_id = format!("{}-v1", skill.id);
+                let failure_detail = format!(
+                    "pass_rate {:.2} < {FORK_PASS_RATE_THRESHOLD} (n={n})",
+                    pass_rate
+                );
+                crate::orchestration::compile::enqueue_compile_task_variant(
+                    data_root,
+                    &variant_id,
+                    &skill.id,
+                    &failure_detail,
+                )
+                .await?;
+                forked += 1;
+                tracing::info!(
+                    skill = %skill.id,
+                    variant = %variant_id,
+                    n,
+                    pass_rate,
+                    "[fork_python_skills] queued recompile variant"
+                );
+            }
+        }
+        Ok(forked)
+    }
+
+    /// δ-merge（prompts）：同组四维决策值差 < MERGE_REWARD_DIFF → 统计并入
+    /// 最优，次者 pruned（同分根优先——read_dir 顺序确定性，与 merge_variants 同构）。
     async fn merge_prompts(
         &self,
         guizang: &GuizangClient,
@@ -613,16 +700,28 @@ impl CognitionEvolver {
             if eligible.len() < 2 {
                 continue;
             }
-            let mu_of = |p: &PromptAsset| {
-                posterior
+            // V51 四维回报：组内 cost 归一化基准
+            let max_cost = eligible
+                .iter()
+                .map(|&i| prompts[i].stats.avg_cost())
+                .fold(0.0_f64, f64::max);
+            let w = &config.reward_weights;
+            let dv_of = |p: &PromptAsset| {
+                let mu = posterior
                     .get(&p.id)
                     .map(|m| m.0)
-                    .unwrap_or_else(|| Self::stats_pass_rate(&p.stats))
+                    .unwrap_or_else(|| Self::stats_pass_rate(&p.stats));
+                let cost_norm = if max_cost > 0.0 {
+                    p.stats.avg_cost() / max_cost
+                } else {
+                    0.0
+                };
+                Self::decision_value(&p.stats, mu, cost_norm, w)
             };
             let mut sorted = eligible.clone();
             sorted.sort_by(|&a, &b| {
-                mu_of(&prompts[b])
-                    .partial_cmp(&mu_of(&prompts[a]))
+                dv_of(&prompts[b])
+                    .partial_cmp(&dv_of(&prompts[a]))
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
                         match (prompts[a].variant_of.is_none(), prompts[b].variant_of.is_none()) {
@@ -634,7 +733,7 @@ impl CognitionEvolver {
             });
             let best = sorted[0];
             for &candidate in &sorted[1..] {
-                if (mu_of(&prompts[best]) - mu_of(&prompts[candidate])).abs() < MERGE_PASS_RATE_DIFF {
+                if (dv_of(&prompts[best]) - dv_of(&prompts[candidate])).abs() < MERGE_REWARD_DIFF {
                     // 统计并入最优（任务级 stats 单块，直接累加）
                     prompts[best].stats.n += prompts[candidate].stats.n;
                     prompts[best].stats.pass_count += prompts[candidate].stats.pass_count;
@@ -711,42 +810,54 @@ impl CognitionEvolver {
             if eligible.len() < 2 {
                 continue;
             }
-            let mu_of = |i: usize| {
-                posterior
+            // V51 四维回报：组内 cost 归一化基准
+            let max_cost = eligible
+                .iter()
+                .map(|&i| prompts[i].stats.avg_cost())
+                .fold(0.0_f64, f64::max);
+            let w = &config.reward_weights;
+            let dv_of = |i: usize| {
+                let mu = posterior
                     .get(&prompts[i].id)
                     .map(|m| m.0)
-                    .unwrap_or_else(|| Self::stats_pass_rate(&prompts[i].stats))
+                    .unwrap_or_else(|| Self::stats_pass_rate(&prompts[i].stats));
+                let cost_norm = if max_cost > 0.0 {
+                    prompts[i].stats.avg_cost() / max_cost
+                } else {
+                    0.0
+                };
+                Self::decision_value(&prompts[i].stats, mu, cost_norm, w)
             };
-            let mus: Vec<f64> = eligible.iter().map(|&i| mu_of(i)).collect();
-            let best = mus.iter().copied().fold(f64::MIN, f64::max);
+            let dvs: Vec<f64> = eligible.iter().map(|&i| dv_of(i)).collect();
+            let best = dvs.iter().copied().fold(f64::MIN, f64::max);
 
             if config.bayesian_enabled {
                 for (idx, &i) in eligible.iter().enumerate() {
                     let sigma_cand = posterior.get(&prompts[i].id).map(|m| m.1).unwrap_or(0.0);
-                    if mus[idx] < best - 2.0 * sigma_cand {
+                    if dvs[idx] < best - 2.0 * sigma_cand {
                         prompts[i].status_mark_pruned();
                         pruned += 1;
                         tracing::info!(
                             id = %prompts[i].id,
-                            mu = mus[idx],
-                            best_mu = best,
+                            dv = dvs[idx],
+                            best_dv = best,
                             "[prune_prompts] pruned below best−2σ_beta"
                         );
                     }
                 }
             } else {
-                let mean = mus.iter().sum::<f64>() / mus.len() as f64;
-                let sigma = (mus
+                let mean = dvs.iter().sum::<f64>() / dvs.len() as f64;
+                let sigma = (dvs
                     .iter()
                     .map(|r| (r - mean).powi(2))
                     .sum::<f64>()
-                    / mus.len() as f64)
+                    / dvs.len() as f64)
                 .sqrt();
                 if sigma == 0.0 {
                     continue;
                 }
                 for (idx, &i) in eligible.iter().enumerate() {
-                    if mus[idx] < best - 2.0 * sigma {
+                    if dvs[idx] < best - 2.0 * sigma {
                         prompts[i].status_mark_pruned();
                         pruned += 1;
                     }
@@ -815,8 +926,8 @@ impl CognitionEvolver {
         total_n >= config.activation_min_samples
     }
 
-    /// δ-fork：低回报根资产（资产级通过率 < 0.6 且采样 ≥ min_samples）→
-    /// 生成 **strict 严格度参数化变体**（§8.21「放宽/收紧判据」的机械实现）：
+    /// δ-fork：低回报根资产（四维决策值 < FORK_REWARD_THRESHOLD 且采样 ≥
+    /// min_samples）→ 生成 **strict 严格度参数化变体**（§8.21「放宽/收紧判据」的机械实现）：
     /// 复制资产 + llm_judgement 项 `params.strictness = "strict"` + check id 重命名
     /// `{原id}@{变体id}`（防 backprop 撞名）+ stats 清零（变体独立采样）+ 降权
     /// （confidence × 0.8）+ `variant_of` 链接。判据文本不动（内容修订走人工通道）。
@@ -831,6 +942,13 @@ impl CognitionEvolver {
     ) -> Result<u64, TaijiError> {
         let assets = guizang.load_all_verifications().await?;
         let mut forked = 0u64;
+        // V51 四维回报：全局 cost 归一化基准（所有根候选的 max avg_cost）
+        let max_cost = assets
+            .iter()
+            .filter(|a| a.variant_of.is_none())
+            .map(|a| Self::asset_stats(a).avg_cost())
+            .fold(0.0_f64, f64::max);
+        let w = &config.reward_weights;
 
         for asset in assets.iter().filter(|a| a.variant_of.is_none()) {
             // 已 fork 过（存在指向本资产的变体）→ 跳过，防每次演化循环重复生成
@@ -842,12 +960,19 @@ impl CognitionEvolver {
                 continue;
             }
             let total_n = Self::asset_total_n(asset);
-            // V33/MVP-3.5: 决策值 = 后验均值（空 map → 频率回退）
+            // V51: 决策值 = 四维回报（后验 μ + 质量 − 成本 − 轮数）
+            let stats = Self::asset_stats(asset);
             let mu = posterior
                 .get(&asset.id)
                 .map(|p| p.0)
-                .unwrap_or_else(|| Self::asset_pass_rate(asset));
-            if total_n < config.min_samples || mu >= FORK_PASS_RATE_THRESHOLD {
+                .unwrap_or_else(|| stats.pass_rate());
+            let cost_norm = if max_cost > 0.0 {
+                stats.avg_cost() / max_cost
+            } else {
+                0.0
+            };
+            let dv = Self::decision_value(&stats, mu, cost_norm, w);
+            if total_n < config.min_samples || dv >= FORK_REWARD_THRESHOLD {
                 continue;
             }
 
@@ -883,7 +1008,7 @@ impl CognitionEvolver {
             tracing::info!(
                 root = %asset.id,
                 variant = %variant.id,
-                mu = mu,
+                dv = dv,
                 "[fork_variants] forked strict variant"
             );
         }
@@ -891,7 +1016,8 @@ impl CognitionEvolver {
     }
 
     /// δ-merge：同组（variant_of 指向同一根）n ≥ min_samples 的成员，
-    /// 通过率差 < 0.1（无显著差异）→ 统计按 check 位置并入最优者，次者 pruned。
+    /// 四维决策值差 < MERGE_REWARD_DIFF（无显著差异）→ 统计按 check 位置并入
+    /// 最优者，次者 pruned。
     async fn merge_variants(
         &self,
         guizang: &GuizangClient,
@@ -902,13 +1028,6 @@ impl CognitionEvolver {
         let groups = Self::group_variants(&assets);
         let mut merged = 0u64;
         let mut changed: Vec<usize> = Vec::new();
-        // V33/MVP-3.5: 决策值 = 后验均值（空 map → 频率回退）
-        let mu_of = |a: &VerificationAsset| {
-            posterior
-                .get(&a.id)
-                .map(|p| p.0)
-                .unwrap_or_else(|| Self::asset_pass_rate(a))
-        };
 
         for members in groups.values() {
             let eligible: Vec<usize> = members
@@ -919,13 +1038,32 @@ impl CognitionEvolver {
             if eligible.len() < 2 {
                 continue;
             }
+            // V51 四维回报：组内 cost 归一化基准
+            let max_cost = eligible
+                .iter()
+                .map(|&i| Self::asset_stats(&assets[i]).avg_cost())
+                .fold(0.0_f64, f64::max);
+            let w = &config.reward_weights;
+            let dv_of = |a: &VerificationAsset| {
+                let stats = Self::asset_stats(a);
+                let mu = posterior
+                    .get(&a.id)
+                    .map(|p| p.0)
+                    .unwrap_or_else(|| stats.pass_rate());
+                let cost_norm = if max_cost > 0.0 {
+                    stats.avg_cost() / max_cost
+                } else {
+                    0.0
+                };
+                Self::decision_value(&stats, mu, cost_norm, w)
+            };
             let mut sorted = eligible.clone();
             // 降序：决策值高者优先；同分时**根资产（非变体）优先保留**
             // （read_dir 顺序不确定——同分无二级键时 best 可能落到变体上，
             //  导致根契约被误 pruned。MVP-3 实测修复）
             sorted.sort_by(|&a, &b| {
-                mu_of(&assets[b])
-                    .partial_cmp(&mu_of(&assets[a]))
+                dv_of(&assets[b])
+                    .partial_cmp(&dv_of(&assets[a]))
                     .unwrap_or(std::cmp::Ordering::Equal)
                     .then_with(|| {
                         match (
@@ -940,8 +1078,8 @@ impl CognitionEvolver {
             });
             let best = sorted[0];
             for &candidate in &sorted[1..] {
-                let diff = (mu_of(&assets[best]) - mu_of(&assets[candidate])).abs();
-                if diff < MERGE_PASS_RATE_DIFF {
+                let diff = (dv_of(&assets[best]) - dv_of(&assets[candidate])).abs();
+                if diff < MERGE_REWARD_DIFF {
                     // 统计并入最优（变体 checks 顺序与原件一致——fork 复制保证）
                     // 先克隆候选统计，避免与最优的可变借用冲突
                     let cand_stats: Vec<CheckStats> = assets[candidate]
@@ -1016,8 +1154,8 @@ impl CognitionEvolver {
         Ok(merged)
     }
 
-    /// δ-prune：组内 n ≥ min_samples 成员，通过率低于组内最优 > 2σ
-    /// （σ = 组内通过率标准差）→ `status = "pruned"`（保留文件供审计，不再加载/回传）。
+    /// δ-prune：组内 n ≥ min_samples 成员，四维决策值低于组内最优 > 2σ
+    /// （σ = 组内决策值标准差）→ `status = "pruned"`（保留文件供审计，不再加载/回传）。
     async fn prune_variants(
         &self,
         guizang: &GuizangClient,
@@ -1027,16 +1165,6 @@ impl CognitionEvolver {
         let mut assets = guizang.load_all_verifications().await?;
         let groups = Self::group_variants(&assets);
         let mut pruned = 0u64;
-        // V33/MVP-3.5: 决策值 = 后验均值（空 map → 频率回退）
-        let mu_of = |a: &VerificationAsset| {
-            posterior
-                .get(&a.id)
-                .map(|p| p.0)
-                .unwrap_or_else(|| Self::asset_pass_rate(a))
-        };
-        let sigma_of = |a: &VerificationAsset| {
-            posterior.get(&a.id).map(|p| p.1).unwrap_or(0.0)
-        };
 
         for members in groups.values() {
             let eligible: Vec<usize> = members
@@ -1047,43 +1175,65 @@ impl CognitionEvolver {
             if eligible.len() < 2 {
                 continue;
             }
-            let mus: Vec<f64> = eligible.iter().map(|&i| mu_of(&assets[i])).collect();
-            let best = mus.iter().copied().fold(f64::MIN, f64::max);
+            // V51 四维回报：组内 cost 归一化基准
+            let max_cost = eligible
+                .iter()
+                .map(|&i| Self::asset_stats(&assets[i]).avg_cost())
+                .fold(0.0_f64, f64::max);
+            let w = &config.reward_weights;
+            let dv_of = |a: &VerificationAsset| {
+                let stats = Self::asset_stats(a);
+                let mu = posterior
+                    .get(&a.id)
+                    .map(|p| p.0)
+                    .unwrap_or_else(|| stats.pass_rate());
+                let cost_norm = if max_cost > 0.0 {
+                    stats.avg_cost() / max_cost
+                } else {
+                    0.0
+                };
+                Self::decision_value(&stats, mu, cost_norm, w)
+            };
+            let dvs: Vec<f64> = eligible.iter().map(|&i| dv_of(&assets[i])).collect();
+            let best = dvs.iter().copied().fold(f64::MIN, f64::max);
 
             if config.bayesian_enabled {
                 // 贝叶斯版（§6.4.1）：μ < best − 2·σ(候选自身 Beta 后验)——
                 // 低采样 σ 大 → 不易误淘汰；偶然失败不触发 prune。
                 for (idx, &i) in eligible.iter().enumerate() {
-                    let sigma_cand = sigma_of(&assets[i]);
-                    if mus[idx] < best - 2.0 * sigma_cand {
+                    let sigma_cand = posterior
+                        .get(&assets[i].id)
+                        .map(|p| p.1)
+                        .unwrap_or(0.0);
+                    if dvs[idx] < best - 2.0 * sigma_cand {
                         assets[i].status = "pruned".into();
                         pruned += 1;
                         tracing::info!(
                             id = %assets[i].id,
-                            mu = mus[idx],
-                            best_mu = best,
+                            dv = dvs[idx],
+                            best_dv = best,
                             sigma_beta = sigma_cand,
                             "[prune_variants] pruned below best−2σ_beta"
                         );
                     }
                 }
             } else {
-                // 频率版（MVP-3 既有）：组内率标准差 σ，rates < best − 2σ
-                let mean = mus.iter().sum::<f64>() / mus.len() as f64;
-                let sigma = (mus.iter().map(|r| (r - mean).powi(2)).sum::<f64>()
-                    / mus.len() as f64)
+                // 频率版（MVP-3 既有）：组内决策值标准差 σ，dv < best − 2σ
+                let mean = dvs.iter().sum::<f64>() / dvs.len() as f64;
+                let sigma = (dvs.iter().map(|r| (r - mean).powi(2)).sum::<f64>()
+                    / dvs.len() as f64)
                 .sqrt();
                 if sigma == 0.0 {
                     continue; // 组内无差异，无淘汰对象
                 }
                 for (idx, &i) in eligible.iter().enumerate() {
-                    if mus[idx] < best - 2.0 * sigma {
+                    if dvs[idx] < best - 2.0 * sigma {
                         assets[i].status = "pruned".into();
                         pruned += 1;
                         tracing::info!(
                             id = %assets[i].id,
-                            rate = mus[idx],
-                            best = best,
+                            dv = dvs[idx],
+                            best_dv = best,
                             sigma = sigma,
                             "[prune_variants] pruned below 2σ"
                         );
@@ -1140,6 +1290,18 @@ impl CognitionEvolver {
             s.pass_count as f64 / s.n as f64
         }
     }
+
+    /// V51 四维回报决策值（AGENTS.md §25）：
+    /// `w_pass·μ + w_quality·avg_quality − w_cost·cost_norm − w_rounds·avg_rounds`
+    /// ——pass 项用后验 μ（空 map 回退频率 pass_rate），cost 项用组内归一化
+    /// cost_norm（[0,1]，对齐 model_router 的 `avg_cost / max_group_avg_cost` 模式；
+    /// 原始 token 量级 ~1e5 不归一化会以 4 个数量级碾压 pass/quality 项）。
+    fn decision_value(stats: &CheckStats, mu: f64, cost_norm: f64, w: &RewardWeights) -> f64 {
+        w.pass * mu
+            + w.quality * stats.avg_quality()
+            - w.cost * cost_norm
+            - w.rounds * stats.avg_rounds()
+    }
 }
 
 #[cfg(test)]
@@ -1168,6 +1330,27 @@ mod tests {
         );
         let evolver = CognitionEvolver::new(client);
         (evolver, dir)
+    }
+
+    /// V51 四维回报决策值公式验证（AGENTS.md §25）：
+    /// `w_pass·μ + w_quality·avg_quality − w_cost·cost_norm − w_rounds·avg_rounds`
+    #[test]
+    fn test_decision_value_four_dimensional() {
+        let stats = CheckStats {
+            n: 10,
+            pass_count: 6,    // pass_rate = 0.6
+            cost_sum: 1000,   // avg_cost = 100
+            rounds_sum: 20,   // avg_rounds = 2
+            quality_sum: 8.0, // avg_quality = 0.8
+        };
+        let w = RewardWeights::default(); // pass=0.5, quality=0.3, cost=0.2, rounds=0.1
+        let mu = 0.7;
+        let cost_norm = 0.5;
+        let dv = CognitionEvolver::decision_value(&stats, mu, cost_norm, &w);
+        let expected = 0.5 * 0.7 + 0.3 * 0.8 - 0.2 * 0.5 - 0.1 * 2.0;
+        assert!((dv - expected).abs() < 1e-9, "dv={dv} expected={expected}");
+        // 成本归一化是硬约束：原始 token 量级不归一化会碾压 pass/quality 项
+        assert!(dv > 0.0, "成本归一化后决策值应保持正值");
     }
 
     #[tokio::test]

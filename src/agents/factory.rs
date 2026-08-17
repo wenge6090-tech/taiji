@@ -26,10 +26,10 @@ use std::sync::Arc;
 
 use tokio_util::sync::CancellationToken;
 
-use crate::agents::yin::{YinConvergeAgentBuilder, YinVerifyAgentBuilder};
+use crate::agents::yin::YinJudge;
 use crate::agents::chat::ChatAgentBuilder;
 
-/// V45 工具集路由画像（BCP §8.14 双通道——弱模型最小集）。
+/// V45 工具集路由画像（AGENTS.md §9 双通道——弱模型最小集）。
 ///
 /// 按模型 key 字符串启发式判断：含 "flash" / "lite" / "mini" / "small"
 /// → [`ToolProfile::Minimal`]（仅隐藏 webfetch 高代价联网；recursive-decompose 保留——拆解正是弱模型小上下文规避超限的核心手段）；
@@ -42,7 +42,7 @@ pub fn profile_for_model(model: &crate::types::agent::ModelKey) -> crate::infra:
     }
 }
 
-/// V50 环境维度轴（§6.3.1）：模型类指纹——key 含 flash/lite/mini/small → "flash"，
+/// V50 环境维度轴（§5.4）：模型类指纹——key 含 flash/lite/mini/small → "flash"，
 /// 其余 → "strong"。与 `profile_for_model` 同一检测源（零新判定逻辑），
 /// 产出 `current_env_tags` 的源：检索/演化/主动学习按此维度隔离资产变体。
 pub fn model_class(model: &crate::types::agent::ModelKey) -> &'static str {
@@ -187,7 +187,7 @@ impl AgentFactory {
         .max_turns(6)
         .depth(depth)
         .max_depth(max_depth)
-        // V37 异源裁判开关（BCP §8.8 相位级）：从 runtime 配置注入——true 且
+        // V37 异源裁判开关（Blueprint §4.3 相位级）：从 runtime 配置注入——true 且
         // 路由候选 ≥2 时决策 MetaContext.verify_model（Yin 专用验证模型）。
         .heterogeneous_verifier(self.config.runtime.model_routing.heterogeneous_verifier)
         .safety_hook(self.safety_hook.clone()))
@@ -264,21 +264,19 @@ impl AgentFactory {
         .provider_name(&provider))
     }
 
-    /// Create a [`YinVerifyAgentBuilder`] (因果验证·阴, verify mode).
+    /// Create a [`YinJudge`]（阴判断节点，V57：半符号半 LLM，非 Agent）。
     ///
-    /// The YinAgent in verify mode checks task outputs against L4 Truth
-    /// constraints loaded by [`ConstraintEngine`] and produces a
-    /// [`VerificationReport`].  Constraint pre-checks run **before** the
-    /// LLM call (see AGENTS.md §4).
+    /// 阴不持有 skill/工具/system prompt——符号层读归藏因果对碰，LLM 层语义
+    /// 兑底（无工具）。verify 与 converge 是同一节点的两个方法。
     ///
-    /// **LLM config**: resolved from `agent_overrides["yin"]` (verify and
-    /// converge share the same config key).
-    pub fn create_yin_verify_agent(
+    /// **LLM config**: resolved from `agent_overrides["yin"]`（verify 和
+    /// converge 共享同一 config key）。
+    pub fn create_yin_judge(
         &self,
         engine_ctx: &EngineContext,
         meta_ctx: &MetaContext,
-    ) -> Result<YinVerifyAgentBuilder, TaijiError> {
-        // V37 异源裁判（BCP §8.8 相位级）：verify_model 优先（Yin 用独立
+    ) -> Result<YinJudge, TaijiError> {
+        // V37 异源裁判（Blueprint §4.3 相位级）：verify_model 优先（Yin 用独立
         // 验证模型，裁判 ≠ 运动员）；None = 继承执行模型（主模型）。
         let yin_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
         let (provider, model) = self.agent_llm_config_with("yin", yin_key);
@@ -286,50 +284,16 @@ impl AgentFactory {
             task_id = %engine_ctx.task_id,
             provider = %provider,
             model = %model,
-            "Creating YinVerifyAgent"
+            "Creating YinJudge"
         );
-        Ok(YinVerifyAgentBuilder::new(
+        Ok(YinJudge::new(
             engine_ctx.clone(),
             self.providers.clone(),
+            &provider,
             &model,
-        )
-        .provider_name(&provider)
-        .safety_hook(self.safety_hook.clone())
-        .context_limits(self.config.runtime.context_limits)
-        .guizang(self.guizang.clone()))
-    }
-
-    /// Create a [`YinConvergeAgentBuilder`] (收敛判定, converge mode).
-    ///
-    /// The YinAgent in converge mode aggregates subtask results from
-    /// recursive decomposition and decides whether the overall task has
-    /// converged, partially converged, or diverged.
-    ///
-    /// **LLM config**: resolved from `agent_overrides["yin"]` (same key
-    /// as verify mode).
-    pub fn create_yin_converge_agent(
-        &self,
-        engine_ctx: &EngineContext,
-        meta_ctx: &MetaContext,
-    ) -> Result<YinConvergeAgentBuilder, TaijiError> {
-        // V37 异源裁判：verify_model 优先（与 verify 同语义——收敛判定也是裁判）。
-        let yin_key = meta_ctx.verify_model.as_ref().or(meta_ctx.model.as_ref());
-        let (provider, model) = self.agent_llm_config_with("yin", yin_key);
-        tracing::debug!(
-            task_id = %engine_ctx.task_id,
-            provider = %provider,
-            model = %model,
-            "Creating YinConvergeAgent"
-        );
-        Ok(YinConvergeAgentBuilder::new(
-            engine_ctx.clone(),
-            self.providers.clone(),
-            &model,
-        )
-        .provider_name(&provider)
-        .safety_hook(self.safety_hook.clone())
-        .context_limits(self.config.runtime.context_limits)
-        .guizang(self.guizang.clone()))
+            self.guizang.clone(),
+            self.config.runtime.context_limits,
+        ))
     }
 
     // ── Configuration helpers ────────────────────────────────────────
@@ -397,7 +361,7 @@ impl AgentFactory {
         self.agent_llm_config_with(agent_type, None)
     }
 
-    /// V36：按 MetaContext.model 路由结果解析 LLM 配置（BCP §8.8 下游消费）。
+    /// V36：按 MetaContext.model 路由结果解析 LLM 配置（Blueprint §4.3 下游消费）。
     ///
     /// `model_key = Some` 且可在候选表解析 → 返回路由的 (provider, model)，
     /// **覆盖** agent_overrides（路由是元权重决策，优先级高于静态配置）；

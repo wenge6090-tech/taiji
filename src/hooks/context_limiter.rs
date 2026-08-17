@@ -1,4 +1,4 @@
-//! ContextLimiter — V29 上下文窗口预算（BCP §8.19）。
+//! ContextLimiter — V29 上下文窗口预算（AGENTS.md §14）。
 //!
 //! 精准 token 统计替换 max_turns 轮次：`on_completion_response` 记录
 //! `response.usage.input_tokens`（provider 报告的真实请求 token 数，含历史
@@ -62,7 +62,7 @@ impl<M: CompletionModel> PromptHook<M> for ContextLimiter {
         _prompt: &Message,
         response: &CompletionResponse<M::Response>,
     ) -> HookAction {
-        // V48：单次窗口占用语义（BCP §8.19）。input_tokens 每轮都含完整历史
+        // V48：单次窗口占用语义（AGENTS.md §14）。input_tokens 每轮都含完整历史
         // 重放，本身即当前窗口占用——取单次值而非跨轮累计（累计会多重计数
         // 同一段历史，导致窗口远未用满即触顶假爆）。
         let used = response.usage.input_tokens;

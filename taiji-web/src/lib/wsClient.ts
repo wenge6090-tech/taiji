@@ -10,6 +10,8 @@ export type ClientMessageType =
   | "GetTaskTree"
   | "GetZhouyiState"
   | "PlanMessage"
+  | "GetGuizangGraph"
+  | "GetOntologyView"
   | "ChatMessage";
 
 interface PendingRequest {

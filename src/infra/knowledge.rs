@@ -4,7 +4,7 @@
 //! under yang/yin 对偶目录（见下方布局）。V38: no `index.yaml` —
 //! tag search scans directories on demand (`scan_assets`).
 //!
-//! # Directory layout (V43：yang/yin Skills 对偶子树，BCP §10.1)
+//! # Directory layout (V43：yang/yin Skills 对偶子树，Blueprint §6.1)
 //!
 //! ```text
 //! {data_dir}/
@@ -76,7 +76,7 @@ pub struct AssetHeader {
     pub version: u32,
 }
 
-/// L2 Model — Bayesian confidence model（MVP-3.5 激活，原「预留层」— BCP §6.2/§6.4.1）。
+/// L2 Model — Bayesian confidence model（MVP-3.5 激活，原「预留层」— Blueprint §5.2/§5.3）。
 /// 每验证契约一个资产（id 与 verification 同名关联）；Beta-Bernoulli 共轭后验。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModelAsset {
@@ -87,7 +87,7 @@ pub struct ModelAsset {
 }
 
 impl ModelAsset {
-    /// 后验均值 μ = α/(α+β)（§6.4.1）。
+    /// 后验均值 μ = α/(α+β)（§5.3）。
     pub fn posterior_mean(&self) -> f64 {
         let total = self.alpha + self.beta;
         if total <= 0.0 {
@@ -97,7 +97,7 @@ impl ModelAsset {
         }
     }
 
-    /// 后验标准差 σ = √(αβ/((α+β)²·(α+β+1)))（§6.4.1——Beta 分布标准差）。
+    /// 后验标准差 σ = √(αβ/((α+β)²·(α+β+1)))（§5.3——Beta 分布标准差）。
     /// 低采样时 σ 大（后验宽），驱动决策保守化（不误淘汰）。
     pub fn posterior_sigma(&self) -> f64 {
         let total = self.alpha + self.beta;
@@ -109,7 +109,7 @@ impl ModelAsset {
     }
 
     /// 从人工先验（资产 confidence，§6.3 语义）映射初始化：
-    /// α = 1 + k·confidence，β = 1 + k·(1−confidence)（k = prior_strength，§6.4.1）。
+    /// α = 1 + k·confidence，β = 1 + k·(1−confidence)（k = prior_strength，§5.3）。
     pub fn from_prior(id: &str, name: &str, confidence: f64, prior_strength: f64) -> Self {
         let k = prior_strength.max(0.0);
         let c = confidence.clamp(0.0, 1.0);
@@ -178,7 +178,7 @@ impl IndexData {
 /// `GuizangClient` is `Send + Sync`.  Internal state (`data_dir`) is immutable
 /// after construction.
 ///
-/// # V44 去分区化（BCP §10.1）
+/// # V44 去分区化（Blueprint §6.1）
 /// 单一资产树：`data_dir` = knowledge 根，直接承载 yang/ + yin/ + models/。
 /// 模型维度仅在统计层区分（`model_stats.yaml` 按 model_key 索引），
 /// 不产生资产副本。V36-V43 的 `for_model` 分区派生已删除。
@@ -186,7 +186,7 @@ impl IndexData {
 pub struct GuizangClient {
     /// knowledge 根目录（构造时传入）——资产树 + model_stats.yaml 所在层。
     data_dir: PathBuf,
-    /// 版本控制后端（BCP §10.0：归藏 = git 版本控制的库）。
+    /// 版本控制后端（Blueprint §6.0：归藏 = git 版本控制的库）。
     git: GitBackend,
 }
 
@@ -199,7 +199,7 @@ impl GuizangClient {
             "skill" => "skills",
             "prompt" => "prompts",
             "verification" => "verifications",
-            // BCP §10.1 yang/yin 对偶目录（V42 迁移）:
+            // Blueprint §6.1 yang/yin 对偶目录（V42 迁移）:
             "yang_prompt" => "yang/prompts",
             "yin_prompt" => "yin/prompts",
             "yin_verification" => "yin/skills/verify",
@@ -217,7 +217,7 @@ impl GuizangClient {
 
     /// Create a new `GuizangClient`, ensuring the root directory exists.
     ///
-    /// V44：创建根级资产层目录（yang/ + yin/ + models/，BCP §10.1）。
+    /// V44：创建根级资产层目录（yang/ + yin/ + models/，Blueprint §6.1）。
     ///
     /// # Errors
     /// Returns `TaijiError::IO` if the root directory cannot be created.
@@ -248,7 +248,7 @@ impl GuizangClient {
         })
     }
 
-    /// Create directories for all asset types (yang/yin 对偶，BCP §10.1，V44 根级)。
+    /// Create directories for all asset types (yang/yin 对偶，Blueprint §6.1，V44 根级)。
     async fn ensure_dirs(&self) -> Result<(), TaijiError> {
         let dirs = [
             self.data_dir.join("models"),
@@ -256,8 +256,8 @@ impl GuizangClient {
             self.data_dir.join("yang/skills/orch"),       // 阳轨编排 Skill
             self.data_dir.join("yang/skills/exec"),       // 阳轨执行 Skill
             self.data_dir.join("yin/prompts"),            // 阴轨 YinAgent 提示词
-            self.data_dir.join("yin/skills/verify"),      // 阴轨验证 Skill（BCP §10.1）
-            self.data_dir.join("yin/skills/converge"),    // 阴轨收敛 Skill（BCP §10.1）
+            self.data_dir.join("yin/skills/verify"),      // 阴轨验证 Skill（Blueprint §6.1）
+            self.data_dir.join("yin/skills/converge"),    // 阴轨收敛 Skill（Blueprint §6.1）
         ];
         for dir in &dirs {
             fs::create_dir_all(dir).await.map_err(|e| {
@@ -290,7 +290,7 @@ impl GuizangClient {
         &self.data_dir
     }
 
-    // ── 版本控制（BCP §10.0：归藏 = git 版本控制的库）───────────────────
+    // ── 版本控制（Blueprint §6.0：归藏 = git 版本控制的库）───────────────────
 
     /// 提交当前知识树为一次版本快照，返回 commit id。
     /// commit 失败上抛（归藏 I/O 硬错误，AGENTS.md §8 无降级原则）。
@@ -315,7 +315,7 @@ impl GuizangClient {
 
     // ── Model stats（V36 元权重表，根级共享）──────────────────────────
 
-    /// 加载根级 model_stats.yaml（BCP §6.4 元权重表）——`model_key → StatsRow`。
+    /// 加载根级 model_stats.yaml（Blueprint §5.3 元权重表）——`model_key → StatsRow`。
     ///
     /// 文件缺失 → 空表（未采样 = 合法状态，ModelRouter 走默认模型）；文件损坏
     /// → warn + 空表（衍生数据无重建源，按未采样处理——与 index.yaml 损坏重建
@@ -500,7 +500,7 @@ impl GuizangClient {
             }
         })?;
 
-        // 版本控制（BCP §10.0）：每次写入 = 一次 commit（可审计/可回滚）。
+        // 版本控制（Blueprint §6.0）：每次写入 = 一次 commit（可审计/可回滚）。
         self.git.commit(&format!("save {type_}:{id}")).await?;
 
         Ok(())
@@ -624,8 +624,8 @@ impl GuizangClient {
     // ── Prompt asset convenience methods ──────────────────────────────
 
     /// Save a [`PromptAsset`] to the appropriate directory:
-    /// - `agent_target="YangAgent"` → `yang/prompts/`（BCP §10.1 阳轨）
-    /// - `agent_target="YinAgent"` → `yin/prompts/`（BCP §10.1 阴轨）
+    /// - `agent_target="YangAgent"` → `yang/prompts/`（Blueprint §6.1 阳轨）
+    /// - `agent_target="YinAgent"` → `yin/prompts/`（Blueprint §6.1 阴轨）
     /// - 空或其他 → `prompts/`（旧兼容）
     pub async fn save_prompt(&self, prompt: &mut PromptAsset) -> Result<(), TaijiError> {
         let type_str = match prompt.agent_target.as_str() {
@@ -701,7 +701,7 @@ impl GuizangClient {
     }
     // ── Verification asset convenience methods (V33 阴轨验证契约) ────
 
-    /// Save a [`VerificationAsset`] to the `yin/skills/verify/` directory（BCP §10.1 阴轨）。
+    /// Save a [`VerificationAsset`] to the `yin/skills/verify/` directory（Blueprint §6.1 阴轨）。
     ///
     /// Thin wrapper around [`save_asset`](Self::save_asset).
     pub async fn save_verification(
@@ -715,7 +715,7 @@ impl GuizangClient {
         Ok(())
     }
 
-    /// Persist a Bayesian posterior asset（MVP-3.5 — BCP §6.4.1；version++ 原子写）。
+    /// Persist a Bayesian posterior asset（MVP-3.5 — Blueprint §5.3；version++ 原子写）。
     /// Lianshan Consumer 是唯一写者（Zhouyi 执行期归藏只读 §8.3）。
     pub async fn save_model(
         &self,
@@ -728,7 +728,7 @@ impl GuizangClient {
         Ok(())
     }
 
-    /// 保存迹拓扑（BCP §6.0 蓝图文件契约）——`manifold/{root_task}.yaml`。
+    /// 保存迹拓扑（Blueprint §5.0 蓝图文件契约）——`manifold/{root_task}.yaml`。
     /// 原子写（tmp + rename）+ git commit。Lianshan Consumer 是唯一写者（§8.3）。
     pub async fn save_topology(
         &self,
@@ -795,7 +795,7 @@ impl GuizangClient {
         })
     }
 
-    // ── V50 §6.6 本体挖掘：ontology/ 资产层存取（三层：词汇表/拓扑/逻辑 + 共现累积）──
+    // ── V50 §5.7 本体挖掘：ontology/ 资产层存取（三层：词汇表/拓扑/逻辑 + 共现累积）──
 
     /// ontology/ 目录下读一个 YAML 文件（不存在 → None）。
     async fn load_ontology_yaml<T: serde::de::DeserializeOwned>(
@@ -927,7 +927,7 @@ impl GuizangClient {
 
     /// 资产 id → 语义类型 id（扫资产 tags 匹配 types.yaml 词表；无匹配 = 不映射）。
     /// MVP-1 覆盖 prompts（assets_used 现只含 prompt）；skills 映射随 skill 共现
-    /// 数据源扩展（阻塞点 §6.6）。
+    /// 数据源扩展（阻塞点 §5.7）。
     pub async fn asset_type_map(&self) -> Result<HashMap<String, String>, TaijiError> {
         let type_ids: HashSet<String> = self
             .load_semantic_types()
@@ -1011,6 +1011,185 @@ impl GuizangClient {
         Ok(models)
     }
 
+    // ── V59 浅层写：实时录入（阴判断节点同步回传，替代连山 backprop）──
+
+    /// 贝叶斯后验更新（迁移自 CognitionEvolver::bayesian_update，V59 浅层写）。
+    ///
+    /// 加载 `models/{asset_id}.yaml`；不存在 → 从 confidence 映射先验初始化
+    /// （α = 1 + k·c，β = 1 + k·(1−c)，k = prior_strength）；然后 α += success、
+    /// β += fail → save_model（version++ 原子写）→ 返回后验均值。
+    pub async fn update_posterior(
+        &self,
+        asset_id: &str,
+        success: u64,
+        fail: u64,
+        prior_confidence: f64,
+        prior_strength: f64,
+    ) -> Result<f64, TaijiError> {
+        let mut model = match self.load_model(asset_id).await? {
+            Some(m) => m,
+            None => {
+                let mut m = ModelAsset::from_prior(
+                    asset_id,
+                    asset_id,
+                    prior_confidence,
+                    prior_strength,
+                );
+                self.save_model(&mut m).await?;
+                m
+            }
+        };
+        model.alpha += success as f64;
+        model.beta += fail as f64;
+        self.save_model(&mut model).await?;
+        Ok(model.posterior_mean())
+    }
+
+    /// V59 浅层写：prompt 任务级信号实时录入（stats 四维 + α/β 后验）。
+    ///
+    /// 替代连山 backprop_prompts——阴判断节点 PASS/FAIL 同步回传，频率统计
+    /// 主数据 + 贝叶斯后验（开关内）同写。
+    pub async fn record_prompt_signal(
+        &self,
+        assets: &[crate::types::agent::AssetRef],
+        passed: bool,
+        checks: &[crate::types::verification::CheckResult],
+        bayesian_enabled: bool,
+        prior_strength: f64,
+    ) -> Result<u64, TaijiError> {
+        let prompt_refs: Vec<&str> = assets
+            .iter()
+            .filter(|a| a.asset_type == "prompt")
+            .map(|a| a.id.as_str())
+            .collect();
+        if prompt_refs.is_empty() {
+            return Ok(0);
+        }
+        // 任务级四维信号（同任务摊派值一致，取首项；空 checks → 0）
+        let cost = checks.first().map(|c| c.cost_tokens).unwrap_or(0);
+        let rounds = checks.first().map(|c| c.verify_rounds as u64).unwrap_or(0);
+        let quality = checks.first().map(|c| c.quality).unwrap_or(0.0);
+
+        let mut updated = 0u64;
+        for pid in prompt_refs {
+            let Some(mut p) = self.load_prompt(pid).await? else {
+                tracing::warn!(prompt = pid, "[record_prompt_signal] prompt not found — skipping");
+                continue;
+            };
+            p.stats.n += 1;
+            if passed {
+                p.stats.pass_count += 1;
+            }
+            p.stats.cost_sum += cost;
+            p.stats.rounds_sum += rounds;
+            p.stats.quality_sum += quality;
+            p.usage_count += 1;
+            p.success_rate = p.stats.pass_rate();
+            self.save_prompt(&mut p).await?;
+            if bayesian_enabled {
+                let (s, f) = if passed { (1, 0) } else { (0, 1) };
+                if let Err(e) = self
+                    .update_posterior(&p.id, s, f, p.confidence, prior_strength)
+                    .await
+                {
+                    tracing::warn!(
+                        prompt = %p.id,
+                        error = %e,
+                        "[record_prompt_signal] posterior update failed — frequency already saved"
+                    );
+                }
+            }
+            updated += 1;
+        }
+        Ok(updated)
+    }
+
+    /// V59 浅层写：阳面 Python skill 信号实时录入（SkillAsset.stats + α/β）。
+    ///
+    /// 替代连山 backprop_python_skills——阳面 skill 经 SkillTool 工具调用，
+    /// 结果不回 verify_state，由 zhouyi PASS 时 load_tool_calls 转 CheckResult
+    /// 后在此回传。
+    pub async fn record_python_skill_stats(
+        &self,
+        checks: &[crate::types::verification::CheckResult],
+        bayesian_enabled: bool,
+        prior_strength: f64,
+    ) -> Result<u64, TaijiError> {
+        use crate::infra::skill_catalog::{load_skill_catalog, ToolProfile};
+        use crate::types::verification::{CheckKind, SkillCategory, SkillKind};
+
+        let python_checks: Vec<&crate::types::verification::CheckResult> = checks
+            .iter()
+            .filter(|c| c.kind == CheckKind::Python)
+            .collect();
+        if python_checks.is_empty() {
+            return Ok(0);
+        }
+
+        let mut updated_total = 0u64;
+        for category in [
+            SkillCategory::Verify,
+            SkillCategory::Converge,
+            SkillCategory::Exec,
+            SkillCategory::Orch,
+        ] {
+            let mut catalog = load_skill_catalog(self, category, ToolProfile::Full).await?;
+            for skill in &mut catalog {
+                // 只处理资产层 Python skill（元层 builtin 无 Python 执行体）
+                if !skill
+                    .implementations
+                    .iter()
+                    .any(|i| i.kind == SkillKind::Python)
+                {
+                    continue;
+                }
+                let mut bayes_success = 0u64;
+                let mut bayes_fail = 0u64;
+                let mut updated_any = false;
+                for result in &python_checks {
+                    let skill_id = result.check_id.split('#').next().unwrap_or("");
+                    if skill_id != skill.id {
+                        continue;
+                    }
+                    skill.stats.n += 1;
+                    if result.passed {
+                        skill.stats.pass_count += 1;
+                        bayes_success += 1;
+                    } else {
+                        bayes_fail += 1;
+                    }
+                    skill.stats.cost_sum += result.cost_tokens / python_checks.len().max(1) as u64;
+                    skill.stats.rounds_sum += result.verify_rounds as u64;
+                    skill.stats.quality_sum += result.quality;
+                    updated_any = true;
+                    updated_total += 1;
+                }
+                if updated_any {
+                    self.save_skill(skill).await?;
+                    if bayesian_enabled && (bayes_success > 0 || bayes_fail > 0) {
+                        if let Err(e) = self
+                            .update_posterior(
+                                &skill.id,
+                                bayes_success,
+                                bayes_fail,
+                                skill.confidence,
+                                prior_strength,
+                            )
+                            .await
+                        {
+                            tracing::warn!(
+                                skill_id = %skill.id,
+                                error = %e,
+                                "[record_python_skill_stats] posterior update failed — frequency already saved"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        Ok(updated_total)
+    }
+
     /// Load a [`VerificationAsset`] from the `yin/skills/verify/` directory by id.
     ///
     /// Returns `None` when no asset with that id exists, so callers can
@@ -1036,14 +1215,14 @@ impl GuizangClient {
     }
 
     /// Load **all** verification contract assets from the `yin/skills/verify/`
-    /// directory（BCP §10.1）。
+    /// directory（Blueprint §6.1）。
     ///
     /// Direct directory scan (does **not** rely on `index.yaml` —
     /// `search_by_tags(&[])` returns empty, and the contract layer is small
     /// in MVP-1).  Individual file read/parse failures are surfaced as
     /// warnings and skipped (a corrupt contract asset must not block
     /// verification of other contracts); directory-level I/O failures are
-    /// errors (无降级原则 — §8.20).
+    /// errors (无降级原则 — AGENTS.md §8).
 // ── Prompt 全量加载（V35/MVP-6：prompts 四算子对称演化需要）────
 
 /// Load all prompt assets (active ones — pruned prompts are kept on disk for
@@ -1218,15 +1397,12 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             .iter()
             .enumerate()
             .filter_map(|(idx, impl_)| {
+                // V52：Builtin → builtin 名 = s.id 映射 CheckKind；
+                // Python 由 PythonEngine 执行，不进 VerificationAsset.checks（Lianshan 桥）。
                 let kind = match impl_.kind {
-                    SkillKind::FileExists => CheckKind::FileExists,
-                    SkillKind::SchemaValid => CheckKind::SchemaValid,
-                    SkillKind::ReferenceResolves => CheckKind::ReferenceResolves,
-                    SkillKind::CommandSucceeds => CheckKind::CommandSucceeds,
+                    SkillKind::Builtin => crate::types::verification::builtin_check_kind(&s.id)?,
                     SkillKind::LlmJudgement => CheckKind::LlmJudgement,
-                    SkillKind::TraceConsistency => CheckKind::TraceConsistency,
-                    // 阳面 kind 不进 VerificationAsset.checks
-                    _ => return None,
+                    SkillKind::Python => return None,
                 };
                 // 空 command 的 CommandSucceeds 不落盘给 Lianshan（避免 soft-fail 噪声）
                 if kind == CheckKind::CommandSucceeds {
@@ -1298,7 +1474,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
         Ok(None)
     }
 
-    /// V43: 按 SkillCategory 加载全部 active Skill 资产（BCP §10.1）。
+    /// V43: 按 SkillCategory 加载全部 active Skill 资产（Blueprint §6.1）。
     ///
     /// - `Verify` → 扫描 `yin/skills/verify/`
     /// - `Converge` → 扫描 `yin/skills/converge/`
@@ -1365,7 +1541,7 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
     }
 
     // -----------------------------------------------------------------------
-    // V45 统一 Skill 资产（BCP §10.2 双轨——元层 ∪ 资产层加载）
+    // V45 统一 Skill 资产（AGENTS.md §9 双轨——元层 ∪ 资产层加载）
     // -----------------------------------------------------------------------
 
     /// 类别 → 归藏子目录（V45 双轨：每 skill 一文件夹 `skills/{cat}/{id}/skill.yaml`）。
@@ -1377,6 +1553,21 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             SkillCategory::Verify => "yin/skills/verify",
             SkillCategory::Converge => "yin/skills/converge",
         }
+    }
+
+    /// V52：解析资产层 Python skill 脚本的绝对路径。
+    /// `{data_dir}/yang|yin/skills/{cat}/{id}/{target}`（target 空默认 "skill.py"）。
+    pub fn skill_script_path(
+        &self,
+        category: crate::types::verification::SkillCategory,
+        id: &str,
+        target: &str,
+    ) -> std::path::PathBuf {
+        let target = if target.trim().is_empty() { "skill.py" } else { target };
+        self.data_dir
+            .join(Self::skill_category_dir(category))
+            .join(id)
+            .join(target)
     }
 
     /// 旧 `VerificationAsset`（单文件 `*.yaml`）→ 新 `SkillAsset` 兼容转换。
@@ -1443,6 +1634,8 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             CheckKind::CommandSucceeds => "bash".to_string(),
             CheckKind::TraceConsistency => "webfetch".to_string(),
             CheckKind::LlmJudgement => "recursive-decompose".to_string(),
+            // V52：Python 判据仅运行时产生，不进 VerificationAsset.checks（Legacy 迁移不会遇到）。
+            CheckKind::Python => "".to_string(),
         }
     }
 
@@ -1655,11 +1848,68 @@ pub async fn load_all_prompts(&self) -> Result<Vec<PromptAsset>, TaijiError> {
             context: format!("failed to rename skill tmp {:?}: {e}", path),
         })?;
 
-        // 版本控制（BCP §10.0）：每次写入 = 一次 commit。
+        // 版本控制（Blueprint §6.0）：每次写入 = 一次 commit。
         self.git
             .commit(&format!("save skill {}", skill.id))
             .await?;
 
+        Ok(())
+    }
+
+    /// V52：落盘资产层 Python skill 脚本（旁车文件 `{cat}/{id}/{target}`）。
+    /// atomic write（tmp + rename）+ git commit（与 save_skill 分开 commit——MVP 边界）。
+    pub async fn save_skill_script(
+        &self,
+        skill: &crate::types::verification::SkillAsset,
+        script: &str,
+    ) -> Result<(), TaijiError> {
+        use crate::types::verification::SkillKind;
+        let category = skill.effective_category().ok_or_else(|| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("skill {} 缺少可推导 category", skill.id),
+            }
+        })?;
+        let impl_ = skill
+            .implementations
+            .iter()
+            .find(|i| i.kind == SkillKind::Python)
+            .ok_or_else(|| TaijiError::KnowledgeStoreUnavailable {
+                context: format!("skill {} 无 python implementation", skill.id),
+            })?;
+        let script_path = self.skill_script_path(category, &skill.id, &impl_.target);
+        if let Some(parent) = script_path.parent() {
+            fs::create_dir_all(parent).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to create skill script dir {:?}: {e}", parent),
+                }
+            })?;
+        }
+        let tmp = script_path.with_extension("py.tmp");
+        {
+            let mut f = fs::File::create(&tmp).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to create script tmp {:?}: {e}", tmp),
+                }
+            })?;
+            f.write_all(script.as_bytes()).await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to write script tmp {:?}: {e}", tmp),
+                }
+            })?;
+            f.flush().await.map_err(|e| {
+                TaijiError::KnowledgeStoreUnavailable {
+                    context: format!("failed to flush script tmp {:?}: {e}", tmp),
+                }
+            })?;
+        }
+        fs::rename(&tmp, &script_path).await.map_err(|e| {
+            TaijiError::KnowledgeStoreUnavailable {
+                context: format!("failed to rename script tmp {:?}: {e}", script_path),
+            }
+        })?;
+        self.git
+            .commit(&format!("save skill script {}", skill.id))
+            .await?;
         Ok(())
     }
 }
@@ -1739,7 +1989,7 @@ impl CognitiveAsset {
     }
 }
 
-/// V44：把既有 `{model_key}/` 分区资产合并回根级（BCP §10.1 去分区化）——幂等。
+/// V44：把既有 `{model_key}/` 分区资产合并回根级（Blueprint §6.1 去分区化）——幂等。
 ///
 /// 迁移对象：knowledge 根下所有子目录（每个子目录视为一个旧分区），
 /// 将其中资产层（yang/ yin/ models/ 等）合并回根。
@@ -1872,7 +2122,7 @@ pub struct SeedReport {
     pub pruned_skipped: usize,
 }
 
-/// V42 归藏目录 yang/yin 迁移（BCP §10.1）——幂等，可重跑。
+/// V42 归藏目录 yang/yin 迁移（Blueprint §6.1）——幂等，可重跑。
 /// V44：改为根级处理（不再遍历模型分区——分区已合并回根）。
 /// - `prompts/*.yaml` → 按 agent_target 分派：
 ///   `"YinAgent"` → `yin/prompts/`，其余 → `yang/prompts/`
@@ -1924,7 +2174,7 @@ pub async fn migrate_to_yang_yin(root: &Path) -> Result<(), TaijiError> {
         }
     }
 
-    // V43: 迁移 verifications/ + yin/verifications/ → yin/skills/verify/（BCP §10.1）
+    // V43: 迁移 verifications/ + yin/verifications/ → yin/skills/verify/（Blueprint §6.1）
     // verifications 概念已废弃——统一收敛到 yin/skills/verify/。
     let yin_verify_dir = root.join("yin/skills/verify");
     fs::create_dir_all(&yin_verify_dir).await.map_err(TaijiError::IO)?;
@@ -1974,7 +2224,7 @@ fn validate_partition_key(key: &str) -> Result<(), TaijiError> {
     Ok(())
 }
 
-/// V44 种子复制（BCP §10.1 去分区化）——从指定旧分区目录把活跃种子资产
+/// V44 种子复制（Blueprint §6.1 去分区化）——从指定旧分区目录把活跃种子资产
 /// （`prompts/` + `verifications/`，status != "pruned"）文件级复制回根级。
 ///
 /// - 目标根级资产层自动创建。
@@ -2142,7 +2392,7 @@ mod tests {
     async fn test_new_creates_dirs() {
         let dir = test_dir("new_creates_dirs").await;
         let root = GuizangClient::new(&dir).await.unwrap();
-        // V44：根级资产树（单一资产树，BCP §10.1）
+        // V44：根级资产树（单一资产树，Blueprint §6.1）
         assert!(dir.exists());
         assert!(dir.join("models").exists());
         assert!(dir.join("yang/prompts").exists());
@@ -2159,7 +2409,7 @@ mod tests {
         cleanup(&dir).await;
     }
 
-    // ── V44 去分区化（BCP §10.1）──────────────────────────────────
+    // ── V44 去分区化（Blueprint §6.1）──────────────────────────────────
 
     #[tokio::test]
     async fn test_single_asset_tree_root_writes() {
@@ -2530,6 +2780,62 @@ mod tests {
         cleanup(&dir).await;
     }
 
+    /// V59 实时录入：record_prompt_signal 更新 prompt stats 四维。
+    #[tokio::test]
+    async fn test_record_prompt_signal_updates_stats() {
+        let dir = test_dir("record_prompt").await;
+        let client = GuizangClient::new(&dir).await.unwrap();
+        let mut p = crate::types::agent::PromptAsset::new(
+            "orch-yang",
+            "编排",
+            "d",
+            "c",
+            "YangAgent",
+            vec![],
+        );
+        client.save_prompt(&mut p).await.unwrap();
+
+        let assets = vec![crate::types::agent::AssetRef::new("prompt", "orch-yang")];
+        let checks = vec![crate::types::verification::CheckResult {
+            check_id: "file-exists#0".into(),
+            kind: crate::types::verification::CheckKind::FileExists,
+            passed: true,
+            detail: "ok".into(),
+            duration_ms: 0,
+            cost_tokens: 100,
+            verify_rounds: 2,
+            quality: 0.9,
+        }];
+        let updated = client
+            .record_prompt_signal(&assets, true, &checks, false, 10.0)
+            .await
+            .unwrap();
+        assert_eq!(updated, 1);
+        let loaded = client.load_prompt("orch-yang").await.unwrap().unwrap();
+        assert_eq!(loaded.stats.n, 1);
+        assert_eq!(loaded.stats.pass_count, 1);
+        assert_eq!(loaded.stats.cost_sum, 100);
+        assert_eq!(loaded.stats.rounds_sum, 2);
+        cleanup(&dir).await;
+    }
+
+    /// V59 实时录入：update_posterior 贝叶斯后验（先验初始化 + α/β 累加）。
+    #[tokio::test]
+    async fn test_update_posterior_persists() {
+        let dir = test_dir("update_posterior").await;
+        let client = GuizangClient::new(&dir).await.unwrap();
+        // 先验 α=1+10*0.8=9, β=1+10*0.2=3；更新 α+=5, β+=1 → α=14, β=4。
+        let mean = client
+            .update_posterior("m-a", 5, 1, 0.8, 10.0)
+            .await
+            .unwrap();
+        assert!((mean - 14.0 / 18.0).abs() < 1e-9);
+        let model = client.load_model("m-a").await.unwrap().unwrap();
+        assert!((model.alpha - 14.0).abs() < 1e-9);
+        assert!((model.beta - 4.0).abs() < 1e-9);
+        cleanup(&dir).await;
+    }
+
     #[tokio::test]
     async fn test_search_prompts() {
         let dir = test_dir("search_prompts").await;
@@ -2621,7 +2927,7 @@ content: 手写内容
         cleanup(&dir).await;
     }
 
-    /// V50 §6.6：ontology 三层资产 round-trip + asset_type_map（种子词表 → 类型映射）。
+    /// V50 §5.7：ontology 三层资产 round-trip + asset_type_map（种子词表 → 类型映射）。
     #[tokio::test]
     async fn test_ontology_assets_roundtrip_and_type_map() {
         use crate::types::ontology::{OntologyEdgeKind, RuleCondition, TypeSource};
@@ -2705,7 +3011,7 @@ content: 手写内容
 mod model_asset_tests {
     use super::*;
 
-    /// V33/MVP-3.5：先验映射（§6.4.1）——confidence → α/β，边界 clamp。
+    /// V33/MVP-3.5：先验映射（§5.3）——confidence → α/β，边界 clamp。
     #[test]
     fn model_asset_from_prior_maps_confidence() {
         // confidence 0.8, k=10 → α=9, β=3 → μ=0.75
@@ -2750,14 +3056,14 @@ mod model_asset_tests {
 
 }
 
-// ── UCB 检索排序（V35/MVP-5：检索数学化，BCP §6.3 实现层定稿）────
+// ── UCB 检索排序（V35/MVP-5：检索数学化，Blueprint §5.2 实现层定稿）────
 
 /// UCB 检索排序（纯函数，确定性）——prompts 检索从「手填 confidence 降序」
 /// 升级为「贝叶斯后验均值 + UCB 探索项」（§6.3 实现层定稿）：
 ///
 /// ```text
 /// score(id) = μ(id) + C · √( ln N_total / (n_id + 1) )
-/// μ(id) = ModelAsset 后验均值（存在）；否则 §6.4.1 先验映射
+/// μ(id) = ModelAsset 后验均值（存在）；否则 §5.3 先验映射
 ///         α = 1 + k·confidence, β = 1 + k·(1−confidence) → μ = α/(α+β)
 /// n_id  = stats.n（任务级采样，MVP-6 起回传写入）
 /// ```
@@ -2905,7 +3211,7 @@ mod ucb_rank_tests {
             category: None,
             dual: "write".into(),
             implementations: vec![SkillImpl {
-                kind: SkillKind::FileExists,
+                kind: SkillKind::Builtin,
                 target: "deliverables/*".into(),
                 params: serde_json::json!({}),
                 severity: Some(CheckSeverity::Hard),
@@ -2955,10 +3261,10 @@ mod ucb_rank_tests {
             examples: vec![],
             input_modes: vec!["text".into()],
             output_modes: vec!["text".into()],
-            category: None,
+            category: Some(crate::types::verification::SkillCategory::Verify),
             dual: "nonexistent-dual".into(),
             implementations: vec![SkillImpl {
-                kind: SkillKind::FileExists,
+                kind: SkillKind::Builtin,
                 target: "deliverables/*".into(),
                 params: serde_json::json!({}),
                 severity: Some(CheckSeverity::Hard),
@@ -2978,6 +3284,62 @@ mod ucb_rank_tests {
         assert!(err.is_err(), "dual 不存在应拒绝保存");
         let msg = err.unwrap_err().to_string();
         assert!(msg.contains("nonexistent-dual"), "err 应含 dual id: {}", msg);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// V52：Python skill 脚本旁车文件落盘 + 路径解析（skill_script_path 闭环）。
+    #[tokio::test]
+    async fn test_save_skill_script_writes_sidecar() {
+        use crate::types::verification::{
+            SkillAsset, SkillCategory, SkillImpl, SkillKind,
+        };
+        let dir = std::env::temp_dir().join(format!(
+            "taiji_save_script_{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        let guizang = GuizangClient::new(&dir).await.unwrap();
+
+        let mut skill = SkillAsset {
+            id: "py-deploy".into(),
+            name: "部署器".into(),
+            summary: "部署产物".into(),
+            description: "test".into(),
+            detail: None,
+            tags: vec![],
+            examples: vec![],
+            input_modes: vec!["text".into()],
+            output_modes: vec!["text".into()],
+            category: Some(SkillCategory::Exec),
+            dual: "file-exists".into(),
+            implementations: vec![SkillImpl {
+                kind: SkillKind::Python,
+                target: "skill.py".into(),
+                params: serde_json::json!({}),
+                severity: None,
+                pass_condition: String::new(),
+            }],
+            agent_target: "YangAgent".into(),
+            confidence: 0.8,
+            version: 0,
+            status: "active".into(),
+            stats: crate::types::verification::CheckStats::default(),
+            env_tags: vec![],
+            parent_id: None,
+            variant_of: None,
+            safe_for_exploration: false,
+        };
+        guizang.save_skill(&mut skill).await.expect("valid dual saves");
+        let script = "import sys, json\ndef execute(p):\n    return {'passed': True}\n";
+        guizang
+            .save_skill_script(&skill, script)
+            .await
+            .expect("script saves");
+
+        let expected = guizang.skill_script_path(SkillCategory::Exec, "py-deploy", "skill.py");
+        assert!(expected.ends_with("yang/skills/exec/py-deploy/skill.py"), "{:?}", expected);
+        let content = std::fs::read_to_string(&expected).unwrap();
+        assert_eq!(content, script);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

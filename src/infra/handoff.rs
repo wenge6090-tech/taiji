@@ -1,17 +1,17 @@
-//! 交接文件（deliverables/handoff.md）读写 — V28 产出即交接（BCP §1.4 / §8.18）。
+//! 交接文件（deliverables/handoff.md）读写 — V28 产出即交接（Blueprint §1.4 / §1.5）。
 //!
 //! 交接物是产出物之一，不设独立交接文件：置于 `deliverables/` 内保证可发现性——
 //! 父层（parent_deliverables 注入）、同任务其他 agent（verify/converge 逐文件
 //! 核验）、元校准（BACK_TO_META 读产出）、恢复链全部经既有路径发现。
 //!
 //! 本模块是交接文件读写的唯一实现；`failure_reason` 路由信号由 Yang 错误路径
-//! 运行时捕获（BCP §8.18：路由不依赖解析交接文件），front matter 仅作审计与
+//! 运行时捕获（Blueprint §1.5：路由不依赖解析交接文件），front matter 仅作审计与
 //! LLM 消费。
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// 交接文件 front matter 结构化字段（BCP §8.18）。
+/// 交接文件 front matter 结构化字段（Blueprint §1.5）。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HandoffInfo {
     /// 产出相位（当前恒为 yang）。
@@ -29,7 +29,7 @@ pub fn handoff_path(task_dir: &Path) -> std::path::PathBuf {
     task_dir.join("deliverables").join("handoff.md")
 }
 
-/// 写交接文件 — V28 确定性收尾为基线，V29+ LLM 压缩收尾（BCP §8.18）为增强。
+/// 写交接文件 — V28 确定性收尾为基线，V29+ LLM 压缩收尾（Blueprint §1.5）为增强。
 ///
 /// 输出 YAML-ish front matter + 正文。`body`：
 /// - `Some(text)` — LLM 压缩收尾产出的结构化正文（## 进度 / ## 剩余工作 / …）
@@ -56,7 +56,7 @@ pub fn write_handoff(
     }
     content.push_str("---\n");
     match body {
-        // LLM 压缩收尾正文（BCP §8.18）：只含环境事实，不含对话过程。
+        // LLM 压缩收尾正文（Blueprint §1.5）：只含环境事实，不含对话过程。
         Some(b) if !b.trim().is_empty() => {
             content.push_str(b.trim());
             content.push('\n');
@@ -94,7 +94,7 @@ pub fn list_deliverables(task_dir: &Path) -> Vec<String> {
 
 /// 构造「基于前一瞬态产出」的任务描述（V28 产出继承）。
 ///
-/// 用于：BACK_TO_ZHOUYI 时取代「原 description + chat_history 重放」（BCP §8.18）；
+/// 用于：BACK_TO_ZHOUYI 时取代「原 description + chat_history 重放」（Blueprint §1.5）；
 /// 也供 BACK_TO_META 注入 MetaAgent 作产出校准。列出 deliverables/ 全部产出物
 /// 与 handoff.md 内容，让 LLM 基于产出继续 / 拆解。
 pub fn build_handoff_description(task_dir: &Path) -> String {
@@ -116,7 +116,7 @@ pub fn build_handoff_description(task_dir: &Path) -> String {
 }
 
 // ================================================================
-// V29+ LLM 压缩收尾（BCP §8.18「交接 = 压缩产物」）
+// V29+ LLM 压缩收尾（Blueprint §1.5「交接 = 压缩产物」）
 // ================================================================
 //
 // 压缩输入构建均为纯函数（本层无 provider 依赖）；LLM 调用由调用方（agents 层）

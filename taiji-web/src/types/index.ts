@@ -61,6 +61,104 @@ export interface TaskTreeSnapshot {
   lianshanActivity: LianshanActivity | null;
 }
 
+/** 根任务列表条目(后端 TaskListItem,ListTasks 响应)。 */
+export interface TaskListItem {
+  id: string;
+  description: string;
+}
+
+/** 归藏图节点(后端 GuizangGraphNode)。 */
+export interface GuizangGraphNode {
+  id: string;
+  label: string;
+  assetType: "prompt" | "skill" | "model";
+  category: string | null;
+  agentTarget: string;
+  confidence: number;
+  status: string;
+  layer: number;
+  statsN: number;
+}
+
+/** 归藏图边(后端 GuizangGraphEdge)。 */
+export interface GuizangGraphEdge {
+  source: string;
+  target: string;
+  kind: "dual" | "model" | "fork";
+}
+
+/** 归藏知识图(后端 GuizangGraph,GetGuizangGraph 响应)。 */
+export interface GuizangGraph {
+  nodes: GuizangGraphNode[];
+  edges: GuizangGraphEdge[];
+}
+
+// ---------------------------------------------------------------------------
+// 语义层（本体 Ontology）——直接透传磁盘 ontology 数据，字段为 snake_case。
+// ---------------------------------------------------------------------------
+
+/** 语义类型(后端 SemanticType,types.yaml 词汇表)。 */
+export interface SemanticType {
+  id: string;
+  name: string;
+  description: string;
+  parent: string | null;
+  source: "human" | "mined" | "compiled";
+}
+
+/** 本体边(后端 OntologyEdge,relations.yaml)。 */
+export interface OntologyEdge {
+  from: string;
+  to: string;
+  kind: "weak_dependency" | "sequence";
+  strength: number;
+  samples: number;
+  evidence: string[];
+}
+
+/** 规则条件(后端 RuleCondition)。 */
+export interface RuleCondition {
+  domain: string | null;
+  env: string | null;
+  action: string | null;
+}
+
+/** 本体规则(后端 OntologyRule,rules.yaml)。 */
+export interface OntologyRule {
+  id: string;
+  when: RuleCondition;
+  require: string[];
+  forbid: string[];
+  severity: "hard" | "soft";
+}
+
+/** 共现对(后端 CooccurPair,cooccur.yaml)。 */
+export interface CooccurPair {
+  a: string;
+  b: string;
+  co: number;
+  pass: number;
+}
+
+/** 失败分组(后端 FailureGroup,failures.yaml)。 */
+export interface FailureGroup {
+  env_tags: string[];
+  check_kind: string;
+  fails: number;
+  total: number;
+}
+
+/** 语义层完整视图(后端 OntologyView,GetOntologyView 响应)。 */
+export interface OntologyView {
+  types: SemanticType[];
+  edges: OntologyEdge[];
+  rules: OntologyRule[];
+  cooccur: CooccurPair[];
+  failures: FailureGroup[];
+  /** 资产 id → 语义类型 id。 */
+  asset_type_map: Record<string, string>;
+}
+
 /** 追踪记录预览(后端 TraceRecordPreview)。 */
 export interface TraceRecordPreview {
   ts: string;

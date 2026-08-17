@@ -4,7 +4,7 @@
 //! # Why this exists
 //! Rig 0.39's [`AgentBuilder::hook`] is a **single slot**: each call replaces
 //! the previously registered hook. The YinAgent mounts `SafetyHook` (带工具
-//! 必有安全钩子) and, since V49, a `ContextLimiter` (阴预算对称，BCP §8.19) —
+//! 必有安全钩子) and, since V49, a `ContextLimiter` (阴预算对称，AGENTS.md §14) —
 //! two hooks, one slot, so they must be composed in ONE `.hook()` call.
 //!
 //! This set forwards every [`PromptHook`] method to the two inner hooks in
@@ -32,7 +32,7 @@ use super::safety::SafetyHook;
 #[derive(Clone)]
 pub struct YinHookSet<M> {
     safety: SafetyHook,
-    /// V49 阴预算（BCP §8.19）：最后执行——Terminate 前 safety 已完成校验。
+    /// V49 阴预算（AGENTS.md §14）：最后执行——Terminate 前 safety 已完成校验。
     limiter: ContextLimiter,
     _marker: PhantomData<fn(M) -> M>,
 }

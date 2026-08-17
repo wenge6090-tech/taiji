@@ -20,6 +20,8 @@ export function useTaskTree() {
   const setRoot = useCallback((id: string) => {
     currentRootRef.current = id;
     setCurrentRoot(id);
+    // 切根时清空旧快照,避免新树短暂沿用旧树的适配视口
+    setSnapshot(null);
   }, []);
 
   const refresh = useCallback(async (id: string) => {

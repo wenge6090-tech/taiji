@@ -49,6 +49,30 @@ enum Command {
     Status,
     /// Migrate legacy persisted values in task dirs (V45 曾用名→新值，一次性)
     Migrate,
+    /// Invoke a Rust seed-layer builtin as a syscall primitive (userland → kernel).
+    /// Used by Python asset-layer skills via subprocess.
+    Builtin {
+        /// builtin name: read | write | bash | search | webfetch
+        name: String,
+        /// JSON args (e.g. '{"command":"echo hi"}')
+        #[arg(long)]
+        args: Option<String>,
+        /// task dir for cwd-scoped operations (default: current dir)
+        #[arg(long)]
+        task_dir: Option<String>,
+    },
+    /// Invoke an asset-layer Python skill as userland (V53: skill 嵌套 skill)。
+    /// 循环/深度护栏经 TAIJI_SKILL_CHAIN 环境变量传递调用链。
+    Skill {
+        /// skill id (asset-layer Python skill)
+        id: String,
+        /// JSON args
+        #[arg(long)]
+        args: Option<String>,
+        /// task dir for cwd-scoped operations (default: current dir)
+        #[arg(long)]
+        task_dir: Option<String>,
+    },
     /// Start MCP server for tool integration
     Mcp,
     /// Serve the taiji-web frontend (pure-Web mode): HTTP static hosting +
@@ -87,6 +111,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         Command::List => cmd_list()?,
         Command::Status => cmd_status()?,
         Command::Migrate => cmd_migrate().await?,
+        Command::Builtin {
+            name,
+            args,
+            task_dir,
+        } => cmd_builtin(&name, args, task_dir).await?,
+        Command::Skill {
+            id,
+            args,
+            task_dir,
+        } => cmd_skill(&id, args, task_dir).await?,
         Command::Mcp => cmd_mcp().await?,
         Command::Serve { port, no_open } => cmd_serve(port, no_open).await?,
     }
@@ -110,7 +144,7 @@ async fn cmd_run(
     // Provider registry (LLM clients).
     let factory = build_engine(&config).await?;
 
-    // ── V33/MVP-2: --with-lianshan 激活 Lianshan Consumer（被动学习 — BCP §6.4/§8.23）──
+    // ── V33/MVP-2: --with-lianshan 激活 Lianshan Consumer（被动学习 — Blueprint §5.3/AGENTS.md）──
     // Zhouyi PASS 入队 pending/（zhouyi.rs enqueue_lianshan_pending）→ 本进程内
     // 消费者单写归藏统计。MVP 时序：任务结束后等待 3s（消费者 1s 首扫 + 处理）
     // 再退出；正式生命周期（serve 常驻/主动学习）归 MVP-3。
@@ -141,7 +175,6 @@ async fn cmd_run(
             config.clone(),
             &data_root,
             cancel.clone(),
-            factory.guizang.clone(),
         );
         // V50 编译执行器（默认关闭；开启时消费 compile/ 队列，§6.0）
         let compile_handle = taiji::orchestration::compile::spawn_compiler(
@@ -200,6 +233,27 @@ async fn cmd_run(
             }
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
         }
+
+        // ── 等待 compile 队列清空（S4 编译执行器）──
+        // 修复：pending 清空后立即 cancel 会抢在 compile runner 的空闲窗口前
+        // 杀掉它，导致 compile/ 队列永远不被消费（S4 断链）。编译任务 = 完整
+        // 周易执行（较慢），故给 300s 上限、1s 间隔轮询 compile 目录清空。
+        tracing::info!("--with-lianshan: waiting for compile queue to drain");
+        let compile_dir = data_root.join("compile");
+        for _ in 0..300 {
+            let mut remaining = 0usize;
+            if let Ok(mut rd) = tokio::fs::read_dir(&compile_dir).await {
+                while let Ok(Some(entry)) = rd.next_entry().await {
+                    if entry.file_type().await.map(|t| t.is_file()).unwrap_or(false) {
+                        remaining += 1;
+                    }
+                }
+            }
+            if remaining == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        }
         cancel.cancel();
         let _ = handle.await;
         let _ = al_handle.await;
@@ -233,7 +287,7 @@ async fn cmd_init() -> Result<(), Box<dyn std::error::Error>> {
             {
                 println!("⚠ legacy partition merge to knowledge root failed: {e}");
             }
-            // V42：yang/yin 对偶目录迁移（幂等，BCP §10.1）
+            // V42：yang/yin 对偶目录迁移（幂等，Blueprint §6.1）
             if let Err(e) = taiji::infra::knowledge::migrate_to_yang_yin(&knowledge_dir).await {
                 println!("⚠ yang/yin directory migration failed: {e}");
             }
@@ -270,7 +324,7 @@ async fn cmd_seed(
         report.skipped,
         report.pruned_skipped
     );
-    println!("  models/ 统计与贝叶斯后验未复制——学习单元从零积累（BCP §10.1）");
+    println!("  models/ 统计与贝叶斯后验未复制——学习单元从零积累（Blueprint §6.1）");
     Ok(())
 }
 
@@ -368,6 +422,131 @@ fn cmd_list() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    Ok(())
+}
+
+/// `taiji builtin <name>` — Rust 种子层 syscall 原语（V52）。
+///
+/// 资产层 Python skill 经 `subprocess.run(["taiji","builtin",<name>,"--args",<json>])`
+/// 调用 Rust builtin（用户态调 syscall）。输出 JSON 到 stdout。
+async fn cmd_builtin(
+    name: &str,
+    args: Option<String>,
+    task_dir: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let runner = taiji::agents::tools::skills::lookup_builtin(name).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("unknown builtin '{name}' (known: read/write/bash/search/webfetch)"),
+        )
+    })?;
+    let args_val: serde_json::Value = match args {
+        Some(s) => serde_json::from_str(&s).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("--args 不是合法 JSON: {e}"),
+            )
+        })?,
+        None => serde_json::json!({}),
+    };
+    let dir = std::path::PathBuf::from(task_dir.unwrap_or_else(|| ".".to_string()));
+    let result = runner.call(&dir, &args_val).await?;
+    println!("{}", serde_json::to_string(&result)?);
+    Ok(())
+}
+
+/// `taiji skill <id>` — 资产层 Python skill 执行体（V53 skill 嵌套 skill，用户态调用户态）。
+///
+/// 与 `taiji builtin` 正交：builtin = 用户态调 syscall（Rust 种子层）；
+/// skill = 用户态调库函数（资产层 Python skill）。循环/深度护栏经
+/// `TAIJI_SKILL_CHAIN` 环境变量（JSON 数组）传递调用链：
+/// ① 循环检测——id 已在链中 → 拒绝；② 深度限制——链长 ≥ max_depth → 拒绝。
+async fn cmd_skill(
+    id: &str,
+    args: Option<String>,
+    task_dir: Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // ── 1. 读调用链（TAIJI_SKILL_CHAIN；不存在 = 顶层调用）──
+    let mut chain: Vec<String> = match std::env::var("TAIJI_SKILL_CHAIN") {
+        Ok(s) => serde_json::from_str(&s).unwrap_or_default(),
+        Err(_) => Vec::new(),
+    };
+
+    // ── 2. 循环/深度护栏（§V53 定论）──
+    if chain.iter().any(|c| c == id) {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("skill '{id}' cycle detected: {} → {id}", chain.join(" → ")),
+        )));
+    }
+    let config = load_config()?;
+    let max_depth = config.runtime.max_depth as usize;
+    if chain.len() >= max_depth {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "skill '{id}' nesting depth {} exceeds max_depth {max_depth}",
+                chain.len()
+            ),
+        )));
+    }
+
+    // ── 3. 解析 args + task_dir ──
+    let args_val: serde_json::Value = match args {
+        Some(s) => serde_json::from_str(&s).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("--args 不是合法 JSON: {e}"),
+            )
+        })?,
+        None => serde_json::json!({}),
+    };
+    let dir = std::path::PathBuf::from(task_dir.unwrap_or_else(|| ".".to_string()));
+
+    // ── 4. 四类扫描找 id 的 Python 执行体 ──
+    use taiji::types::verification::{SkillCategory, SkillKind};
+    let knowledge_dir = std::path::PathBuf::from(&config.knowledge.data_dir);
+    let guizang = taiji::infra::knowledge::GuizangClient::new(&knowledge_dir).await?;
+    let mut script_path: Option<std::path::PathBuf> = None;
+    for category in [
+        SkillCategory::Exec,
+        SkillCategory::Orch,
+        SkillCategory::Verify,
+        SkillCategory::Converge,
+    ] {
+        let catalog = taiji::infra::skill_catalog::load_skill_catalog(
+            &guizang,
+            category,
+            taiji::infra::skill_catalog::ToolProfile::Full,
+        )
+        .await?;
+        if let Some(skill) = catalog.iter().find(|s| s.id == id) {
+            if let Some(impl_) = skill
+                .implementations
+                .iter()
+                .find(|i| i.kind == SkillKind::Python)
+            {
+                let p = guizang.skill_script_path(category, &skill.id, &impl_.target);
+                if p.exists() {
+                    script_path = Some(p);
+                    break;
+                }
+            }
+        }
+    }
+    let Some(script_path) = script_path else {
+        return Err(Box::new(std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            format!("unknown skill '{id}' (asset-layer Python skill not found)"),
+        )));
+    };
+
+    // ── 5. 追加 id → 执行（chain 注入子进程环境）──
+    chain.push(id.to_string());
+    let result =
+        taiji::orchestration::python_engine::run_python_skill(&script_path, &args_val, &dir, &chain)
+            .await?;
+    println!("{}", serde_json::to_string(&result)?);
     Ok(())
 }
 

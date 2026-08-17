@@ -13,7 +13,7 @@ output_modes:
 category: verify
 dual: write
 implementations:
-- kind: file_exists
+- kind: builtin
   target: deliverables/*
   params: {}
   severity: hard

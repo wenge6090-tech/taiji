@@ -1,4 +1,4 @@
-//! 本体类型（BCP §6.6 本体挖掘）——连山纯符号挖掘的产物类型。
+//! 本体类型（Blueprint §5.7 本体挖掘）——连山纯符号挖掘的产物类型。
 //!
 //! Ontology = 词汇表（[`SemanticType`]）+ 拓扑（[`OntologyEdge`] type→type）+
 //! 逻辑（[`OntologyRule`] type-level）。纯数据类型，零业务依赖。
@@ -13,7 +13,7 @@ pub struct SemanticTypeFile {
     pub types: Vec<SemanticType>,
 }
 
-/// 语义类型（词汇表层，§6.6）。
+/// 语义类型（词汇表层，§5.7）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct SemanticType {
     /// 唯一标识（如 `security-check`、`deploy-action`）。
@@ -64,7 +64,7 @@ pub struct TaskOntologyView {
     pub is_critical: bool,
 }
 
-/// 本体边类别（Forbid 留给 SafetyHook + 人工 rules.yaml，不挖掘——§6.6）。
+/// 本体边类别（Forbid 留给 SafetyHook + 人工 rules.yaml，不挖掘——§5.7）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OntologyEdgeKind {
@@ -83,6 +83,8 @@ pub struct OntologyEdge {
     pub to: String,
     pub kind: OntologyEdgeKind,
     /// 强度 = 联合通过率 pass/co（MVP 非 lift，AGENTS.md §19 遗留③）。
+    /// 晶体归藏（V58 定论）：这是「观测频率」非「存在概率」——边是否存在由
+    /// 挖掘判定二值决定（strength ≥ 阈值 && samples ≥ min_samples → 存在）。
     pub strength: f64,
     /// 共现样本数（≥ min_samples 才产出）。
     pub samples: u64,
@@ -102,7 +104,7 @@ pub struct RuleCondition {
     pub action: Option<String>,
 }
 
-/// 本体规则（type-level 逻辑约束，§6.6 逻辑层）。
+/// 本体规则（type-level 逻辑约束，§5.7 逻辑层）。
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct OntologyRule {
     pub id: String,

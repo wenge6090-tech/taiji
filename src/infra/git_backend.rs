@@ -1,13 +1,13 @@
 //! GitBackend — 归藏 git 版本控制（快照式，接口语义对齐 git）。
 //!
-//! 归藏 = git 版本控制的库（BCP §10.0）。本模块提供 `commit` / `log` /
+//! 归藏 = git 版本控制的库（Blueprint §6.0）。本模块提供 `commit` / `log` /
 //! `rollback` / `diff` 四个原语：每次归藏写入 = 一次 commit（全量快照到
 //! `{data_dir}/.history/{commit_id}/tree/`），rollback = 从快照恢复，
 //! diff = 对比两快照。
 //!
 //! 自实现（非 libgit2）：核心需求是可回滚 + 可审计 + 可 diff，不需要真 git
 //! 的分支合并——fork/merge 的业务语义由资产的 `parent_id` / `variant_of`
-//! 字段承载（BCP §10.1）。接口语义对齐 git，未来可无痛替换为 libgit2 后端。
+//! 字段承载（Blueprint §6.1）。接口语义对齐 git，未来可无痛替换为 libgit2 后端。
 
 use crate::infra::error::TaijiError;
 use std::collections::HashSet;
@@ -153,6 +153,9 @@ async fn clear_tree(dir: &Path, exclude: Option<&Path>) -> Result<(), TaijiError
 pub struct GitBackend {
     /// `{data_dir}/.history`
     history_dir: PathBuf,
+    /// C 方案（V59）：commit 互斥锁——序列化 commit 本身（防快照撕裂），
+    /// 字段级写不互斥（阴浅层写 stats/αβ，连山深层写 status/variant 互不阻塞）。
+    commit_lock: tokio::sync::Mutex<()>,
 }
 
 impl GitBackend {
@@ -165,7 +168,10 @@ impl GitBackend {
                 history_dir
             ))
         })?;
-        Ok(Self { history_dir })
+        Ok(Self {
+            history_dir,
+            commit_lock: tokio::sync::Mutex::new(()),
+        })
     }
 
     /// The knowledge root directory (parent of `.history`).
@@ -183,6 +189,9 @@ impl GitBackend {
     ///
     /// Commit id = `{ts_millis:x}-{hash:x}`（单调 + 唯一）。返回 commit id。
     pub async fn commit(&self, msg: &str) -> Result<String, TaijiError> {
+        // C 方案（V59）：commit 互斥——序列化快照（防两写者并发 copy_tree 撕裂），
+        // 字段写不互斥（浅层 stats / 深层 status 各自 tmp+rename 并发安全）。
+        let _guard = self.commit_lock.lock().await;
         // 批6 P2 修复：id 用纳秒时间戳（唯一）；meta.ts 保持毫秒（log 排序兼容）。
         let ts = now_millis();
         let id = format!("{:x}-{:x}", now_nanos(), short_hash(msg));
@@ -242,6 +251,9 @@ impl GitBackend {
     /// snapshot back. The rollback itself is not auto-committed — the caller
     /// decides whether to commit a `rollback: revert <id>` entry.
     pub async fn rollback(&self, commit_id: &str) -> Result<(), TaijiError> {
+        // C 方案（V59）：与 commit 同一把锁——rollback 的 clear_tree+copy_tree
+        // 与 commit 的 copy_tree 并发会撕裂 data_dir，必须串行（人工操作，锁竞争可忽略）。
+        let _guard = self.commit_lock.lock().await;
         let tree = self.commit_dir(commit_id).join("tree");
         if !tree.exists() {
             return Err(err(format!(

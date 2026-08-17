@@ -7,6 +7,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::types::ontology::{CooccurPair, FailureGroup, OntologyEdge, OntologyRule, SemanticType};
+
 // ---------------------------------------------------------------------------
 // Node status & Zhouyi phase
 // ---------------------------------------------------------------------------
@@ -100,6 +102,81 @@ pub struct TaskTreeSnapshot {
     pub nodes: Vec<SpindleNode>,
     pub edges: Vec<SpindleEdge>,
     pub lianshan_activity: Option<LianshanActivity>,
+}
+
+/// One root task entry in the multi-task dropdown (`ListTasks` response).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TaskListItem {
+    pub id: String,
+    pub description: String,
+}
+
+// ---------------------------------------------------------------------------
+// 归藏 knowledge graph (星云图)
+// ---------------------------------------------------------------------------
+
+/// One node in the 归藏 knowledge graph (prompt / skill / model).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuizangGraphNode {
+    /// Unique node id within the graph: `{type}:{asset_id}`.
+    pub id: String,
+    /// Human-readable name (falls back to asset id).
+    pub label: String,
+    /// `prompt` | `skill` | `model`.
+    pub asset_type: String,
+    /// Skill category (`orch`/`exec`/`verify`/`converge`); None for non-skills.
+    pub category: Option<String>,
+    /// `YangAgent` | `YinAgent` | empty.
+    pub agent_target: String,
+    pub confidence: f64,
+    /// `active` | `pruned`.
+    pub status: String,
+    /// Cognitive layer (1 = skill/prompt, 2 = model).
+    pub layer: u32,
+    /// Sampling count (CheckStats.n for skills/prompts; α+β−2 for models).
+    pub stats_n: u64,
+}
+
+/// One edge in the 归藏 knowledge graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuizangGraphEdge {
+    pub source: String,
+    pub target: String,
+    /// `dual` (skill↔对偶) | `model` (贝叶斯后验↔资产) | `fork` (演化变体)。
+    pub kind: String,
+}
+
+/// Full 归藏 knowledge graph rendered by the frontend nebula view.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GuizangGraph {
+    pub nodes: Vec<GuizangGraphNode>,
+    pub edges: Vec<GuizangGraphEdge>,
+}
+
+// ---------------------------------------------------------------------------
+// 语义层（本体 Ontology）视图 — 元的先验智能的可见/可干预入口
+// ---------------------------------------------------------------------------
+
+/// 语义层完整状态（直接透传磁盘 `ontology/*.yaml`，字段为 snake_case——
+/// 与磁盘 YAML 契约一致，不另造 camelCase 视图层）。
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct OntologyView {
+    /// 词汇表（types.yaml）：受控语义类型。
+    pub types: Vec<SemanticType>,
+    /// 拓扑（relations.yaml）：type→type 边。
+    pub edges: Vec<OntologyEdge>,
+    /// 逻辑（rules.yaml）：type-level 规则。
+    pub rules: Vec<OntologyRule>,
+    /// 共现累积（cooccur.yaml）：挖掘原料。
+    pub cooccur: Vec<CooccurPair>,
+    /// 失败分组（failures.yaml）：约束挖掘原料。
+    pub failures: Vec<FailureGroup>,
+    /// 资产 id → 语义类型 id（asset_type_map 实时扫描）。
+    pub asset_type_map: std::collections::HashMap<String, String>,
 }
 
 // ---------------------------------------------------------------------------

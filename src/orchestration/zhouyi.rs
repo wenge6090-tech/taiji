@@ -4,7 +4,7 @@
 //! child tasks share the same Zhouyi execution logic, satisfying the **isomorphic
 //! recursion** principle (§1.1 of BCP).
 //!
-//! # Architecture (BCP §5)
+//! # Architecture (Blueprint §4)
 //!
 //! ```text
 //! MetaAgent (权重更新·元)   ─── once at entrance (or from parent MetaContext)
@@ -298,7 +298,7 @@ impl ZhouyiCycle {
             let task_tags = crate::agents::meta::classify_task_tags(description);
             let tag_refs: Vec<&str> = task_tags.iter().map(String::as_str).collect();
             match meta_agent.run(description, &tag_refs, None).await? {
-                // V46 短路（BCP §8.8）：应答类任务直接产出，跳过阳阴。
+                // V46 短路（Blueprint §4.3）：应答类任务直接产出，跳过阳阴。
                 MetaOutcome::Answer(answer) => {
                     let answer_path =
                         write_short_circuit_answer(&engine_ctx.task_dir, &answer).await?;
@@ -367,7 +367,7 @@ impl ZhouyiCycle {
             {
                 // Crash recovery: YangAgent already ran, reconstruct its
                 // result from persisted state. V28 产出继承优先（handoff /
-                // deliverables），chat_history 仅本节点兜底（§1.4 / §8.18）。
+                // deliverables），chat_history 仅本节点兜底（§1.4 / §1.5）。
                 // If we can't reconstruct, re-run.
                 match construct_zhouyi_result_from_state(&engine_ctx) {
                     Ok(Some(result)) => result,
@@ -471,7 +471,7 @@ impl ZhouyiCycle {
                             "verify_state.json not found — re-running verify"
                         );
                         let verify_agent =
-                            self.factory.create_yin_verify_agent(engine_ctx, &meta_ctx)?;
+                            self.factory.create_yin_judge(engine_ctx, &meta_ctx)?;
                         let tool_results = collect_tool_results(&engine_ctx.task_dir);
                         verify_agent
                             .verify(&yang_result.content, &tool_results, &meta_ctx)
@@ -479,7 +479,7 @@ impl ZhouyiCycle {
                     }
                 }
             } else {
-                let verify_agent = self.factory.create_yin_verify_agent(engine_ctx, &meta_ctx)?;
+                let verify_agent = self.factory.create_yin_judge(engine_ctx, &meta_ctx)?;
                 let tool_results = collect_tool_results(&engine_ctx.task_dir);
                 let report = verify_agent
                     .verify(&yang_result.content, &tool_results, &meta_ctx)
@@ -538,7 +538,7 @@ impl ZhouyiCycle {
                     // Clean up checkpoint (task is done).
                     let _ = std::fs::remove_file(&checkpoint_path);
 
-                    // ── V33/MVP-2: enqueue Lianshan pending（被动学习 — BCP §6.4/§8.23）──
+                    // ── V33/MVP-2: enqueue Lianshan pending（被动学习 — Blueprint §5.3/AGENTS.md）──
                     // 读 verify_state.json 的 checks（YinAgent 已写，MVP-1）→
                     // 原子写 pending/{task_id}.json。Zhouyi 只读归藏（§8.3 硬约束）：
                     // 入队只写 pending/，归藏 YAML 由 Lianshan Consumer 单写。
@@ -547,11 +547,11 @@ impl ZhouyiCycle {
                     // 不再从 task_dir 推两级父目录（仅根任务正确；子任务会推错）。
                     let data_root = self.factory.data_root.clone();
                     {
-                        // ── V33/MVP-3: 四维信号摊派（BCP §6.4）──
+                        // ── V33/MVP-3: 四维信号摊派（Blueprint §5.3）──
                         // cost = trace usage.input_tokens 求和；rounds = verify_state.round；
                         // quality = route 映射（Pass=1.0/BackToZhouyi=0.4/BackToMeta=0.2）× confidence——
                         // 全部既有数据，零新增持久化文件。任务级信号摊派给同任务所有检查项。
-                        let checks: Vec<CheckResult> =
+                        let mut checks: Vec<CheckResult> =
                             match load_json_optional::<serde_json::Value>(
                                 &engine_ctx.task_dir.join("verify_state.json"),
                             ) {
@@ -589,6 +589,44 @@ impl ZhouyiCycle {
                                 }
                                 _ => vec![],
                             };
+                        // V53 阳面 skill 工具调用信号（损失函数）：读 tool_calls.jsonl
+                        // → CheckResult 追加（kind=Python，check_id={skill_id}#0）。
+                        // 增强层：读失败仅 warn 不阻断 PASS。
+                        match load_tool_calls(&engine_ctx.task_dir) {
+                            Ok(calls) if !calls.is_empty() => {
+                                tracing::debug!(
+                                    task_id = %engine_ctx.task_id,
+                                    calls = calls.len(),
+                                    "[zhouyi] yang python skill calls merged into checks"
+                                );
+                                checks.extend(calls);
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!(
+                                    task_id = %engine_ctx.task_id,
+                                    error = %e,
+                                    "[zhouyi] load_tool_calls failed — yang skill signal skipped"
+                                );
+                            }
+                        }
+                        // V59 实时录入（浅层压缩）：阴裁决同步回传 stats/αβ（替代连山 backprop）
+                        if let Err(e) = record_judgment(
+                            self.factory.guizang.as_ref(),
+                            &checks,
+                            &meta_ctx.assets_used,
+                            true,
+                            meta_ctx.model.as_ref().map(|m| m.key()),
+                            &self.config.runtime.lianshan,
+                        )
+                        .await
+                        {
+                            tracing::warn!(
+                                task_id = %engine_ctx.task_id,
+                                error = %e,
+                                "V59 record_judgment failed — learning skipped (non-blocking)"
+                            );
+                        }
                         if let Err(e) = enqueue_lianshan_pending(
                             &data_root,
                             &engine_ctx.task_dir,
@@ -635,7 +673,7 @@ impl ZhouyiCycle {
                         violations_note,
                     );
                     // V28 产出继承：注入产出文件引用（deliverables/ + handoff.md），
-                    // 下一轮基于产出修正/拆解（§8.18）。
+                    // 下一轮基于产出修正/拆解（§1.5）。
                     current_description.push_str(
                         &crate::infra::handoff::build_handoff_description(
                             &engine_ctx.task_dir,
@@ -787,7 +825,7 @@ pub(crate) fn write_task_status(
     save_json_atomic(&task, &meta_path).map_err(TaijiError::IO)
 }
 
-/// V46 短路（BCP §8.8）：应答类任务把答案写为 `deliverables/answer.md`，
+/// V46 短路（Blueprint §4.3）：应答类任务把答案写为 `deliverables/answer.md`，
 /// 返回绝对路径。验证规则：符号校验保底（引用真实性）+ 交互判断兜底
 /// （父节点/用户读 answer.md 裁定），阴不做语义验证（同源概率回路 §1.3）。
 async fn write_short_circuit_answer(task_dir: &Path, answer: &str) -> Result<String, TaijiError> {
@@ -834,7 +872,7 @@ fn construct_zhouyi_result_from_state(
     let task_dir = &engine_ctx.task_dir;
 
     // V28 产出继承优先：有交接文件（deliverables/handoff.md）则从产出重建——
-    // 执行事实是唯一记忆（§1.4 / §8.18），chat_history 仅作本节点兜底。
+    // 执行事实是唯一记忆（§1.4 / §1.5），chat_history 仅作本节点兜底。
     if let Some(handoff) = crate::infra::handoff::read_handoff(task_dir) {
         tracing::info!(
             task_id = %engine_ctx.task_id,
@@ -881,7 +919,7 @@ enum YangOutcome {
     BackToMeta,
 }
 
-/// Run the YangAgent with V28/V29 error routing (BCP §8.18 / §8.19 / V47 §8.14).
+/// Run the YangAgent with V28/V29 error routing (Blueprint §1.5 / AGENTS.md §14 / AGENTS.md §9).
 ///
 /// - `Ok(Success(result))` — success.
 /// - `Ok(BackToZhouyi)` — `ContextOverflow`（编排模式或叶节点）：已递增 round、
@@ -911,7 +949,7 @@ async fn run_yang_with_v28_routing(
             if engine_ctx.round > max_rounds {
                 return Err(TaijiError::MaxRoundsExceeded { max: max_rounds });
             }
-            // V47 模式分流（BCP §8.18/§8.14）：执行模式 + 可再拆 → 粒度错误 =
+            // V47 模式分流（Blueprint §1.5/AGENTS.md §9）：执行模式 + 可再拆 → 粒度错误 =
             // 认知偏差 → BACK_TO_META（元重判编排）；编排模式或叶节点 →
             // BACK_TO_ZHOUYI（阳递归分解 / 残缺产出兜底）。
             let can_decompose = engine_ctx.depth + 1 < factory.config.runtime.max_depth;
@@ -1211,16 +1249,100 @@ fn trunc(s: &str, max_len: usize) -> String {
     }
 }
 
-/// V33/MVP-2：将检查项结果入队 Lianshan pending（被动学习 — BCP §6.4/§8.23）。
+/// V53 读阳面 Python skill 工具调用记录 → CheckResult（损失函数信号）。
+///
+/// 数据源 = `{task_dir}/tool_calls.jsonl`（SkillTool Python 分支每行 JSON 追加）。
+/// 转 CheckResult（kind=Python，check_id=`{skill_id}#0`）——与阴面 Python check
+/// 同构，经 `backprop_python_skills` 回传 `SkillAsset.stats`。cost/rounds/quality
+/// 留 0（工具调用级无 token 信号，任务级摊派在 verify_state 分支已做，MVP 边界）。
+fn load_tool_calls(task_dir: &std::path::Path) -> Result<Vec<CheckResult>, std::io::Error> {
+    let path = task_dir.join("tool_calls.jsonl");
+    let content = std::fs::read_to_string(&path)?;
+    let mut out = Vec::new();
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+            let skill_id = v.get("skill_id").and_then(|s| s.as_str()).unwrap_or("");
+            if skill_id.is_empty() {
+                continue;
+            }
+            let passed = v.get("passed").and_then(|b| b.as_bool()).unwrap_or(false);
+            let detail = v
+                .get("detail")
+                .and_then(|s| s.as_str())
+                .unwrap_or("")
+                .to_string();
+            out.push(CheckResult {
+                check_id: format!("{skill_id}#0"),
+                kind: crate::types::verification::CheckKind::Python,
+                passed,
+                detail,
+                duration_ms: 0,
+                cost_tokens: 0,
+                verify_rounds: 0,
+                quality: 0.0,
+            });
+        }
+    }
+    Ok(out)
+}
+
+/// V33/MVP-2：将检查项结果入队 Lianshan pending（被动学习 — Blueprint §5.3/AGENTS.md）。
 ///
 /// 写 `{data_root}/pending/{task_id}.json`，内容 = `{task_id, source, checks, assets_used, passed, model_key}`。
 /// 同 task_id 覆盖写（幂等——重跑任务不产生重复学习）；原子写（save_json_atomic）。
 /// 调用方为 Zhouyi PASS 分支；I/O 失败由调用方 warn（学习是增强层，不阻断 PASS）。
-/// V35/MVP-6：assets_used（编排所选资产，Lianshan 回传依据 §8.21）与 passed（任务级
+/// V35/MVP-6：assets_used（编排所选资产，Lianshan 回传依据 §5.3）与 passed（任务级
 /// PASS 信号——prompts 任务级归因；serde default 旧 pending 零迁移）。
-/// V36→V44：model_key 作为统计键随 pending 入队（§10.1 去分区化——Lianshan 回传
+/// V36→V44：model_key 作为统计键随 pending 入队（§6.1 去分区化——Lianshan 回传
 /// 统一落根级资产树，model_key 仅用于 model_stats 索引；serde default
 /// 旧 pending 零迁移，None = 未指定模型）。
+/// V59 实时录入（浅层压缩）：阴判断节点裁决同步回传 stats/αβ/model_posterior。
+/// 替代连山 backprop 统计回传——周易执行期直接写（C 方案字段级隔离），
+/// 连山只做深层压缩（拓扑/语义/演化/编译）。
+pub(crate) async fn record_judgment(
+    guizang: &crate::infra::knowledge::GuizangClient,
+    checks: &[CheckResult],
+    assets_used: &[AssetRef],
+    passed: bool,
+    model_key: Option<&str>,
+    config: &crate::infra::config::LianshanConfig,
+) -> Result<(), TaijiError> {
+    // 1. prompt 任务级信号（stats 四维 + α/β）
+    guizang
+        .record_prompt_signal(
+            assets_used,
+            passed,
+            checks,
+            config.bayesian_enabled,
+            config.prior_strength,
+        )
+        .await?;
+    // 2. 阳面 Python skill 信号（SkillAsset.stats + α/β）
+    guizang
+        .record_python_skill_stats(checks, config.bayesian_enabled, config.prior_strength)
+        .await?;
+    // 3. model_stats 后验（模型路由数据源）
+    if let Some(key) = model_key {
+        let first = checks.first();
+        let signal = crate::orchestration::model_router::ModelStatsSignal {
+            passed,
+            cost_tokens: first.map(|c| c.cost_tokens).unwrap_or(0),
+            verify_rounds: first.map(|c| c.verify_rounds).unwrap_or(0),
+            quality: first.map(|c| c.quality).unwrap_or(0.0),
+        };
+        crate::orchestration::model_router::update_model_stats(
+            guizang,
+            &crate::types::agent::ModelKey(key.to_string()),
+            &signal,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 pub(crate) async fn enqueue_lianshan_pending(
     data_root: &Path,
     task_dir: &Path,
@@ -1626,6 +1748,39 @@ mod tests {
         let ctx = make_engine_ctx("reconstruct-none", dir.clone());
         let result = construct_zhouyi_result_from_state(&ctx).expect("no IO error");
         assert!(result.is_none(), "empty chat_history must yield None (fallback to re-run)");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn test_load_tool_calls_parses_jsonl() {
+        let dir = std::env::temp_dir().join(format!(
+            "taiji_zhouyi_tool_calls_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("tool_calls.jsonl"),
+            "{\"skill_id\":\"exec-a\",\"passed\":true,\"detail\":\"ok\"}\n\
+             {\"skill_id\":\"exec-b\",\"passed\":false,\"detail\":\"fail\"}\n",
+        )
+        .unwrap();
+        let calls = super::load_tool_calls(&dir).unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0].check_id, "exec-a#0");
+        assert_eq!(calls[0].passed, true);
+        assert_eq!(calls[0].kind, crate::types::verification::CheckKind::Python);
+        assert_eq!(calls[1].check_id, "exec-b#0");
+        assert_eq!(calls[1].passed, false);
+
+        // 空目录（无 tool_calls.jsonl）→ Err（调用方 warn，非崩溃）
+        let empty = dir.join("nested");
+        std::fs::create_dir_all(&empty).unwrap();
+        assert!(super::load_tool_calls(&empty).is_err());
 
         let _ = std::fs::remove_dir_all(&dir);
     }

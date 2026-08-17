@@ -7,7 +7,7 @@
 //! Each child executes a **full Zhouyi cycle** (元·阳·阴 → loop) via
 //! [`ZhouyiCycle`], matching the isomorphic recursion principle (BCP §1.1).
 //! The parent's [`MetaContext`] is passed as the initial reasoning bias so
-//! that children inherit the same reasoning paths and constraints (BCP §8.2).
+//! that children inherit the same reasoning paths and constraints (Blueprint §1.1).
 //!
 //! Concurrency: subtasks run in parallel via `tokio::spawn`. Results are
 //! collected eagerly; any subtask failure short-circuits the entire tool.
@@ -58,7 +58,7 @@ pub struct RecursiveDecomposeTool {
     /// See AGENTS.md §1 (Zhouyi loop rules) and §9 (concurrency rules).
     cancel: CancellationToken,
     /// Reasoning bias inherited from the parent's MetaAgent run.
-    /// Passed to child Zhouyi cycles as `initial_meta_ctx` (BCP §8.2).
+    /// Passed to child Zhouyi cycles as `initial_meta_ctx` (Blueprint §1.1).
     parent_meta_ctx: MetaContext,
 }
 
@@ -337,7 +337,7 @@ impl RecursiveDecomposeTool {
             let child_model = meta.model;
 
             // ── V30 会盟：收集兄弟贡品陈列室（分封时快照目录，排除自身）──
-        // 无降级原则（BCP §8.20）：扫描失败 → Err 上抛，中止 decompose。
+        // 无降级原则（AGENTS.md §8）：扫描失败 → Err 上抛，中止 decompose。
         let sibling_deliverables =
             collect_sibling_deliverables(&children_root, child_index)?;
 
@@ -379,7 +379,7 @@ impl RecursiveDecomposeTool {
                 // ── Inject parent deliverables into child MetaContext ──
                 let mut child_meta_ctx = parent_meta_ctx;
                 child_meta_ctx.yang_prompt.parent_deliverables = child_deliverables;
-                // ── V30 会盟：兄弟贡品陈列室目录（只读，贡品公开陈列语义 §8.20）──
+                // ── V30 会盟：兄弟贡品陈列室目录（只读，贡品公开陈列语义 Blueprint §1.5）──
                 // 注入目录而非文件快照：同批并行兄弟的贡品在分封时点尚未产出，
                 // 子任务执行中可经 read 工具随时发现陆续陈列的兄弟贡品。
                 child_meta_ctx.yang_prompt.sibling_deliverables = sibling_deliverables;
@@ -387,7 +387,7 @@ impl RecursiveDecomposeTool {
                 //    判断）或深度规则兑底后的 Execution。子 ZhouyiCycle 的阳 Agent
                 //    据此选模板与工具注册面 ──
                 child_meta_ctx.mode = child_mode;
-                // ── V37 子任务级路由（BCP §8.8）：SubtaskSpec.model 覆盖子模型
+                // ── V37 子任务级路由（Blueprint §4.3）：SubtaskSpec.model 覆盖子模型
                 //    （父 LLM 按难度/领域分配）；None = 继承父模型（默认）。
                 //    验证相位（verify_model）随子模型继承父的异源配置——子任务
                 //    的裁判语义与父一致（异源方向不逐层重决策，MVP 边界）。
@@ -435,7 +435,7 @@ impl RecursiveDecomposeTool {
                     success_count += 1;
                 }
                 Ok((idx, Err(e))) => {
-                    // V31 失败汇报（BCP §8.18）：取消 → 硬中止（收敛树整体放弃）；
+                    // V31 失败汇报（Blueprint §1.5）：取消 → 硬中止（收敛树整体放弃）；
                     // 任务级失败 → Diverged 失败条目进 prior_results，**不整体上抛**——
                     // 成功兄弟继续收集（不 abort_all），converge 收到完整汇报。
                     if self.cancel.is_cancelled() {
@@ -469,7 +469,7 @@ impl RecursiveDecomposeTool {
         // V44：converge 在根级资产树执行（parent_meta_ctx.model 仅作路由）。
         let converge_agent =
             self.factory
-                .create_yin_converge_agent(&self.engine_ctx, &self.parent_meta_ctx)?;
+                .create_yin_judge(&self.engine_ctx, &self.parent_meta_ctx)?;
         let all_decompose_results: Vec<DecomposeResult> =
             prior_results.values().cloned().collect();
         let decision = converge_agent
@@ -526,7 +526,7 @@ impl RecursiveDecomposeTool {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// V30 会盟（BCP §8.20）：收集兄弟子任务的**贡品陈列室**目录（绝对路径）。
+/// V30 会盟（Blueprint §1.5）：收集兄弟子任务的**贡品陈列室**目录（绝对路径）。
 ///
 /// BTreeMap 有序扫描 `children/` 下各数字子任务目录，收集存在 `deliverables/`
 /// 的子目录路径，排除 `exclude_idx`（当前正在 spawn 的子任务，防自引用）。
@@ -563,8 +563,8 @@ fn collect_sibling_deliverables(
     Ok(venues.into_values().map(|p| p.to_string_lossy().to_string()).collect())
 }
 
-/// V31 失败汇报（BCP §8.18）：TaijiError 变体 → failure_kind 分类
-///（§8.18 词汇表扩展）。纯函数，可单测。
+/// V31 失败汇报（Blueprint §1.5）：TaijiError 变体 → failure_kind 分类
+///（§1.5 词汇表扩展）。纯函数，可单测。
 fn classify_failure(e: &TaijiError) -> String {
     match e {
         TaijiError::ContextOverflow { .. } => "context_overflow",
@@ -588,12 +588,12 @@ fn classify_failure(e: &TaijiError) -> String {
     .to_string()
 }
 
-/// V31 失败汇报（BCP §8.18）：任务级失败子任务 → Diverged 条目。
+/// V31 失败汇报（Blueprint §1.5）：任务级失败子任务 → Diverged 条目。
 ///
 /// summary = `[{kind}] {reason}`（converge LLM 可读）；deliverables = 子任务
 /// deliverables/ 现存文件（含 handoff.md 交接产物——V28 失败一律先写）。
 /// 交接产物收集失败仅 warn（**有意例外**：原始失败原因必须优先传播，
-/// 叠加 IO 错误会掩盖根因，BCP §8.18 声明）。
+/// 叠加 IO 错误会掩盖根因，Blueprint §1.5 声明）。
 fn build_failure_entry(child_dir: &Path, e: &TaijiError) -> DecomposeResult {
     let del_dir = child_dir.join("deliverables");
     let mut deliverables = Vec::new();
@@ -701,7 +701,7 @@ pub(crate) fn mark_aborted_children_failed(children_root: &Path) {
 }
 
 /// Map a ZhouyiResult into a DecomposeResult for convergence analysis.
-/// V37 子任务级路由（BCP §8.8）：应用 `SubtaskSpec.model` 覆盖到子 MetaContext。
+/// V37 子任务级路由（Blueprint §4.3）：应用 `SubtaskSpec.model` 覆盖到子 MetaContext。
 /// None = 继承父模型（不变）；Some = 覆盖（父 LLM 按难度/领域分配）。
 /// 纯函数——可单测，spawn 闭包内调用。
 fn apply_subtask_model(child: &mut MetaContext, model: Option<&crate::types::agent::ModelKey>) {
@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     fn test_classify_failure_mapping() {
-        // V31：TaijiError 变体 → failure_kind 分类（§8.18 词汇表）。
+        // V31：TaijiError 变体 → failure_kind 分类（§1.5 词汇表）。
         assert_eq!(classify_failure(&TaijiError::ContextOverflow { threshold: 1 }), "context_overflow");
         assert_eq!(classify_failure(&TaijiError::HardCutoff { threshold: 1 }), "hard_cutoff");
         assert_eq!(classify_failure(&TaijiError::LLMCallFailed { context: "x".into() }), "llm_failed");

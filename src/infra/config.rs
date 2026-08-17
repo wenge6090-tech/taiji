@@ -91,7 +91,7 @@ pub struct RuntimeConfig {
     pub max_subtasks: u32,
     #[serde(default)]
     pub exec_timeout: u64,
-    /// V29 上下文窗口预算（BCP §8.19）：精准 token 计数替换 max_turns 轮次。
+    /// V29 上下文窗口预算（AGENTS.md §14）：精准 token 计数替换 max_turns 轮次。
     #[serde(default)]
     pub context_limits: ContextLimits,
     /// V33/MVP-3 Lianshan 演化配置（§6.3/§6.4：回报权重 / UCB 采样门槛 / 演化激活门槛 / 主动学习）。
@@ -102,7 +102,7 @@ pub struct RuntimeConfig {
     pub model_routing: ModelRoutingConfig,
 }
 
-/// V37 多级模型路由配置（BCP §8.8 相位级）。
+/// V37 多级模型路由配置（Blueprint §4.3 相位级）。
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(default)]
 pub struct ModelRoutingConfig {
@@ -130,7 +130,7 @@ impl Default for RuntimeConfig {
     }
 }
 
-/// V29 上下文窗口预算（BCP §8.19）— 精准 token 统计替换 max_turns 轮次。
+/// V29 上下文窗口预算（AGENTS.md §14）— 精准 token 统计替换 max_turns 轮次。
 ///
 /// 统计源：`CompletionResponse.usage.input_tokens`（provider 报告的真实请求
 /// token 数，含历史重放与工具结果），经 ContextLimiter hook 累计。
@@ -148,14 +148,14 @@ pub struct ContextLimits {
     /// 硬截止阈值绝对值覆盖：0 = 按窗口 35% 推导；>0 = 用此绝对值。
     /// 窗口占用 ≥ 阈值 → 写交接文件后直接上报 FAIL（预算保护，不进 BACK_TO_* 循环）。
     pub hard_cutoff_tokens: u64,
-    /// 收尾压缩输入截断上限（§8.18 LLM 压缩收尾）：序列化对话截断到此量
+    /// 收尾压缩输入截断上限（§1.5 LLM 压缩收尾）：序列化对话截断到此量
     /// （首部 2k 保留任务目标 + 尾部最新状态），防超限路径再花一次大调用。
     pub compress_input_tokens: u64,
 }
 
 impl ContextLimits {
     /// 交接阈值（单次窗口占用）：显式绝对值优先，否则窗口 30%。
-    /// V48：编排/执行统一，废除 V32 编排 60k 快拆特例（BCP §8.19）。
+    /// V48：编排/执行统一，废除 V32 编排 60k 快拆特例（AGENTS.md §14）。
     pub fn effective_handoff(&self) -> u64 {
         if self.handoff_tokens > 0 {
             self.handoff_tokens
@@ -177,56 +177,52 @@ impl ContextLimits {
 impl Default for ContextLimits {
     fn default() -> Self {
         Self {
-            // BCP §8.19 默认值（V48）：1M 窗口（deepseek-v4-flash），
+            // AGENTS.md §14 默认值（V48）：1M 窗口（deepseek-v4-flash），
             // handoff/hard_cutoff 默认 0 = 按窗口比例推导（30% / 35%），
             // 35%-30% = 5%（=50k）余量即「收尾写交接」预算。
             context_window_tokens: 1_000_000,
             handoff_tokens: 0,
             hard_cutoff_tokens: 0,
-            // BCP §8.18：收尾压缩输入截断上限（字符近似，1 字符 ≤ 1 token 保守上界）
+            // §1.5 收尾压缩输入截断上限（字符近似，1 字符 ≤ 1 token 保守上界）
             compress_input_tokens: 20_000,
         }
     }
 }
 
-/// V33/MVP-3 Lianshan 演化配置（§6.3 UCB / §6.4 回报与主动学习 / §8.12 激活门槛）。
+/// V33/MVP-3 Lianshan 演化配置（§5.2 UCB / §5.3 回报与主动学习 / AGENTS.md 激活门槛）。
+///
+/// V55 修复：`#[serde(default)]` 必须挂在**结构体级**（缺失字段用容器 Default 对应值），
+/// 不能挂字段级——字段级让缺省字段退化为类型默认（u64→0），导致 min_samples=0（n=0
+/// 的 skill 也被 fork 重编译）、activation_min_samples=0（演化激活门槛失效）、
+/// prior_strength=0（冷启动先验退化为均匀 Beta）。与 LlmConfig/ContextLimits 同模式。
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct LianshanConfig {
     /// 回报函数权重（§6.4 默认 0.5/0.3/0.2/0.1）。
-    #[serde(default)]
     pub reward_weights: crate::types::verification::RewardWeights,
     /// UCB 利用排序最小采样门槛（§6.3：n < min_samples 不参与利用排序）。
-    #[serde(default)]
     pub min_samples: u64,
-    /// 演化激活门槛：每层最少资产数（§8.12）。
-    #[serde(default)]
+    /// 演化激活门槛：每层最少资产数（AGENTS.md）。
     pub activation_min_assets: usize,
-    /// 演化激活门槛：累积采样数（§8.12 50+ 轨迹）。
-    #[serde(default)]
+    /// 演化激活门槛：累积采样数（AGENTS.md 50+ 轨迹）。
     pub activation_min_samples: u64,
     /// 主动学习开关（§6.4 空闲窗口；默认关闭，MVP-3 探索闭环默认不激活）。
-    #[serde(default)]
     pub active_learning_enabled: bool,
     /// 每窗口探索任务限量（§6.4 护栏：每窗口限量 + 不递归）。
-    #[serde(default)]
     pub active_learning_max_per_window: u32,
-    /// V33/MVP-3.5 贝叶斯后验开关（§6.4.1）：true → 演化决策用后验均值/σ_beta；
+    /// V33/MVP-3.5 贝叶斯后验开关（§5.3）：true → 演化决策用后验均值/σ_beta；
     /// false → 回退频率路径（MVP-3 行为）。
     #[serde(default = "LianshanConfig::default_bayesian_enabled")]
     pub bayesian_enabled: bool,
-    /// 先验强度 k（§6.4.1）：α = 1 + k·confidence，β = 1 + k·(1−confidence)。
+    /// 先验强度 k（§5.3）：α = 1 + k·confidence，β = 1 + k·(1−confidence)。
     /// k 大 → 低采样结果更贴先验（人工种子权威性高）。
-    #[serde(default)]
     pub prior_strength: f64,
-    /// V34/MVP-4 随机审计率（§8.22 P2 预留）：概率触发深度复查（webfetch 重放
+    /// V34/MVP-4 随机审计率（AGENTS.md P2 预留）：概率触发深度复查（webfetch 重放
     /// 来源 URL + LLM 语义复核）。默认 0 = 不审计；激活条件后置（MVP-4 只落字段）。
-    #[serde(default)]
     pub audit_rate: f64,
     /// V50 编译任务开关（§6.0 编译任务契约；默认关闭——编译涉及 LLM 调用，opt-in）。
-    #[serde(default)]
     pub compile_enabled: bool,
     /// V50 编译任务独立 token 预算配额（§6.0；0 = 不限）。
-    #[serde(default)]
     pub compile_budget: u32,
 }
 
@@ -322,5 +318,34 @@ mod tests {
         };
         assert_eq!(l.effective_handoff(), 40_000);
         assert_eq!(l.effective_hard_cutoff(), 45_000);
+    }
+
+    /// V55 回归：`runtime.lianshan` 对象存在但缺字段（如只有 compile_enabled）时，
+    /// 缺失字段必须取 LianshanConfig::default() 对应值（min_samples=3、
+    /// activation_min_samples=50、prior_strength=10.0），不能退化为类型默认 0。
+    /// 历史 bug：字段级 #[serde(default)] → min_samples=0 → n=0 的 skill 也被
+    /// fork_python_skills 入队重编译；activation_min_samples=0 → 演化激活门槛失效。
+    #[test]
+    fn lianshan_missing_fields_use_container_default() {
+        // 对象存在但缺大部分字段（实测 config.json 形态：只有 compile_enabled）。
+        let json = r#"{"version":"1","runtime":{"max_concurrent_agents":4,"max_depth":8,"max_rounds":30,"max_cycles":3,"max_subtasks":8,"lianshan":{"compile_enabled":true}}}"#;
+        let cfg: TaijiConfig = serde_json::from_str(json).unwrap();
+        let l = &cfg.runtime.lianshan;
+        assert_eq!(l.min_samples, 3, "缺字段须用容器默认，不能退化为 0");
+        assert_eq!(l.activation_min_assets, 5);
+        assert_eq!(l.activation_min_samples, 50);
+        assert_eq!(l.prior_strength, 10.0);
+        assert_eq!(l.compile_budget, 20_000);
+        assert!(l.compile_enabled, "显式字段保留");
+    }
+
+    /// 整个 lianshan 对象缺失 → 整体 Default。
+    #[test]
+    fn lianshan_whole_object_missing_uses_default() {
+        let json = r#"{"version":"1","runtime":{"max_concurrent_agents":4,"max_depth":8,"max_rounds":30,"max_cycles":3,"max_subtasks":8}}"#;
+        let cfg: TaijiConfig = serde_json::from_str(json).unwrap();
+        let l = &cfg.runtime.lianshan;
+        assert_eq!(l.min_samples, 3);
+        assert_eq!(l.activation_min_samples, 50);
     }
 }

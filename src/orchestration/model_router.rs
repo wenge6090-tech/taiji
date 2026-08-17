@@ -1,4 +1,4 @@
-//! ModelRouter — 元权重模型路由（V36 落地，BCP §8.8 第 1 步）。
+//! ModelRouter — 元权重模型路由（V36 落地，Blueprint §4.3 第 1 步）。
 //!
 //! 纯符号层 bandit/UCB：读根级 model_stats 元权重表 → 候选 UCB 决策 model_key
 //! → MetaAgent 按路由结果分区检索（§6.1 分区一致性）。**无 LLM 调用**——路由
@@ -14,7 +14,7 @@
 //! - tie → 候选声明顺序（default 在前，确定性）
 //!
 //! 模型级 quality/rounds 维度：pending 仅 PASS 入队 → quality 恒 1.0、rounds 取
-//! checks 首项摊派（BCP §6.4 元权重表注记）。
+//! checks 首项摊派（Blueprint §5.3 元权重表注记）。
 
 use std::collections::BTreeMap;
 
@@ -96,7 +96,7 @@ impl ModelRouter {
             .unwrap_or_else(|| self.default_key.clone())
     }
 
-    /// V37 异源裁判决策（BCP §8.8 相位级，MVP 边界：复用任务级 stats，
+    /// V37 异源裁判决策（Blueprint §4.3 相位级，MVP 边界：复用任务级 stats，
     /// (model_key × tag × phase) 相位维度后置）。
     ///
     /// 从**非主模型候选**中按 UCB 同公式（avg_reward + C·√(ln N_total/(n+1))）
@@ -146,7 +146,7 @@ impl ModelRouter {
     }
 }
 
-/// 模型级回传信号（BCP §6.4 元权重表）——来自 pending 负载聚合。
+/// 模型级回传信号（Blueprint §5.3 元权重表）——来自 pending 负载聚合。
 #[derive(Debug, Clone, Copy)]
 pub struct ModelStatsSignal {
     /// 任务 PASS（pending 仅 PASS 入队 → 恒 true；字段保留扩展）。

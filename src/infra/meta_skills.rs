@@ -1,10 +1,10 @@
-//! V45 元层 Skill 注册表 — Rust 硬编码保底（BCP §10.1 双轨原则）。
+//! V45 元层 Skill 注册表 — Rust 硬编码保底（Blueprint §6.1 双轨原则）。
 //!
 //! 阳阴元工具/元 skill 全部在此硬编码：知识库为空/损坏时，基础 Zhouyi 闭环
 //! 照常运行（零资产依赖）。资产层（`skills/{cat}/{id}/skill.yaml`）是
 //! 可演化覆盖层——同 id 资产优先（见 [`crate::infra::skill_catalog`]）。
 //!
-//! 对偶配对（元层天然成立，§10.2 dual 硬约束）：
+//! 对偶配对（元层天然成立，AGENTS.md §9 dual 硬约束）：
 //!
 //! | 阳（执行/编排） | 阴（验证/收敛） |
 //! |---|---|
@@ -163,7 +163,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
             "write",
             "文件写入",
             "原子写入文件（覆盖目标）。JSON 模式参数：{\"path\": \"相对路径\", \"content\": \"文件内容\"}。必须传 path 与 content 两个键。",
-            SkillKind::Write,
+            SkillKind::Builtin,
             "file-exists",
             &["json", "text"],
             &["将统计结果写入 deliverables/report.md"],
@@ -174,7 +174,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
             "bash",
             "Shell 命令",
             "执行 shell 命令并返回 stdout/stderr/退出码。text 模式：直接传命令字符串（如 \"ls -la\"）。",
-            SkillKind::Bash,
+            SkillKind::Builtin,
             "command-succeeds",
             &["text"],
             &["ls -la deliverables/"],
@@ -185,7 +185,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
             "read",
             "文件读取",
             "读取文件内容（支持 offset/limit）。text 模式：直接传文件路径。",
-            SkillKind::Read,
+            SkillKind::Builtin,
             "schema-valid",
             &["text"],
             &["读取 deliverables/report.md 核验内容"],
@@ -196,7 +196,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
             "search",
             "代码搜索",
             "在项目中搜索关键词/模式。text 模式：直接传搜索词。",
-            SkillKind::Search,
+            SkillKind::Builtin,
             "reference-resolves",
             &["text"],
             &["搜索 fn main 的定义位置"],
@@ -207,7 +207,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
             "webfetch",
             "网页抓取",
             "抓取 URL 内容（联网核实）。text 模式：直接传 URL。",
-            SkillKind::Webfetch,
+            SkillKind::Builtin,
             "trace-consistency",
             &["text"],
             &["抓取 https://example.com 核实事实"],
@@ -218,7 +218,7 @@ pub fn yang_meta_skills() -> Vec<SkillAsset> {
             "recursive-decompose",
             "递归分解",
             "把复杂任务分解为子任务并行执行（每个子任务跑完整 Zhouyi 循环）。JSON 模式参数：{\"subtasks\": [{\"description\": ..., \"verification_spec\": ..., \"mode\": \"Orchestration\"|\"Execution\"}]}。仅编排模式可用。",
-            SkillKind::RecursiveDecompose,
+            SkillKind::Builtin,
             "mece-check",
             &["json"],
             &["将『分析代码 + 写报告 + 跑测试』拆为 3 个子任务"],
@@ -251,7 +251,7 @@ pub fn yin_meta_skills() -> Vec<SkillAsset> {
             "file-exists",
             "交付物存在性",
             "deliverables/ 必须至少有一个产物文件（执行事实是唯一记忆）。",
-            SkillKind::FileExists,
+            SkillKind::Builtin,
             "write",
             "deliverables/*",
             serde_json::json!({}),
@@ -263,7 +263,7 @@ pub fn yin_meta_skills() -> Vec<SkillAsset> {
             "schema-valid",
             "任务册合法",
             "meta.json 必须存在且字段完整（runner 写入，保底防线——任意任务的验证前提）。",
-            SkillKind::SchemaValid,
+            SkillKind::Builtin,
             "read",
             "meta.json",
             serde_json::json!({
@@ -278,7 +278,7 @@ pub fn yin_meta_skills() -> Vec<SkillAsset> {
             "command-succeeds",
             "命令执行成功",
             "白名单安全命令（编译/测试/静态检查）执行成功（30s 超时）。资产层覆盖 params.command 指定具体命令。",
-            SkillKind::CommandSucceeds,
+            SkillKind::Builtin,
             "bash",
             "",
             serde_json::json!({ "command": "" }),
@@ -290,7 +290,7 @@ pub fn yin_meta_skills() -> Vec<SkillAsset> {
             "reference-resolves",
             "交接引用完整",
             "deliverables/handoff.md 的 output_refs 数组内每个路径必须真实存在于任务目录。",
-            SkillKind::ReferenceResolves,
+            SkillKind::Builtin,
             "search",
             "deliverables/handoff.md",
             serde_json::json!({ "field": "output_refs" }),
@@ -302,7 +302,7 @@ pub fn yin_meta_skills() -> Vec<SkillAsset> {
             "trace-consistency",
             "断言证据链",
             "产出中的 [证据: 工具名] 引用必须对应真实工具调用记录；(推测) 标记计数作为质量信号。",
-            SkillKind::TraceConsistency,
+            SkillKind::Builtin,
             "webfetch",
             "deliverables/*.md",
             serde_json::json!({

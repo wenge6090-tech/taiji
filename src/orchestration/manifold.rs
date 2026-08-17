@@ -1,4 +1,4 @@
-//! 迹拓扑压缩算子（BCP §6.0 蓝图文件契约）——纯符号，零 LLM。
+//! 迹拓扑压缩算子（Blueprint §5.0 蓝图文件契约）——纯符号，零 LLM。
 //!
 //! 任务目录树（meta.json + deliverables/ + handoff.md）+ pending 字段
 //! （assets_used + checks）→ `ManifoldTopology` 状态转移图。
