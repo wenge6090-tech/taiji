@@ -346,3 +346,5 @@
   - compile 模板（`compile_task_description` / `compile_recompile_description` 分类规则段）：判据类/收敛类 → **不产出 skill**（复用内置原子判据/语义裁决），只产阳面 exec/orch；反例教学同步
 - **保留**（V57 定论，无数据时空转无害）：`fork_variants`/`bayesian_update`/`save_verification` 写路径（VerificationAsset 演化代码留痕）、`type_dir_name` 的 yin 分支（旧库读取兼容）、`load_all_verifications` 连山加载桥（读旧 verify 兼容）。
 - **测试基线**：`cargo test --lib` → **364 passed, 0 failed, 4 ignored**（+1 弃置闸：verify/converge 弃置 / exec/orch 放行；ensure_dirs 断言改反向）。
+
+- **prompts stats 批次提交惯例**:V59 实时录入每次任务 PASS 写 `usage_count += 1` / `version += 1` 到 prompts YAML（纯统计衍生,无契约价值,§20 原则）。随批次提交（跑完一轮后一次 commit,message 标注「运行时统计批次」）,不逐任务碎提交;content/契约字段变化则单独提交。
