@@ -1,0 +1,35 @@
+# 语义层词汇表（Ontology Taxonomy）——人工种子（Blueprint §6.6）
+# 4 个动作类型对齐现有 prompt 资产 tags（orchestration/execution/verify/converge），
+# 2 个领域类型为前瞻种子（暂无资产，待语义化资产/挖掘增长）。
+# 资产到类型的映射由 asset_type_map 扫 tags 匹配本词表（source: human 为人工种子）。
+types:
+  - id: orchestration
+    name: 编排
+    description: 复杂任务的递归拆解与子任务综合
+    parent: null
+    source: human
+  - id: execution
+    name: 执行
+    description: 原子任务的直接产出
+    parent: null
+    source: human
+  - id: verify
+    name: 验证
+    description: 对产物做确定性/符号化校验
+    parent: null
+    source: human
+  - id: converge
+    name: 收敛
+    description: 子任务结果的综合裁决
+    parent: null
+    source: human
+  - id: code-safety
+    name: 代码安全
+    description: 代码类任务的安全合规校验（前瞻种子，暂无资产）
+    parent: null
+    source: human
+  - id: data-query
+    name: 数据查询
+    description: 读取/检索类任务（前瞻种子，暂无资产）
+    parent: null
+    source: human

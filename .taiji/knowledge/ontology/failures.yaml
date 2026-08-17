@@ -1,0 +1,25 @@
+- env_tags:
+  - flash
+  check_kind: file_exists
+  fails: 0
+  total: 15
+- env_tags:
+  - flash
+  check_kind: schema_valid
+  fails: 0
+  total: 15
+- env_tags:
+  - flash
+  check_kind: trace_consistency
+  fails: 2
+  total: 15
+- env_tags:
+  - flash
+  check_kind: python
+  fails: 8
+  total: 8
+- env_tags:
+  - flash
+  check_kind: reference_resolves
+  fails: 10
+  total: 15

@@ -1,0 +1,25 @@
+# taiji 本体规则（§6.6 三层之「逻辑」）——人工种子先验。
+# when.domain ∈ {Security,Infra,Data,Finance,General}；action ∈ {Create,Read,Update,Delete,Debug,Fix}；env ∈ {Production,Staging,Dev}。
+# require/forbid = 语义类型 id；命中后注入阴 checklist 硬约束（id 前缀 ontology:）。
+
+- id: prod-requires-security
+  when:
+    env: Production
+  require:
+    - security-check
+  severity: hard
+
+- id: fix-requires-test
+  when:
+    action: Fix
+  require:
+    - code-test
+  severity: soft
+
+- id: data-update-validates
+  when:
+    domain: Data
+    action: Update
+  require:
+    - data-validation
+  severity: hard

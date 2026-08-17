@@ -1,0 +1,31 @@
+type: verification
+layer: 0
+id: file-exists
+name: 交付物存在性
+description: deliverables/ 必须至少有一个产物文件（执行事实是唯一记忆）。
+tags:
+- general
+- seed
+confidence: 0.8
+version: 15
+content: deliverables/ 必须至少有一个产物文件（执行事实是唯一记忆）。
+checks:
+- id: file-exists#0
+  kind: file_exists
+  target: deliverables/*
+  params: {}
+  severity: hard
+  pass_condition: deliverables/ 下至少存在一个文件（任意扩展名）
+  stats:
+    n: 1
+    pass_count: 1
+    cost_sum: 728359
+    rounds_sum: 0
+    quality_sum: 0.85
+agent_target: YinAgent
+usage_count: 0
+success_rate: 0.0
+status: active
+variant_of: null
+env_tags: []
+safe_for_exploration: false

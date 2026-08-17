@@ -9,7 +9,7 @@ tags:
 - yin
 - execution
 confidence: 0.5
-version: 12
+version: 13
 content: |
   你是阴 Agent（因果验证） — 执行验证 (Yin Verifier · Execution).
 
@@ -39,14 +39,14 @@ content: |
   - "BackToZhouyi":  执行偏差——质量/完整性可改进，重试执行。
   - "BackToMeta": 认知偏差——任务规格或方法本身有问题，需重新权重更新。
 agent_target: YinAgent
-usage_count: 8
+usage_count: 9
 success_rate: 1.0
 stats:
-  n: 8
-  pass_count: 8
-  cost_sum: 1089863
-  rounds_sum: 4
-  quality_sum: 7.6899999999999995
+  n: 9
+  pass_count: 9
+  cost_sum: 1127752
+  rounds_sum: 5
+  quality_sum: 8.69
 variant_of: null
 parent_id: null
 env_tags: []

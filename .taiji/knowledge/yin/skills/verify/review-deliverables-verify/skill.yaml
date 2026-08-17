@@ -1,0 +1,41 @@
+type: skill
+id: review-deliverables-verify
+name: 审查交付物一致性验证
+summary: 机械判定审查交付物存在且引用一致
+description: |
+  审查并优化类任务收尾时调用（对应迹拓扑中 file-exists / reference-resolves / schema-valid / trace-consistency 等 verify 边）。输入审查报告路径与期望引用， 机械判定：报告存在、YAML front matter 合法且含 task/result/status、 status 为 complete、output_refs 逐一可解析；输出 passed 布尔与逐项 checks 明细。 纯标准库实现：不写文件、不触网、不调 LLM，30s 内必然返回，可独立执行 （stdin JSON → stdout JSON）。
+tags:
+- verify
+- deliverable
+- consistency
+- review
+examples:
+- 验证审查报告 deliverables/review-B.md 与其 output_refs 是否齐备一致
+- 审查并优化类任务收尾阴验证：报告存在、front matter 合法、引用可解析
+input_modes:
+- json
+output_modes:
+- json
+category: verify
+dual: write
+implementations:
+- kind: python
+  target: skill.py
+  params: {}
+  severity: hard
+  pass_condition: |
+    输出 passed 为 true 且 detail 说明全部判据通过（报告存在、front matter 合法、 status 匹配、output_refs 全部可解析）；任一判据不满足则 passed 为 false 并列出失败项。
+agent_target: YinAgent
+confidence: 0.8
+version: 1
+status: active
+stats:
+  n: 0
+  pass_count: 0
+  cost_sum: 0
+  rounds_sum: 0
+  quality_sum: 0.0
+env_tags: []
+safe_for_exploration: false
+parent_id: null
+variant_of: null

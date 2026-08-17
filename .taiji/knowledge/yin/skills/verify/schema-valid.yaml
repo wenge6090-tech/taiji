@@ -1,0 +1,37 @@
+type: verification
+layer: 0
+id: schema-valid
+name: 任务册合法
+description: meta.json 必须存在且字段完整（runner 写入，保底防线）。
+tags:
+- general
+- seed
+confidence: 0.8
+version: 15
+content: meta.json 必须存在且字段完整（runner 写入，保底防线）。
+checks:
+- id: schema-valid#0
+  kind: schema_valid
+  target: meta.json
+  params:
+    format: json
+    required_fields:
+    - id
+    - description
+    - depth
+    - status
+  severity: hard
+  pass_condition: meta.json 必须可解析且包含 id/description/depth/status 字段
+  stats:
+    n: 1
+    pass_count: 1
+    cost_sum: 728359
+    rounds_sum: 0
+    quality_sum: 0.85
+agent_target: YinAgent
+usage_count: 0
+success_rate: 0.0
+status: active
+variant_of: null
+env_tags: []
+safe_for_exploration: false

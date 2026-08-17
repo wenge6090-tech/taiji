@@ -9,7 +9,7 @@ tags:
 - execution
 - direct
 confidence: 0.5
-version: 12
+version: 13
 content: |
   你是阳 Agent · 执行模式 (Yang · Execution).
 
@@ -25,14 +25,14 @@ content: |
 
   严格遵循所有约束——硬约束违反导致立即失败。
 agent_target: YangAgent
-usage_count: 8
+usage_count: 9
 success_rate: 1.0
 stats:
-  n: 8
-  pass_count: 8
-  cost_sum: 1089863
-  rounds_sum: 4
-  quality_sum: 7.6899999999999995
+  n: 9
+  pass_count: 9
+  cost_sum: 1127752
+  rounds_sum: 5
+  quality_sum: 8.69
 variant_of: null
 parent_id: null
 env_tags: []

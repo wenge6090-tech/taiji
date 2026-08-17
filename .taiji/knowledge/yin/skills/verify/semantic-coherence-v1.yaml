@@ -1,0 +1,33 @@
+type: verification
+layer: 0
+id: semantic-coherence-v1
+name: 语义一致性裁决（strict 变体）
+description: 综合产出与 deliverables 文件内容必须一致，不得虚构产物（LLM 裁决项）。
+tags:
+- general
+- seed
+confidence: 0.5599999999999999
+version: 14
+content: 综合产出与 deliverables 文件内容必须一致，不得虚构产物（LLM 裁决项）。
+checks:
+- id: semantic-coherence#0@semantic-coherence-v1
+  kind: llm_judgement
+  target: deliverables
+  params:
+    strictness: strict
+  severity: hard
+  pass_condition: 综合报告/任务输出必须与 deliverables/ 文件内容一致；引用的每个产物必须真实存在
+  stats:
+    n: 0
+    pass_count: 0
+    cost_sum: 0
+    rounds_sum: 0
+    quality_sum: 0.0
+agent_target: YinAgent
+usage_count: 0
+success_rate: 0.0
+status: pruned
+variant_of: semantic-coherence
+env_tags:
+- flash
+safe_for_exploration: false

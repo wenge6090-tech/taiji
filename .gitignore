@@ -13,3 +13,16 @@
 # 冒烟测试/任务运行产物
 /deliverables/
 /.taiji/pending/
+
+# 归藏版本快照（GitBackend 的 .history，不该被外层 git 跟踪）
+/.taiji/knowledge/.history/
+
+# 迹拓扑（manifold 是运行时深层压缩产物，非仓库晶体资产）
+/.taiji/knowledge/manifold/
+
+# 运行时日志与工具调用迹
+/.taiji/logs/
+/tool_calls.jsonl
+
+# 外部参考资料（HSF-HD PDF 等，非本仓库资产）
+/dos/

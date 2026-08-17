@@ -1,0 +1,40 @@
+type: skill
+id: check-file-exists
+name: 文件存在性检查
+summary: 接收文件路径参数，机械判定文件是否存在
+description: |
+  接收一个文件路径参数（path/file/input 键），机械检查目标文件是否存在， 返回 passed 布尔判定与详情。适用于验证交付物是否落盘、路径引用是否有效、 编译产物是否就位等确定性存在性场景。不调 LLM，30s 内确定性完成。
+tags:
+- file
+- check
+- exec
+- compile-support
+examples:
+- 检查 deliverables/check_file.py 是否存在
+- 验证交付物是否已写入 deliverables/ 目录
+input_modes:
+- json
+output_modes:
+- text
+category: verify
+dual: write
+implementations:
+- kind: python
+  target: skill.py
+  params: {}
+  severity: soft
+  pass_condition: 脚本以 stdin 传入 JSON 对象（含 path/file/input 键），stdout 返回 JSON 含 passed 布尔值，passed=true 当且仅当目标文件存在
+agent_target: YinAgent
+confidence: 0.9
+version: 9
+status: active
+stats:
+  n: 8
+  pass_count: 0
+  cost_sum: 20565307
+  rounds_sum: 3
+  quality_sum: 7.29
+env_tags: []
+safe_for_exploration: false
+parent_id: null
+variant_of: null

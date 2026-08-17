@@ -1,0 +1,39 @@
+type: verification
+layer: 0
+id: trace-consistency
+name: 断言证据链
+description: '产出中的 [证据: 工具名] 引用必须对应真实工具调用记录。'
+tags:
+- general
+- seed
+confidence: 0.7
+version: 15
+content: '产出中的 [证据: 工具名] 引用必须对应真实工具调用记录。'
+checks:
+- id: trace-consistency#0
+  kind: trace_consistency
+  target: deliverables/*.md
+  params:
+    allowed_tools:
+    - webfetch
+    - search
+    - read
+    - bash
+    evidence_pattern: '[证据: {tool}]'
+    speculation_marker: (推测)
+    trace_glob: trace.jsonl
+  severity: soft
+  pass_condition: '产出中每个 [证据: 工具名] 引用必须在 trace.jsonl 的 tool_call::* 记录中存在'
+  stats:
+    n: 1
+    pass_count: 1
+    cost_sum: 728359
+    rounds_sum: 0
+    quality_sum: 0.85
+agent_target: YinAgent
+usage_count: 0
+success_rate: 0.0
+status: active
+variant_of: null
+env_tags: []
+safe_for_exploration: false
