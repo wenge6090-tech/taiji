@@ -39,6 +39,13 @@ export default function App() {
   const [showGuizang, setShowGuizang] = useState(false);
   const [showOntology, setShowOntology] = useState(false);
 
+  // 深链：?view=guizang|ontology 自动打开对应视图（展示/分享用）
+  useEffect(() => {
+    const view = new URLSearchParams(window.location.search).get("view");
+    if (view === "guizang") setShowGuizang(true);
+    if (view === "ontology") setShowOntology(true);
+  }, []);
+
   // 启动时拉取根任务列表,默认选中最新任务
   useEffect(() => {
     wsClient
