@@ -1,0 +1,159 @@
+# taiji 本体词汇表（§6.6 三层之「词汇表」）——人工种子。
+# 语义类型：资产 tags 复用为类型引用；元实体链接输出 objects 对齐此词表。
+# source 默认 human（省略即 human）；parent 缺省 = 顶层。
+
+types:
+  # ── 根0：任务模式（模式轴，对齐现有 prompt tags）────
+  # asset_type_map 扫资产 tags 匹配本词表；4 个 prompt 的 tags 含
+  # orchestration/execution/verify/converge（§23 契约），必须先有这些 id
+  # 才能把 prompts 映射为语义类型，激活共现/依赖挖掘。
+  - id: orchestration
+    name: 编排
+    description: 复杂任务的递归拆解与子任务综合
+  - id: execution
+    name: 执行
+    description: 原子任务的直接产出
+  - id: verify
+    name: 验证
+    description: 对产物做确定性/符号化校验
+  - id: converge
+    name: 收敛
+    description: 子任务结果的综合裁决
+
+  # ── 根1：代码动作（改变代码世界）────────────────────
+  - id: code-action
+    name: 代码动作
+    description: 改变代码/源码的任务根类型
+  - id: code-generation
+    name: 代码生成
+    description: 从需求产出新代码
+    parent: code-action
+  - id: code-fix
+    name: 缺陷修复
+    description: 修复已知 bug（corrective）
+    parent: code-action
+  - id: code-refactor
+    name: 重构
+    description: 不改外部行为改进结构（perfective）
+    parent: code-action
+  - id: code-adapt
+    name: 适应性修改
+    description: 适配环境/依赖变化（adaptive）
+    parent: code-action
+  - id: code-review
+    name: 代码审查
+    description: 检查代码质量与缺陷
+    parent: code-action
+  - id: code-test
+    name: 测试编写
+    description: 编写/修改测试用例
+    parent: code-action
+  - id: code-debug
+    name: 调试定位
+    description: 定位故障根因
+    parent: code-action
+  - id: code-style
+    name: 格式调整
+    description: 仅格式/风格改动
+    parent: code-action
+
+  # ── 根2：验证检查（阴面判据）────────────────────
+  - id: verification-check
+    name: 验证检查
+    description: 阴面机械判据根类型
+  - id: security-check
+    name: 安全合规检查
+    description: 验证产出不引入安全漏洞
+    parent: verification-check
+  - id: schema-valid
+    name: 结构校验
+    description: 文件存在且字段完整
+    parent: verification-check
+  - id: reference-check
+    name: 引用完整性
+    description: output_refs 全部解析为真实文件
+    parent: verification-check
+  - id: trace-check
+    name: 证据链一致性
+    description: 证据引用对应真实工具调用
+    parent: verification-check
+  - id: semantic-check
+    name: 语义一致性
+    description: 产出与文件内容一致不虚构
+    parent: verification-check
+  - id: mece-check
+    name: MECE完备性
+    description: 子任务互斥且汇总完备
+    parent: verification-check
+  - id: granularity-check
+    name: 粒度适中性
+    description: 无过度/欠拆解
+    parent: verification-check
+  - id: consistency-check
+    name: 跨一致性
+    description: 子任务结果无矛盾
+    parent: verification-check
+
+  # ── 根3：部署动作（§6.6 canonical）────────────────
+  - id: deploy-action
+    name: 部署动作
+    description: 把产物发布到运行环境
+  - id: env-config
+    name: 环境配置
+    description: 修改运行环境配置
+    parent: deploy-action
+  - id: dependency-management
+    name: 依赖管理
+    description: 增删改第三方依赖
+    parent: deploy-action
+  - id: release-publish
+    name: 发布上线
+    description: 发布到运行环境
+    parent: deploy-action
+  - id: secret-detection
+    name: 密钥检测
+    description: 检测硬编码密钥/令牌
+    parent: deploy-action
+
+  # ── 根4：数据动作（§6.6 canonical）────────────────
+  - id: data-action
+    name: 数据动作
+    description: 读写数据任务根类型
+  - id: data-mutation
+    name: 数据变更
+    description: 写/改数据（破坏性）
+    parent: data-action
+  - id: data-extraction
+    name: 数据抽取
+    description: 从源读数据
+    parent: data-action
+  - id: data-analysis
+    name: 数据分析
+    description: 对数据做统计/推理
+    parent: data-action
+  - id: data-validation
+    name: 数据校验
+    description: 校验数据正确性
+    parent: data-action
+
+  # ── 根5：文档动作 ──────────────────────────────
+  - id: doc-action
+    name: 文档动作
+    description: 生成/修改文档
+  - id: doc-generation
+    name: 文档生成
+    description: 生成新文档
+    parent: doc-action
+  - id: doc-update
+    name: 文档更新
+    description: 修改既有文档
+    parent: doc-action
+
+  # ── 根6：知识应答（短路类）────────────────────
+  - id: knowledge-action
+    name: 知识应答
+    description: 纯信息查询/解释（不改变世界）
+  - id: knowledge-query
+    name: 知识问答
+    description: 应答类任务，走短路出口
+    parent: knowledge-action

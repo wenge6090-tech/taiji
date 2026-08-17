@@ -239,7 +239,7 @@
 ## 23. 语义层视图（GetOntologyView，元的先验智能可视化）
 
 - **`OntologyView` 直接透传 ontology 类型（字段 snake_case），不另造 camelCase 视图层**：字段与磁盘 `types.yaml`/`relations.yaml`/`rules.yaml`/`cooccur.yaml`/`failures.yaml` 契约一致（`env_tags`/`check_kind`/`weak_dependency`），转换层只会引入字段名两套并存。前端 TS 类型注释标明「snake_case 透传」。
-- **种子词表是启动钥匙（鸡生蛋）**：`asset_type_map` 扫 assets tags 匹配 `types.yaml` 词表；词表空 → 映射空 → `abstract_to_types` 全跳过 → 无边/无规则 → `apply_ontology` 注入零先验。**种子必须对齐现有资产 tags 的实际值**（现有 4 个 prompt 的 tags 是 `orchestration`/`execution`/`verify`/`converge` 全称，非 SkillCategory 的 `orch`/`exec`）——乱种领域类型（如 `deploy-action`）会因无资产打该 tag 而映射仍空。当前种子 6 类型：4 动作（orchestration/execution/verify/converge，立即映射 4 prompt）+ 2 领域前瞻（code-safety/data-query，空映射）。
+- **种子词表是启动钥匙（鸡生蛋）**：`asset_type_map` 扫 assets tags 匹配 `types.yaml` 词表（路径 `knowledge/ontology/types.yaml`）；词表空 → 映射空 → `abstract_to_types` 全跳过 → 无边/无规则 → `apply_ontology` 注入零先验。**种子必须对齐现有资产 tags 的实际值**（现有 4 个 prompt 的 tags 是 `orchestration`/`execution`/`verify`/`converge` 全称，非 SkillCategory 的 `orch`/`exec`）——乱种领域类型（如 `deploy-action`）会因无资产打该 tag 而映射仍空。现状词表两根轴：模式轴（orchestration/execution/verify/converge，对齐 tags，立即映射 4 prompt）+ 领域轴 canonical 6 根（§6.6：code-action/verification-check/deploy-action/data-action/doc-action/knowledge-action 及子树，供未来语义标签）。**避坑：重写/扩展词表时不得删模式轴 4 id**（实测曾只剩 canonical 领域轴 → 映射全空 → §5.7 类型级软查询整个空转）。**根 `knowledge/types.yaml` 是遗留旧种子（代码不读，勿改勿引用）**。
 - **「无规则/无边」是常态非 bug**：挖掘门槛高——依赖边需共现 ≥ `ONTOLOGY_MIN_SAMPLES`(50) 且联合通过率 ≥0.8；约束规则需失败样本 ≥50 且失败率=1.0。可视化里规则/边为空是「先验未激活」，不是错误（状态分支回退纯 UCB，§5.7 红线 3）。
 - **`apply_ontology` 失败仅 warn（meta.rs 调用点），语义层是增强层**：本体读失败 = 归藏 I/O 硬错误上抛，但调用方 catch 后 warn 继续（增强层失败不阻断主循环）；「ontology 缺失/空 domain」是状态分支，非降级。
 
