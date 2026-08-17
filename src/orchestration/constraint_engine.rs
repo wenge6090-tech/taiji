@@ -309,7 +309,7 @@ pub async fn check_atomics(task_dir: &Path) -> (Vec<CheckResult>, bool) {
             params: serde_json::json!({
                 "evidence_pattern": "[证据: {tool}]",
                 "speculation_marker": "(推测)",
-                "allowed_tools": ["webfetch","search","read","bash"],
+                "allowed_tools": ["webfetch","search","read","bash","write"],
                 "trace_glob": "trace.jsonl",
             }),
             severity: CheckSeverity::Soft,
@@ -495,11 +495,20 @@ async fn check_reference_resolves(spec: &CheckSpec, task_dir: &Path) -> (bool, S
         Err(e) => return (false, format!("cannot read {:?}: {e}", path)),
     };
 
-    // 解析 YAML front matter（`---` 围栏）或纯 YAML。
-    let yaml_block = extract_front_matter(&content).unwrap_or(content.as_str());
+    // 解析 YAML front matter（`---` 围栏）；无围栏时取首个文档分隔符前的块（手写
+    // handoff 场景）。提取失败 → 判据不适用（普通任务成功路径无 output_refs 数据源），
+    // 跳过而非 FAIL——照单 FAIL 会把「产出正确但 handoff 非标准格式」的任务推进
+    // BackToZhouyi 死循环（实测：LLM 手写 handoff → reference-resolves Soft-FAIL
+    // → 语义裁决必 BackToZhouyi → 每轮重写同格式 → 永不过）。
+    let yaml_block = extract_first_yaml_block(&content).unwrap_or(content.as_str());
     let value: serde_yaml::Value = match serde_yaml::from_str(yaml_block) {
         Ok(v) => v,
-        Err(e) => return (false, format!("front matter YAML parse failed: {e}")),
+        Err(e) => {
+            return (
+                true,
+                format!("front matter not parseable — check skipped ({e})"),
+            )
+        }
     };
 
     let refs = value
@@ -513,7 +522,12 @@ async fn check_reference_resolves(spec: &CheckSpec, task_dir: &Path) -> (bool, S
         .unwrap_or_default();
 
     if refs.is_empty() {
-        return (false, format!("field '{field}' missing or empty in {:?}", path));
+        // 无 output_refs：判据不适用（普通任务成功路径程序不写权威 handoff，
+        // output_refs 仅编译任务/失败恢复路径存在）——跳过而非 FAIL。
+        return (
+            true,
+            "no output_refs in front matter — check skipped".into(),
+        );
     }
 
     let mut missing = Vec::new();
@@ -770,6 +784,18 @@ fn extract_front_matter(content: &str) -> Option<&str> {
     Some(rest[..end].trim())
 }
 
+/// front matter 缺失时回退到「首个 YAML 文档分隔符前」的块。
+/// 手写 handoff（无 `---` 围栏）若含 `---` 水平线，直接全文解析会触发
+/// serde_yaml「multiple documents」误导性报错——先截到第一处分隔符。
+fn extract_first_yaml_block(content: &str) -> Option<&str> {
+    if let Some(fm) = extract_front_matter(content) {
+        return Some(fm);
+    }
+    let trimmed = content.trim_start();
+    let pos = trimmed.find("\n---")?;
+    Some(trimmed[..pos].trim())
+}
+
 fn field_path_get<'a>(value: &'a serde_json::Value, path: &str) -> Option<&'a serde_json::Value> {
     let mut current = value;
     for segment in path.split('.') {
@@ -926,6 +952,144 @@ mod tests {
         let (results, hard_failed) = check_atomics(&dir).await;
         assert!(hard_failed, "空 task_dir 应触发 file-exists hard 失败");
         assert!(results.iter().any(|r| r.check_id == "file-exists#0" && !r.passed));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// V57 死循环修复 1：trace-consistency 白名单必须含 write——
+    /// `tool_call::write`（builtin skill 执行路径）是核心证据，白名单遗漏导致
+    /// 手写 [证据: write] 永远不可验证 → soft-FAIL → BackToZhouyi 死循环。
+    #[tokio::test]
+    async fn test_trace_consistency_verified_with_write_tool() {
+        let dir = std::env::temp_dir().join(format!(
+            "taiji-trace-write-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let deliverables = dir.join("deliverables");
+        tokio::fs::create_dir_all(&deliverables).await.unwrap();
+        // 产物必须是 .md（spec target 是 deliverables/*.md）才会被证据扫描覆盖。
+        tokio::fs::write(
+            deliverables.join("handoff.md"),
+            "# 交接\n[证据: write]",
+        )
+        .await
+        .unwrap();
+        // trace 含 write 工具调用（真实 hook 产生的 phase 命名）。
+        tokio::fs::write(
+            dir.join("trace.jsonl"),
+            serde_json::json!({"phase": "tool_call::write", "input": {"path": "deliverables/hello.txt"}, "output": {"status": "ok"}})
+                .to_string()
+                + "\n",
+        )
+        .await
+        .unwrap();
+        let spec = CheckSpec {
+            id: "trace-consistency#0".into(),
+            kind: CheckKind::TraceConsistency,
+            target: "deliverables/*.md".into(),
+            params: serde_json::json!({
+                "evidence_pattern": "[证据: {tool}]",
+                "speculation_marker": "(推测)",
+                "artifact_glob": "deliverables/*",
+                "allowed_tools": ["webfetch","search","read","bash","write"],
+                "trace_glob": "trace.jsonl",
+            }),
+            severity: CheckSeverity::Soft,
+            pass_condition: "".into(),
+            stats: CheckStats::default(),
+        };
+        let result = run_check(&spec, &dir).await;
+        assert!(
+            result.passed,
+            "write 证据应可验证，实际: {}",
+            result.detail
+        );
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// V57 死循环修复 2：reference-resolves 对「无 output_refs」状态分支跳过而非 FAIL——
+    /// 普通任务成功路径无权威 handoff（output_refs 仅编译/恢复路径存在），照单 FAIL = 死循环。
+    #[tokio::test]
+    async fn test_reference_resolves_skips_without_output_refs() {
+        let dir = std::env::temp_dir().join(format!(
+            "taiji-ref-skip-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&dir.join("deliverables")).await.unwrap();
+        // 手写 handoff：front matter 存在但无 output_refs。
+        tokio::fs::write(
+            dir.join("deliverables/handoff.md"),
+            "---\ntask: 写一个文件\nstatus: completed\n---\n# 正文\n",
+        )
+        .await
+        .unwrap();
+        let spec = CheckSpec {
+            id: "reference-resolves#0".into(),
+            kind: CheckKind::ReferenceResolves,
+            target: "deliverables/handoff.md".into(),
+            params: serde_json::json!({"field": "output_refs"}),
+            severity: CheckSeverity::Soft,
+            pass_condition: "".into(),
+            stats: CheckStats::default(),
+        };
+        let result = run_check(&spec, &dir).await;
+        assert!(
+            result.passed,
+            "无 output_refs 应跳过而非 FAIL，实际: {}",
+            result.detail
+        );
+        assert!(result.detail.contains("skip"));
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
+
+    /// reference-resolves 有 output_refs 时仍严格验证（编译任务契约 §26 保持）：
+    /// 引用存在 → passed；引用缺失 → FAIL。
+    #[tokio::test]
+    async fn test_reference_resolves_still_validates_output_refs() {
+        let dir = std::env::temp_dir().join(format!(
+            "taiji-ref-valid-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        tokio::fs::create_dir_all(&dir.join("deliverables")).await.unwrap();
+        tokio::fs::write(dir.join("deliverables/skill.yaml"), "x").await.unwrap();
+        // 有 output_refs：一个存在一个缺失。
+        tokio::fs::write(
+            dir.join("deliverables/handoff.md"),
+            "---\noutput_refs:\n  - deliverables/skill.yaml\n  - deliverables/ghost.txt\n---\n",
+        )
+        .await
+        .unwrap();
+        let spec = CheckSpec {
+            id: "reference-resolves#0".into(),
+            kind: CheckKind::ReferenceResolves,
+            target: "deliverables/handoff.md".into(),
+            params: serde_json::json!({"field": "output_refs"}),
+            severity: CheckSeverity::Soft,
+            pass_condition: "".into(),
+            stats: CheckStats::default(),
+        };
+        let result = run_check(&spec, &dir).await;
+        assert!(
+            !result.passed,
+            "output_refs 含缺失引用应 FAIL，实际: {}",
+            result.detail
+        );
+        assert!(result.detail.contains("ghost.txt"));
+        // 补齐缺失引用 → passed。
+        tokio::fs::write(dir.join("deliverables/ghost.txt"), "x").await.unwrap();
+        let result = run_check(&spec, &dir).await;
+        assert!(result.passed, "引用全部存在应通过: {}", result.detail);
         let _ = tokio::fs::remove_dir_all(&dir).await;
     }
 }

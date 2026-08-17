@@ -327,3 +327,11 @@
 
 - **当前**：`cargo test --lib` → **360 passed, 0 failed, 4 ignored**。
 - 变化链：V55 372 → 阶段一（V57）360（skill_engine 删除 + backprop/旧 yin 测试移除）→ +V51 decision_value 测试 361 → −V58 概率化测试（ontology_edge_p）360。
+
+## 30. V57 阴判断死循环修复（V60 真实任务实测）
+
+- **trace-consistency 白名单必须含全部执行工具**：`check_atomics` 的 allowed_tools 曾漏 `write` → `tool_call::write`（builtin skill 执行路径）证据永远不可验证 → soft-FAIL → 语义裁决必 BackToZhouyi → 死循环（普通任务 LLM 手写 [证据: write] 每轮重写同格式，永不过）。**改白名单要覆盖 builtin skill 全集（write/read/bash/search/webfetch），新增阳 builtin 时同步。**
+- **reference-resolves 对「无 output_refs」跳过而非 FAIL**：普通任务成功路径程序不写权威 handoff（write_handoff 仅在失败/恢复路径跑，output_refs 只存在于编译任务/失败恢复），LLM 手写 handoff 无 output_refs → 照单 FAIL = 死循环燃料。已改为「**有 output_refs 才验证**，字段缺失/不可解析 = passed + skip 说明」。编译任务契约（§26 模板强制 output_refs → 验证照常）保持。**禁止把 reference-resolves 当「handoff 必须存在」判据**——它是引用完整性判据，无引用可验 = 状态分支跳过。
+- **front matter 解析宽容**：手写 handoff 无 `---` 围栏时全文直解报 serde_yaml「multiple documents」误导性错误（§26 死循环的另一形态）→ `extract_first_yaml_block` 先截首个文档分隔符前。
+- **真实闭环基线**：`taiji run` 最小任务（write 产出）实测 Pass/confidence 1.0——4 判据（file-exists/schema-valid/reference-resolves-skip/trace-consistency-write 证据可验）+ LLM 兑底全过；pending 入队 + V59 实时录入（4 prompt usage_count +1）。
+- **测试基线**：`cargo test --lib` → **363 passed, 0 failed, 4 ignored**（+3：write 白名单回归 / output_refs 缺失跳过 / output_refs 严格验证保持）。
