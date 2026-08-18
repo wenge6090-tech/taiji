@@ -26,6 +26,28 @@ pub struct VerificationReport {
     pub confidence: f64,
     pub summary: String,
     pub constraint_violations: Vec<String>,
+    /// Hodge 三模态病理诊断（V65）——梯度/旋度/调和三维软信号。
+    /// 裁决保持二值（route），诊断输出三维（不进机械对碰，走路由指导 + 统计）。
+    #[serde(default)]
+    pub hodge: Option<HodgeDiagnosis>,
+}
+
+/// Hodge 三模态病理诊断（V65，信息几何第 34 章 Hodge 分解）。
+///
+/// 梯度 = 无旋流（逻辑/因果链连通）；旋度 = 无散流（记忆/冗余打转）；
+/// 调和 = 全局（跨域新连接/顿悟）。三维软信号——只指导路由与统计，
+/// 永不进机械对碰（律令层 Rust 宪法专属，V58 晶体二值不动）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct HodgeDiagnosis {
+    /// 梯度分量：逻辑连通率 [0,1]——引用图可达节点/总节点；低 = 因果链断裂。
+    pub gradient: f64,
+    /// 旋度分量：自相似度 [0,1]——句子 n-gram Jaccard 重叠均值；>0.8 = 打转。
+    pub curl: f64,
+    /// 调和分量：跨域新意 [0,1]——产出 vs 归藏资产重叠；低 + 梯度高 = 顿悟。
+    pub harmonic: f64,
+    /// 顿悟标记（梯度联合判定：低相似 + 高梯度）。
+    #[serde(default)]
+    pub novel: bool,
 }
 
 /// Output of YinAgent.converge().

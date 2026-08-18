@@ -40,10 +40,10 @@ impl ConstraintEngine {
     /// If tags contain `"code"`, additionally loads:
     ///   - `truth:code-safety`     (Hard) — no security regressions
     ///
-    /// V50 §5.7：`rules` 为连山本体挖掘的 type-level 约束规则（`rules.yaml`），
-    /// 映射为 TruthConstraint（元层 ∪ 挖掘规则；挖掘规则 id 前缀 `ontology:`）。
-    pub fn load_truths(task_type_tags: &[String], rules: &[OntologyRule]) -> Vec<TruthConstraint> {
-        let mut truths = Vec::with_capacity(4 + rules.len());
+    /// V62 分层：只产 Rust 宪法（元层 4 truth）。挖掘规则与人工条文已降经验层
+    /// （走 LLM 兑底措辞与先验注入），永不进此机械对碰路径。
+    pub fn load_truths(task_type_tags: &[String]) -> Vec<TruthConstraint> {
+        let mut truths = Vec::with_capacity(4);
 
         truths.push(TruthConstraint::hard(
             "truth:no-fabrication",
@@ -69,29 +69,6 @@ impl ConstraintEngine {
                 "代码安全",
                 "Code changes must not introduce security vulnerabilities",
             ));
-        }
-
-        // V50 §5.7：挖掘规则 → TruthConstraint（require/forbid 清单，阴机械执行）。
-        for r in rules {
-            let severity = match r.severity {
-                CheckSeverity::Hard => ConstraintSeverity::Hard,
-                CheckSeverity::Soft => ConstraintSeverity::Soft,
-            };
-            let mut desc = format!("when={:?}", r.when);
-            if !r.require.is_empty() {
-                desc.push_str(&format!(" require=[{}]", r.require.join(",")));
-            }
-            if !r.forbid.is_empty() {
-                desc.push_str(&format!(" forbid=[{}]", r.forbid.join(",")));
-            }
-            truths.push(TruthConstraint {
-                id: format!("ontology:{}", r.id),
-                name: r.id.clone(),
-                description: desc,
-                severity,
-                justification: Some("连山本体挖掘（§5.7）".into()),
-                status: TruthStatus::Active,
-            });
         }
 
         tracing::debug!(
@@ -550,6 +527,169 @@ async fn check_reference_resolves(spec: &CheckSpec, task_dir: &Path) -> (bool, S
     }
 }
 
+// ────────────────────────────────────────────────────────────────
+// Hodge 三模态病理诊断（V65，信息几何第 34 章 Hodge 分解）
+// ────────────────────────────────────────────────────────────────
+
+/// 旋度判打转阈值（V65 定论：极端值才判打转，防误杀正常详述）。
+pub const HODGE_CURL_SPIN_THRESHOLD: f64 = 0.8;
+/// 调和判新意阈值：与归藏资产重叠低于此值 = 跨域新意。
+pub const HODGE_NOVEL_OVERLAP_THRESHOLD: f64 = 0.5;
+/// 调和联合判定的梯度门槛：只有逻辑自洽（梯度高）才认顿悟。
+pub const HODGE_NOVEL_GRADIENT_THRESHOLD: f64 = 0.8;
+
+/// Hodge 三模态病理诊断（V65）——纯符号，零 LLM。
+///
+/// - **梯度**：引用图连通率 [0,1]——复用 reference-resolves 的 output_refs 解析，
+///   引用文件存在比例。无引用可验（handoff 缺失/无 output_refs）= 1.0（无断裂证据，
+///   §30 定论：无引用可验 = 状态分支跳过，不是 FAIL）。
+/// - **旋度**：句子 n-gram Jaccard 重叠均值 [0,1]——重复论证同一前提 = 打转。
+/// - **调和**：跨域新意 = 1 − 产出与归藏资产的 n-gram 重叠。**必须梯度联合**：
+///   低相似 + 高梯度 = 顿悟（novel）；低相似 + 低梯度 = 跑题（novel=false）。
+///
+/// 诊断永远不进机械对碰（律令层 Rust 宪法专属，V58 晶体二值不动）——
+/// 三维软信号只指导路由（zhouyi）与统计。
+pub async fn hodge_diagnose(
+    task_dir: &Path,
+    output: &str,
+    assets_text: &[String],
+) -> crate::types::verification::HodgeDiagnosis {
+    let gradient = reference_connectivity(task_dir).await;
+    let curl = self_similarity(output);
+    let overlap = cross_overlap(output, assets_text);
+    let harmonic = 1.0 - overlap.min(1.0);
+    let novel = harmonic > HODGE_NOVEL_OVERLAP_THRESHOLD && gradient > HODGE_NOVEL_GRADIENT_THRESHOLD;
+    crate::types::verification::HodgeDiagnosis {
+        gradient,
+        curl,
+        harmonic,
+        novel,
+    }
+}
+
+/// 梯度分量：引用图连通率（复用 reference-resolves 解析：handoff.md output_refs）。
+async fn reference_connectivity(task_dir: &Path) -> f64 {
+    let handoff = task_dir.join("deliverables").join("handoff.md");
+    let content = match fs::read_to_string(&handoff).await {
+        Ok(c) => c,
+        Err(_) => return 1.0, // 无 handoff = 无引用可验 = 无断裂证据
+    };
+    let yaml_block = extract_first_yaml_block(&content).unwrap_or(content.as_str());
+    let value: serde_yaml::Value = match serde_yaml::from_str(yaml_block) {
+        Ok(v) => v,
+        Err(_) => return 1.0, // front matter 不可解析 = 跳过
+    };
+    let refs: Vec<String> = value
+        .get("output_refs")
+        .and_then(|v| v.as_sequence())
+        .map(|seq| {
+            seq.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default();
+    if refs.is_empty() {
+        return 1.0; // 无 output_refs = 状态分支跳过（§30）
+    }
+    let mut resolved = 0usize;
+    for r in &refs {
+        let path = if Path::new(r).is_absolute() {
+            Path::new(r).to_path_buf()
+        } else {
+            task_dir.join(r)
+        };
+        if fs::try_exists(&path).await.unwrap_or(false) {
+            resolved += 1;
+        }
+    }
+    resolved as f64 / refs.len() as f64
+}
+
+/// 句子切分（换行 / 中文标点 / 英文句末）。
+fn split_sentences(text: &str) -> Vec<&str> {
+    text.split(|c: char| {
+        matches!(c, '\n' | '\r' | '。' | '！' | '？' | '；' | '.' | '!' | '?' | ';')
+    })
+    .map(str::trim)
+    .filter(|s| !s.is_empty())
+    .collect()
+}
+
+/// 字符 n-gram 集合（n=2，中文/英文通用，零分词依赖）。
+fn char_ngrams(text: &str, n: usize) -> std::collections::HashSet<String> {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() < n {
+        return [text.to_string()].into_iter().collect();
+    }
+    chars
+        .windows(n)
+        .map(|w| w.iter().collect::<String>())
+        .collect()
+}
+
+/// Jaccard 相似度（空集/交集空 → 0）。
+fn jaccard(a: &std::collections::HashSet<String>, b: &std::collections::HashSet<String>) -> f64 {
+    if a.is_empty() && b.is_empty() {
+        return 0.0;
+    }
+    let inter = a.intersection(b).count();
+    let union = a.union(b).count();
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
+/// 旋度分量：句子级自相似度（两两 Jaccard 平均；单句/空文 → 0）。
+fn self_similarity(output: &str) -> f64 {
+    let sentences = split_sentences(output);
+    if sentences.len() < 2 {
+        return 0.0;
+    }
+    let grams: Vec<_> = sentences.iter().map(|s| char_ngrams(s, 2)).collect();
+    let mut total = 0.0;
+    let mut pairs = 0usize;
+    for i in 0..grams.len() {
+        for j in (i + 1)..grams.len() {
+            total += jaccard(&grams[i], &grams[j]);
+            pairs += 1;
+        }
+    }
+    if pairs == 0 {
+        0.0
+    } else {
+        total / pairs as f64
+    }
+}
+
+/// 调和分量：产出与资产文本的 n-gram 重叠（资产为空 → 0 重叠 = 全盘新意）。
+fn cross_overlap(output: &str, assets_text: &[String]) -> f64 {
+    if assets_text.is_empty() {
+        return 0.0;
+    }
+    let out_grams = char_ngrams(output, 2);
+    let mut inter = 0usize;
+    let mut union = out_grams.len();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for asset in assets_text {
+        for g in char_ngrams(asset, 2) {
+            if seen.insert(g.clone()) {
+                if out_grams.contains(&g) {
+                    inter += 1;
+                } else {
+                    union += 1;
+                }
+            }
+        }
+    }
+    if union == 0 {
+        0.0
+    } else {
+        inter as f64 / union as f64
+    }
+}
+
 async fn check_trace_consistency(spec: &CheckSpec, task_dir: &Path) -> (bool, String) {
     let trace_glob = spec
         .params
@@ -826,7 +966,7 @@ mod tests {
     #[test]
     fn test_load_truths_default() {
         let tags: Vec<String> = Vec::new();
-        let truths = ConstraintEngine::load_truths(&tags, &[]);
+        let truths = ConstraintEngine::load_truths(&tags);
         assert_eq!(truths.len(), 3);
         assert!(truths.iter().any(|t| t.id == "truth:no-fabrication"));
         assert!(truths.iter().any(|t| t.id == "truth:evidence-based"));
@@ -836,7 +976,7 @@ mod tests {
     #[test]
     fn test_load_truths_with_code_tag() {
         let tags = vec!["code".into()];
-        let truths = ConstraintEngine::load_truths(&tags, &[]);
+        let truths = ConstraintEngine::load_truths(&tags);
         assert_eq!(truths.len(), 4);
         assert!(truths.iter().any(|t| t.id == "truth:code-safety"));
     }
@@ -844,26 +984,17 @@ mod tests {
     #[test]
     fn test_load_truths_code_tag_case_insensitive() {
         let tags = vec!["CODE".into()];
-        let truths = ConstraintEngine::load_truths(&tags, &[]);
+        let truths = ConstraintEngine::load_truths(&tags);
         assert_eq!(truths.len(), 4);
     }
 
-    /// V50 §5.7：挖掘规则 → TruthConstraint（元层 ∪ rules）。
+    /// V62 分层：load_truths 永不消费挖掘规则/人工条文（只 Rust 宪法）。
     #[test]
-    fn test_load_truths_with_ontology_rules() {
-        use crate::types::ontology::{OntologyRule, RuleCondition};
-        use crate::types::verification::CheckSeverity;
+    fn test_load_truths_never_consumes_ontology_rules() {
         let tags: Vec<String> = vec![];
-        let rules = vec![OntologyRule {
-            id: "guard-command-succeeds-prod".into(),
-            when: RuleCondition { domain: None, env: Some("prod".into()), action: None },
-            require: vec!["check:command_succeeds".into()],
-            forbid: vec![],
-            severity: CheckSeverity::Hard,
-        }];
-        let truths = ConstraintEngine::load_truths(&tags, &rules);
-        assert_eq!(truths.len(), 4); // 3 元层 + 1 挖掘规则
-        assert!(truths.iter().any(|t| t.id == "ontology:guard-command-succeeds-prod"));
+        let truths = ConstraintEngine::load_truths(&tags);
+        assert_eq!(truths.len(), 3); // 只 3 元层 truth，无 ontology: 前缀
+        assert!(!truths.iter().any(|t| t.id.starts_with("ontology:")));
     }
 
     #[test]
@@ -876,6 +1007,78 @@ mod tests {
         let result =
             ConstraintEngine::check_yin_output("", &[], &constraints);
         assert!(!result.passed);
+    }
+
+    // ── V65 Hodge 三模态诊断 ──
+
+    #[tokio::test]
+    async fn hodge_gradient_detects_broken_references() {
+        use std::fs;
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let dl = dir.path().join("deliverables");
+        fs::create_dir_all(&dl).unwrap();
+        // 引用 2 个文件，只存在 1 个 → gradient = 0.5
+        fs::write(dl.join("exists.md"), "x").unwrap();
+        fs::write(
+            dl.join("handoff.md"),
+            "---\noutput_refs:\n  - deliverables/exists.md\n  - deliverables/missing.md\n---\n",
+        )
+        .unwrap();
+        let d = hodge_diagnose(dir.path(), "output", &[]).await;
+        assert!((d.gradient - 0.5).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn hodge_gradient_skips_without_handoff() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let d = hodge_diagnose(dir.path(), "output", &[]).await;
+        assert_eq!(d.gradient, 1.0, "无 handoff = 无断裂证据 = 跳过");
+    }
+
+    #[test]
+    fn hodge_curl_detects_repetition() {
+        // 同一句话重复多遍 → 自相似度极高
+        let repetitive = "写一个文件。\n写一个文件。\n写一个文件。\n写一个文件。";
+        let diverse = "分析需求。\n实现功能。\n运行测试。\n修复缺陷。";
+        let d_rep = hodge_diagnose_parts(repetitive, &[]);
+        let d_div = hodge_diagnose_parts(diverse, &[]);
+        assert!(d_rep.curl > 0.8, "重复文本 curl={}", d_rep.curl);
+        assert!(d_rep.curl > d_div.curl, "重复 > 多样");
+    }
+
+    #[test]
+    fn hodge_novel_joint_condition() {
+        // 产出与资产完全不重叠 + 梯度高（无引用可验 → 1.0）→ novel
+        let d = hodge_diagnose_parts("全新的产出内容", &["部署安全审查清单".to_string()]);
+        assert!(d.harmonic > HODGE_NOVEL_OVERLAP_THRESHOLD);
+        assert!(d.novel, "低相似 + 高梯度 = 顿悟");
+
+        // 产出与资产高度重叠 → 非 novel
+        let d2 = hodge_diagnose_parts(
+            "部署安全审查清单部署安全审查",
+            &["部署安全审查清单".to_string()],
+        );
+        assert!(!d2.novel, "高重叠 = 常规产出");
+    }
+
+    /// 同步测试辅助：梯度按「无 handoff = 1.0」固定，只测旋度/调和。
+    fn hodge_diagnose_parts(
+        output: &str,
+        assets_text: &[String],
+    ) -> crate::types::verification::HodgeDiagnosis {
+        let curl = self_similarity(output);
+        let overlap = cross_overlap(output, assets_text);
+        let harmonic = 1.0 - overlap.min(1.0);
+        let novel =
+            harmonic > HODGE_NOVEL_OVERLAP_THRESHOLD && 1.0 > HODGE_NOVEL_GRADIENT_THRESHOLD;
+        crate::types::verification::HodgeDiagnosis {
+            gradient: 1.0,
+            curl,
+            harmonic,
+            novel,
+        }
     }
 
     #[test]

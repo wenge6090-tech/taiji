@@ -495,22 +495,46 @@ impl ZhouyiCycle {
             resume_phase = None;
 
             // ── Phase 4: Route decision ──
-            match report.route {
+            // V65 Hodge 诊断路由（软信号增强，不覆盖原子裁决——硬失败路由不可翻案）：
+            // 旋度高（自相似 >0.8 = 阳在错误粒度打转）→ 升级 BackToMeta（重判编排/粒度）；
+            // novel（调和高 + 梯度高 = 顿悟）→ PASS 加权标记（统计侧，不阻断）。
+            let effective_route = match (&report.route, &report.hodge) {
+                (
+                    VerificationRoute::BackToZhouyi,
+                    Some(h),
+                ) if h.curl >= crate::orchestration::constraint_engine::HODGE_CURL_SPIN_THRESHOLD =>
+                {
+                    tracing::warn!(
+                        task_id = %engine_ctx.task_id,
+                        curl = h.curl,
+                        "Zhouyi route — Hodge curl spin detected, escalate BackToZhouyi → BackToMeta"
+                    );
+                    VerificationRoute::BackToMeta
+                }
+                (route, _) => route.clone(),
+            };
+            match effective_route {
                 VerificationRoute::Pass => {
                     tracing::info!(
                         task_id = %engine_ctx.task_id,
                         round = engine_ctx.round,
                         cycle = engine_ctx.cycle,
+                        hodge = ?report.hodge,
                         "Zhouyi cycle — PASS"
                     );
 
                     // Broadcast route decision + consume pending review.
+                    let novel = report.hodge.as_ref().is_some_and(|h| h.novel);
                     event_bus::emit_event(TaskEvent::ZhouyiRouteDecision {
                         task_id: engine_ctx.task_id.clone(),
                         route: "PASS".into(),
                         cycle: engine_ctx.cycle,
                         round: engine_ctx.round,
-                        verdict: report.summary.clone(),
+                        verdict: if novel {
+                            format!("[novel] {}", report.summary)
+                        } else {
+                            report.summary.clone()
+                        },
                     });
                     let _ = std::fs::remove_file(engine_ctx.task_dir.join("review.json"));
 

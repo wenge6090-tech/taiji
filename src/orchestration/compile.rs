@@ -4,14 +4,15 @@
 //! 阴符号复跑验证），非独立 SkillCompiler 模块（§6.0 定论）。
 //!
 //! 流程：
-//! 1. 连山拓扑产出后单写者入队 `compile/{root_task}.json`（与 pending/ 分离，
-//!    payload 引用 `manifold/{root_task}.yaml`）；
+//! 1. 连山压缩后单写者入队 `compile/{root_task}.json`（与 pending/ 分离，
+//!    payload 携带 `task_dir` 引用原任务递归分解树——V68 蓝图 = 树）；
 //! 2. 编译执行器在**空闲窗口**（pending 空 + `compile_enabled` 开）消费队列：
-//!    读拓扑 → 注入「标准 skill 编写规范」模板 → RecursiveRunner Execution 模式
-//!    执行 → 解析 `deliverables/skill.yaml` → `save_skill`（dual 校验 + git commit）；
+//!    读树摘要 + 物化根级产出 → 注入「标准 skill 编写规范」模板 → RecursiveRunner
+//!    Execution 模式执行 → 解析 `deliverables/skill.yaml` → `save_skill`（dual
+//!    校验 + git commit）；
 //! 3. 编译任务**不写 model_stats**（删除本任务 pending，只产 skill YAML，不污染
 //!    路由统计）；失败不产 skill，重试上限 3 次 → `.failed` + 失败日志（记录
-//!    manifold 引用 + 错误）。
+//!    原任务树引用 + 错误）。
 
 use crate::agents::factory::AgentFactory;
 use crate::infra::config::TaijiConfig;
@@ -19,8 +20,10 @@ use crate::infra::error::TaijiError;
 use crate::infra::knowledge::GuizangClient;
 use crate::infra::trace::save_json_atomic;
 use crate::orchestration::runner::RecursiveRunner;
+use crate::types::agent::{ExternalContext, ExternalFile};
 use crate::types::manifold::ManifoldTopology;
 use crate::types::verification::SkillAsset;
+use crate::orchestration::treeio::{TaskTreeView, summarize_tree};
 use std::path::Path;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
@@ -34,7 +37,11 @@ const IDLE_SLEEP_MS: u64 = 5_000;
 /// 入队编译任务（单写者 = Lianshan Consumer，§6.0 调度定稿）。
 ///
 /// 幂等：同 root_task 已存在（含 .failed）→ 跳过，不覆盖。
-pub async fn enqueue_compile_task(data_root: &Path, root_task: &str) -> Result<(), TaijiError> {
+pub async fn enqueue_compile_task(
+    data_root: &Path,
+    root_task: &str,
+    task_dir: &str,
+) -> Result<(), TaijiError> {
     let compile_dir = data_root.join("compile");
     tokio::fs::create_dir_all(&compile_dir).await?;
     let path = compile_dir.join(format!("{root_task}.json"));
@@ -43,12 +50,14 @@ pub async fn enqueue_compile_task(data_root: &Path, root_task: &str) -> Result<(
     }
     let payload = serde_json::json!({
         "root_task": root_task,
-        "manifold": format!("manifold/{root_task}.yaml"),
+        // V68：蓝图 = 原任务递归分解树（引用 task_dir，非 manifold 拓扑）——
+        // 树仍在磁盘，信息完整；编译 = 树→点收束。
+        "task_dir": task_dir,
         "retries": 0,
         "enqueued_at_ms": now_ms(),
     });
     save_json_atomic(&payload, &path)?;
-    tracing::info!(root_task = %root_task, "[compile] compile task queued");
+    tracing::info!(root_task = %root_task, task_dir = %task_dir, "[compile] compile task queued");
     Ok(())
 }
 
@@ -179,8 +188,13 @@ async fn run_compile_queue(
         };
         let retries = value.get("retries").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
 
-        // 构建编译任务描述：重编译变体（V53）| 成功迹拓扑（V50）
+        // 构建编译任务描述：重编译变体（V53）| 原任务递归树收束（V68）
+        // V68：蓝图 = 原任务递归分解树——树摘要骨架（纯符号拼接全树
+        // meta.description + deliverables 路径）+ 根级 deliverables/handoff
+        // 物化进 external_ctx（编译 LLM 用 read 读 context/files/ 获取实际内容）——
+        // 双注入：结构给骨架、内容给血肉。不再读拓扑（manifold 重定位为语义层链）。
         let recompile = value.get("recompile").and_then(|v| v.as_bool()).unwrap_or(false);
+        let mut external_ctx: Option<ExternalContext> = None;
         let desc = if recompile {
             let variant_of = value
                 .get("variant_of")
@@ -201,16 +215,44 @@ async fn run_compile_queue(
             };
             compile_recompile_description(&skill, root_task, failure_detail)
         } else {
-            let Some(topo) = guizang.load_topology(root_task).await? else {
-                final_fail(&path, &file_name, &format!("manifold/{root_task}.yaml missing"))
+            let Some(td) = value.get("task_dir").and_then(|v| v.as_str()) else {
+                final_fail(&path, &file_name, "compile queue file missing task_dir (V68)")
                     .await;
                 continue;
             };
-            compile_task_description(&topo)
+            let tree = match crate::orchestration::treeio::load_task_tree(Path::new(td)) {
+                Ok(t) => t,
+                Err(e) => {
+                    final_fail(
+                        &path,
+                        &file_name,
+                        &format!("failed to load task tree at {td}: {e}"),
+                    )
+                    .await;
+                    continue;
+                }
+            };
+            // 根级产出物/交接物物化（结构源 = 树摘要；内容源 = context/files/）
+            let sources = crate::orchestration::treeio::collect_root_sources(Path::new(td), 6000);
+            external_ctx = Some(ExternalContext {
+                files: sources
+                    .iter()
+                    .map(|(p, c)| ExternalFile {
+                        path: format!("context/files/{p}"),
+                        content: c.clone(),
+                    })
+                    .collect(),
+                tool_results: vec![],
+                session_summary: None,
+            });
+            compile_task_description(&tree, &sources)
         };
 
-        // 执行编译任务 = 一次周易任务执行（阳 LLM 编程 + 阴符号复跑验证）
-        match runner.execute_with_context(&desc, None, None).await {
+        // 执行编译任务 = 一次周易任务执行（阳 LLM 编程 + 阴符号复跑验证）；
+        // V68：携带物化的原任务产出（external_ctx）——编译 LLM 直接读实际内容。
+        match runner
+            .execute_with_context(&desc, external_ctx, None)
+            .await {
             Ok(result) => {
                 let task_dir = data_root.join("tasks").join(&result.task_id);
                 // §6.0：编译不写 model_stats、不触发二次拓扑/编译——

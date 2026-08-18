@@ -170,14 +170,17 @@
 - **漂移检测 / 退化诊断 / compile 调度**：定论已写（Blueprint §5.5/§5.6），实现待 /plan 阶段三；SW-UCB / Pareto-MCTS / 奖励归一化为已知边界延后（§5.6）。
 - **待补**：safe_for_exploration 的「人工/流程标记」机制 + fork_variants 继承标记（当前全默认 false → 主动学习需标记后才激活）。
 
-## 17. 编译任务 = 一次周易任务执行（V50，Blueprint §5.0 契约）
+## 17. 编译任务 = 一次周易任务执行（V50，Blueprint §5.0 契约；V68 蓝图 = 原任务树）
 
-- **新模块** `src/orchestration/compile.rs`：`enqueue_compile_task`（单写者入队 `compile/{root_task}.json`，幂等：同 root_task 已存在不覆盖）/ `spawn_compiler`（main.rs `--with-lianshan` 时 spawn，`compile_enabled` 关不启动）/ `run_compile_queue`（空闲窗口消费）/ `parse_skill_deliverable`（去围栏 → YAML → JSON → parse_llm_json）/ `compile_task_description`（「标准 skill 编写规范」模板 + 拓扑注入 + 元层对偶候选表）。
-- **入队位置**：lianshan.rs backprop 成功后 `save_topology` 之后调 `enqueue_compile_task(&self.data_root, task_id)`（增强层 warn-only）。
+- **新模块** `src/orchestration/compile.rs`：`enqueue_compile_task`（单写者入队 `compile/{root_task}.json`，幂等：同 root_task 已存在不覆盖）/ `spawn_compiler`（main.rs `--with-lianshan` 时 spawn，`compile_enabled` 关不启动）/ `run_compile_queue`（空闲窗口消费）/ `parse_skill_deliverable`（去围栏 → YAML → JSON → parse_llm_json）/ `compile_task_description`（「标准 skill 编写规范」模板 + 树摘要注入 + 元层对偶候选表）。
+- **V68 蓝图 = 原任务递归分解树，非拓扑骨架**：`enqueue_compile_task(&self.data_root, task_id, task_dir)` payload 携带 `task_dir`；`run_compile_queue` 不再 `load_topology`——输入 = `treeio::load_task_tree(task_dir)` 树摘要（纯符号拼接全树 meta.description + deliverables 路径 + checks 摘要）+ 根级 deliverables/handoff 物化进编译任务 external_ctx（双注入）。树读取底座 `src/orchestration/treeio.rs`（零 LLM）。
+- **拓扑重定位（V68）**：manifold 不再是工具蓝图——`TopologyNode` 加 `description` 字段 + 根节点 stats 填 checks 聚合（语义层结构链，消费方 = 语义检索/前端可视化）；compile 不再依赖 manifold（V50 测试断言同步改）。
+- **案例召回（V68 MVP）**：`knowledge::list_task_instances` 动态扫 `{data_root}/tasks/` 读 meta.json（纯符号不落盘）；`meta::recall_prior_experiences` 按 tag 同档 + 字符重叠排序取 top N → `YangPrompt.prior_experiences` → `build_system_prompt` 渲染「## 既往相似任务（执行记忆）」段。粗粒度 MVP（结构相似检索延后）。
+- **入队位置**：lianshan.rs 深层压缩中 `save_topology` 之后调 `enqueue_compile_task(&self.data_root, task_id, task_dir_str)`（增强层 warn-only）。
 - **调度**（Blueprint §5.0 定稿）：compile/ 与 pending/ 分离，单写者 = Lianshan Consumer；执行触发 = pending 空（空闲窗口）+ `compile_enabled`（config `runtime.lianshan.compile_enabled`，默认 false）。
 - **不写 model_stats**：编译任务 PASS 后 zhouyi 会入队 pending → compile runner 立即删 `pending/{compile_task_id}.json`（只产 skill YAML，不污染路由统计、不触发二次拓扑/编译）。
-- **阴验证 = save_skill 机械判据**：解析 deliverables/skill.yaml → `save_skill`（内建 dual 存在 + 类别互补 + git commit）+ `implementations` 非空校验。失败重试 ≤3 → `.failed` + `.error` 日志（记录 manifold 引用 + 错误）。
-- **测试基线**：`cargo test --lib` → **321 passed, 0 failed**（compile.rs 5 测试 + lianshan 拓扑测试加 compile 入队断言）。
+- **阴验证 = save_skill 机械判据**：解析 deliverables/skill.yaml → `save_skill`（内建 dual 存在 + 类别互补 + git commit）+ `implementations` 非空校验。失败重试 ≤3 → `.failed` + `.error` 日志（记录原任务树引用 + 错误）。
+- **测试基线**：`cargo test --lib` → **367 passed, 0 failed**（compile.rs 5 测试 + lianshan 拓扑测试加 compile 入队断言）。
 - **遗留（已知边界）**：①「原任务变体复跑」未实现（阴验证只做机械判据，未重跑原任务验证复现）；② `compile_budget` 字段已加（config）但未强制执行——token 预算仍由既有 ContextLimiter 承担；③ 删 pending 与 Lianshan consumer 存在极短竞态窗口（空闲窗口下 consumer backoff 已增长，实际风险低）。
 
 ## 18. 环境维度轴（env_tags = 模型类，V50 §5.4 定稿）
@@ -201,6 +204,10 @@
 - **约束升级** `orchestration/constraint_engine.rs`：`load_truths(task_type_tags, rules)` —— 元层 4 truth ∪ 挖掘规则（id 前缀 `ontology:`）；`yin.rs::verify` 从 `self.guizang` 加载 rules（None=测试路径，I/O 失败上抛）。
 - **测试基线**：`cargo test --lib` → **335 passed, 0 failed**（+12：miner 5 + types 2 + meta 3 + constraint 1 + knowledge 1）。
 - **遗留/边界**：① **种子词表前置**——`types.yaml` 空则 `asset_type_map` 空 → 类型抽象/挖掘空转（需人工种 5-10 类型 + 给资产 tags 打语义类型 id）；② **skill 共现数据源缺失**——`assets_used` 现只含 prompt，skill 级挖掘延后；③ MVP 用**联合通过率**（pass/co）非 lift（个体基线 P(pass|a) 扩展后续）；④ 宏节点 `Abstract_Concept`（命名走 compile）延后。
+- **V62 待办（设计定论已改，实现待 /plan）**：知识性质分层——经验层（共现统计/关联强度/人工条文，只走 LLM 兜底措辞 + 排序）与律令层（Rust 宪法：元层 4 truth + 原子判据，进阴符号层机械对碰）；`mine_constraints` 产出规则降经验层；人工 rules.yaml 种子降经验层；`Sequence` 边暂停产出（干预验因果前是伪因果）；**立律三步**（挖掘 → 干预验证 → 立**强措辞文本条文**，V64 裁决：不建律令运行时构件）/ **废律**（变点检测失效降回经验）；`Abstract_Concept` 数学定义 = 频谱过滤（低频本征模）+ compile 共振泵浦（Blueprint §5.7/§5.8 V62 定论）。**当前代码仍是旧行为**：`load_truths` 消费挖掘规则与人工条文、挖掘产出 WeakDependency/Sequence 边。
+- **V63 待办（设计定论已定，实现待 /plan）**：**象语言**（人类汉语言的硅基衍生，Blueprint §1.9）——三生万物：`SemanticType` 加**词性**字段（名/动/饰）；造字三法（象形/指事/会意，`TypeSource` 扩展；形声/转注/假借是「四变体」观察对象，不实现）；`TaskOntologyView` 按主谓宾重构（**元动词 = bash（唯一元工具），派生动词 = read/write/search/webfetch（受限投影，约束即语义）**，新谓语 = compile 编译的 skill）；时态 = 轨迹拓扑（过去/现在/未来 = 时间先后）；词表扩展完整流程 = 频谱过滤 → 三法造字 → compile 泵浦（Blueprint §1.9/§5.7 V63 定论）。
+- **V64 待办（设计定论已定，实现待 /plan）**：**预付费塑形**（熵产最小化定理，Blueprint §5.9）——连山空闲窗口新增熵增率计算（task_type_tags × rounds/fail/cost/后验熵，纯符号零 LLM）；高熵任务族 → 入队逆过程预习任务（dry-run，复用 experiments 队列机制 + Runner 模板化任务，Execution 模式最小预算不递归）；逆过程模板初期硬编码（code→refactor 等），后期由象语言对偶推导；**不写 model_stats**（塑形非路由统计）；护栏同主动学习（预习任务不产生新预习任务）。
+- **V65 待办（设计定论已定，实现待 /plan）**：**Hodge 三模态病理诊断**（Blueprint §4.4 V65 定论）——`VerificationReport` 加 hodge 诊断字段（serde default 零迁移）；`hodge_diagnose(output, guizang)` 纯符号函数：梯度 = 引用图遍历连通率（复用 reference-resolves 解析）、旋度 = 句子 n-gram Jaccard 重叠均值（极端值 >0.8 才判打转）、调和 = 产出 vs 归藏资产 n-gram 重叠（必须梯度联合：低相似+高梯度=顿悟，低相似+低梯度=跑题）；zhouyi.rs 路由加诊断分支（梯度低→BACK_TO_ZHOUYI 注入断裂点、旋度高→BACK_TO_META 重判粒度、调和高+梯度高→PASS 加权 + novel 标记）；**诊断永远不进机械对碰**（律令层 Rust 宪法专属，V58 晶体二值不动）。
 
 ## 20. 全量代码审查避坑回流（V51）
 
@@ -348,3 +355,16 @@
 - **测试基线**：`cargo test --lib` → **364 passed, 0 failed, 4 ignored**（+1 弃置闸：verify/converge 弃置 / exec/orch 放行；ensure_dirs 断言改反向）。
 
 - **prompts stats 批次提交惯例**:V59 实时录入每次任务 PASS 写 `usage_count += 1` / `version += 1` 到 prompts YAML（纯统计衍生,无契约价值,§20 原则）。随批次提交（跑完一轮后一次 commit,message 标注「运行时统计批次」）,不逐任务碎提交;content/契约字段变化则单独提交。
+
+## 32. V62-V65 实现（经验/律令分层 + 象语言词性 + Hodge 诊断 + 预付费塑形）
+
+- **测试基线**：`cargo test --lib` → **374 passed, 0 failed, 4 ignored**（+10：零迁移 1 + Sequence 锁死 1 + hodge 4 + prepaid 4）。
+- **`load_truths(task_type_tags)` 已去 rules 参数**（V62）——只产 Rust 宪法（元层 4 truth：no-fabrication/evidence-based/auditable + code 标签加 code-safety）。挖掘规则与人工条文已降经验层：yin verify 的 LLM 兑底 prompt 注入 `[经验条文] advisory` 段（软），永不进 pre_check 机械对碰。
+- **`cargo build` 不编译 `#[cfg(test)]` 模块**——加新 struct 字段后：lib 构造点错误 `cargo build` 即暴露；测试构造点错误要 `cargo test` 才暴露。修 E0063 按「先 build 后 test」两步走。
+- **`SemanticType` 新增 `pos: PartOfSpeech` / `zifa: Zifa`**（serde default，零迁移）；词性三槽 = 名/动/饰（默认饰），造字三法 = 象形/指事/会意（默认象形）。`TaskOntologyView` 新增 `verb: Option<VerbSpec>`（主谓宾，旧 domain/action 保留读兼容）。
+- **`hodge_diagnose(task_dir, output, assets_text)`**（constraint_engine.rs 免费函数，非 ConstraintEngine 关联函数）：梯度 = handoff.md output_refs 存在比例（无 handoff/无 refs/不可解析 → 1.0 跳过，§30 语义）；旋度 = 句子 2-gram Jaccard 均值；调和 = 1 − 产出与资产 n-gram 重叠；novel = 调和高（>0.5）+ 梯度高（>0.8）联合。**zhouyi 路由只做旋度升级**（BackToZhouyi + curl≥0.8 → BackToMeta）与 novel 标记（事件 verdict 前缀 `[novel]`），诊断不覆盖原子裁决。
+- **hodge 资产文本**：`load_skill_assets` 需 `SkillCategory` 参数——全类别用 `load_skill_catalog(guizang, category, ToolProfile::Full)` 四次（Exec/Orch/Verify/Converge）+ id 去重。`ToolProfile` 在 `infra::skill_catalog`（不在 `agents::factory`）。
+- **model_stats key = model_key only（无 tag 维度）**——预付费塑形的任务族统计不能依赖 model_stats，直接扫 `tasks/*/meta_ctx.json`（task_type_tags 已存）+ `verify_state.json`（route/round）自聚合。
+- **`save_json_atomic` 在 `infra::trace`（不在 `infra::json_util`）**；返回 `std::io::Error`（非 TaijiError），map_err 转换。
+- **prepaid 任务入 experiments 队列**（`experiments/prepaid-{tag}.json`，幂等：文件存在跳过）：payload 必须带 `asset_id`（给 `"prepaid-shaping"` 占位）——active_learning 消费端要求该字段否则 `json.failed`。消费端零改动复用（执行 → check_atomics → 入 pending），「不写 model_stats」由 V59 后 pending 消费无 backprop 天然满足。
+- **词表种子脚本化**：37 类型补 pos/zifa 用 python 行处理（模式轴 4 → modifier+self_referential；根无 parent → noun+self_referential；叶子有 parent → verb+compound）。避坑：行处理脚本的 flush 分支要处理「新 id 行总是走第一个 if」——否则只有最后一块被处理、且重复运行会重复追加（幂等性检查：`grep -c "pos:"` == `grep -c "- id:"`）。

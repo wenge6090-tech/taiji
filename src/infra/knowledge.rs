@@ -2931,7 +2931,7 @@ content: 手写内容
     /// V50 §5.7：ontology 三层资产 round-trip + asset_type_map（种子词表 → 类型映射）。
     #[tokio::test]
     async fn test_ontology_assets_roundtrip_and_type_map() {
-        use crate::types::ontology::{OntologyEdgeKind, RuleCondition, TypeSource};
+        use crate::types::ontology::{OntologyEdgeKind, PartOfSpeech, RuleCondition, TypeSource, Zifa};
         use crate::types::verification::CheckSeverity;
 
         let dir = test_dir("ontology").await;
@@ -2946,6 +2946,8 @@ content: 手写内容
                     description: "验证产出不引入安全漏洞".into(),
                     parent: None,
                     source: TypeSource::Human,
+                    pos: PartOfSpeech::Modifier,
+                    zifa: Zifa::SelfReferential,
                 },
                 SemanticType {
                     id: "deploy-action".into(),
@@ -2953,6 +2955,8 @@ content: 手写内容
                     description: "发布到运行环境".into(),
                     parent: None,
                     source: TypeSource::Human,
+                    pos: PartOfSpeech::Verb,
+                    zifa: Zifa::Pictographic,
                 },
             ])
             .await

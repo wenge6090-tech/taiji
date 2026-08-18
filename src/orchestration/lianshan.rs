@@ -137,6 +137,20 @@ impl LianshanConsumer {
                         "[lianshan] fork_python_skills failed — idle window continues"
                     );
                 }
+                // V64 预付费塑形（熵产最小化）：空闲窗口识别高熵任务族 →
+                // 入队逆过程预习任务（dry-run）。幂等；失败仅 warn 不阻断。
+                if self.lianshan_config.active_learning_enabled {
+                    if let Err(e) = crate::orchestration::prepaid_shaping::run_prepaid_window(
+                        &self.data_root,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            error = %e,
+                            "[lianshan] prepaid shaping failed — idle window continues"
+                        );
+                    }
+                }
                 tracing::debug!(
                     "[Lianshan Consumer] no pending files, sleeping {} ms",
                     backoff_ms,

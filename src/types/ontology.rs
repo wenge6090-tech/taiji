@@ -28,6 +28,40 @@ pub struct SemanticType {
     /// 来源：人工种子 / 挖掘产出（未命名）/ 编译命名。
     #[serde(default = "default_source")]
     pub source: TypeSource,
+    /// 词性（象语言三槽：名/动/饰，V63）——名 = 实体对象（主/宾），
+    /// 动 = skills 使用方法（谓），饰 = 条件/环境/类别修饰（时态条件标记）。
+    #[serde(default)]
+    pub pos: PartOfSpeech,
+    /// 造字法（象语言三法，V63）——象形 = 直接命名世界对象；
+    /// 指事 = 系统自指元概念（模式轴/经验律令轴/时态）；会意 = 多类型组合新字。
+    #[serde(default)]
+    pub zifa: Zifa,
+}
+
+/// 词性三槽（V63 三生万物：名/动/饰——句法三槽与词性三槽同构）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum PartOfSpeech {
+    /// 名——实体对象（主语/宾语）。
+    Noun,
+    /// 动——skills 使用方法（谓语）。
+    Verb,
+    /// 饰——条件/环境/类别修饰（默认：旧类型多为类别标签）。
+    #[default]
+    Modifier,
+}
+
+/// 造字三法（V63；形声/转注/假借 = 人类语言的四变体，观察对象不实现）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Zifa {
+    /// 象形——直接命名世界对象。
+    #[default]
+    Pictographic,
+    /// 指事——系统自指元概念。
+    SelfReferential,
+    /// 会意——多类型组合新字（parent 树 = 会意痕迹）。
+    Compound,
 }
 
 fn default_source() -> TypeSource {
@@ -47,13 +81,14 @@ pub enum TypeSource {
 }
 
 /// 任务语义视图（resolve_entity 实体链接输出，合并进 Meta compose 调用）。
+/// V63 主谓宾：主 = 系统自身（隐含），谓 = verb（skills 使用方法），宾 = objects。
 #[derive(Debug, Clone, Serialize, Deserialize, Default, PartialEq)]
 pub struct TaskOntologyView {
     /// 领域：Security | Infra | Data | Finance | General。
     pub domain: String,
-    /// 动作：Create | Read | Update | Delete | Debug | Fix。
+    /// 动作：Create | Read | Update | Delete | Debug | Fix（V63 起由 verb 承载谓语，此字段读兼容）。
     pub action: String,
-    /// 涉及实体（AuthService / Database / Config ...）。
+    /// 涉及实体（AuthService / Database / Config ...）——宾语。
     #[serde(default)]
     pub objects: Vec<String>,
     /// 环境：Production | Staging | Dev（None = 无）。
@@ -62,6 +97,22 @@ pub struct TaskOntologyView {
     /// 是否安全/关键敏感任务。
     #[serde(default)]
     pub is_critical: bool,
+    /// 谓语（V63 主谓宾）——skills 使用方法：元动词 bash / 派生四工具
+    /// （read/write/search/webfetch，约束即语义）/ 新谓语 = compile 编译的 skill。
+    /// None = compose 未识别谓语（旧行为，读兼容）。
+    #[serde(default)]
+    pub verb: Option<VerbSpec>,
+}
+
+/// 谓语规格（V63）——谓 = skills 使用方法（工具或编译 skill）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct VerbSpec {
+    /// 内置工具名（bash/read/write/search/webfetch——元动词与派生动词）。
+    #[serde(default)]
+    pub tool: Option<String>,
+    /// 资产层编译 skill id（新谓语 = compile 编译的 skill）。
+    #[serde(default)]
+    pub skill: Option<String>,
 }
 
 /// 本体边类别（Forbid 留给 SafetyHook + 人工 rules.yaml，不挖掘——§5.7）。
@@ -157,11 +208,22 @@ mod tests {
                 description: "验证产出不引入安全漏洞".into(),
                 parent: None,
                 source: TypeSource::Human,
+                pos: PartOfSpeech::Modifier,
+                zifa: Zifa::SelfReferential,
             }],
         };
         let yaml = serde_yaml::to_string(&f).unwrap();
         let back: SemanticTypeFile = serde_yaml::from_str(&yaml).unwrap();
         assert_eq!(back.types[0].id, "security-check");
+    }
+
+    #[test]
+    fn semantic_type_zero_migration_defaults() {
+        // V63 零迁移：老 YAML（无 pos/zifa 字段）反序列化成功且取默认值。
+        let yaml = "id: legacy-type\nname: 旧类型\ndescription: 无词性字段\nparent: null\nsource: human\n";
+        let t: SemanticType = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(t.pos, PartOfSpeech::Modifier);
+        assert_eq!(t.zifa, Zifa::Pictographic);
     }
 
     #[test]

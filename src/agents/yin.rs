@@ -102,8 +102,9 @@ impl YinJudge {
     /// 因果验证（阴判断节点·verify）：半符号半 LLM。
     ///
     /// # Logic
-    /// 1. **符号层·逻辑层**：`rules.yaml` → `load_truths` + `check_yin_output`
+    /// 1. **符号层·逻辑层**：`load_truths`（只 Rust 宪法，V62）+ `check_yin_output`
     ///    约束预检。hard 违反 → `BackToMeta`（零 LLM）。
+    ///    挖掘规则/人工条文已降经验层（只进 LLM 兑底措辞，不机械对碰）。
     /// 2. **符号层·运行保障**：`check_atomics` 原子判据（无条件恒在）。
     ///    hard 失败 → `BackToZhouyi`（零 LLM）。
     /// 3. **LLM 层**：符号层通过 → 语义裁决兜底（无工具，纯文本）。
@@ -113,9 +114,8 @@ impl YinJudge {
         tool_results: &[String],
         meta_ctx: &MetaContext,
     ) -> Result<VerificationReport, TaijiError> {
-        // ── 符号层·逻辑层：约束预检（判断依据）──
-        let rules = self.guizang.load_rules().await?;
-        let constraints = ConstraintEngine::load_truths(&meta_ctx.task_type_tags, &rules);
+        // ── 符号层·逻辑层：约束预检（只 Rust 宪法，V62 分层）──
+        let constraints = ConstraintEngine::load_truths(&meta_ctx.task_type_tags);
         let pre_check = ConstraintEngine::check_yin_output(task_output, tool_results, &constraints);
 
         if !pre_check.passed {
@@ -147,6 +147,7 @@ impl YinJudge {
                         .iter()
                         .map(|v| v.reason.clone())
                         .collect(),
+                    hodge: None,
                 });
             }
         }
@@ -168,12 +169,65 @@ impl YinJudge {
                 confidence: 1.0,
                 summary: format!("Atomic invariant check failed: {}", failed.join("; ")),
                 constraint_violations: failed,
+                hodge: None,
             });
         }
 
         // ── LLM 层：语义裁决兜底 ──
-        self.llm_verify(task_output, tool_results, meta_ctx, &pre_check, &atomic_results)
+        let mut report = self
+            .llm_verify(task_output, tool_results, meta_ctx, &pre_check, &atomic_results)
+            .await?;
+
+        // ── V65 Hodge 三模态病理诊断（纯符号零 LLM，软信号）──
+        match self.hodge_assets_text().await {
+            Ok(assets_text) => {
+                report.hodge = Some(crate::orchestration::constraint_engine::hodge_diagnose(
+                    &self.engine_ctx.task_dir,
+                    task_output,
+                    &assets_text,
+                ).await);
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "YinJudge — hodge assets load failed, diagnosis skipped");
+            }
+        }
+        Ok(report)
+    }
+
+    /// V65：归藏资产文本（调和分量的相似度基准）——prompt 描述 + skill 摘要。
+    async fn hodge_assets_text(&self) -> Result<Vec<String>, TaijiError> {
+        let mut texts = Vec::new();
+        let prompts = self.guizang.load_all_prompts().await?;
+        for p in prompts {
+            texts.push(format!("{} {}", p.name, p.description));
+        }
+        let mut seen_skill_ids = std::collections::HashSet::new();
+        for category in [
+            crate::types::verification::SkillCategory::Exec,
+            crate::types::verification::SkillCategory::Orch,
+            crate::types::verification::SkillCategory::Verify,
+            crate::types::verification::SkillCategory::Converge,
+        ] {
+            match crate::infra::skill_catalog::load_skill_catalog(
+                &self.guizang,
+                category,
+                crate::infra::skill_catalog::ToolProfile::Full,
+            )
             .await
+            {
+                Ok(skills) => {
+                    for s in skills {
+                        if seen_skill_ids.insert(s.id.clone()) {
+                            texts.push(format!("{} {}", s.name, s.summary));
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "YinJudge — hodge skill catalog load failed for {category:?}");
+                }
+            }
+        }
+        Ok(texts)
     }
 
     /// LLM 语义裁决兜底（唯一 LLM 介入点，无工具）。
@@ -188,6 +242,22 @@ impl YinJudge {
         // 符号层·因果层：relations 因果先验（注入 prompt，不机械裁决）
         let relations = self.guizang.load_relations().await?;
         let causal_hints = ConstraintEngine::match_relations(&meta_ctx.ontology_objects, &relations);
+
+        // V62 经验层：rules.yaml 条文（挖掘/人工）只进兑底措辞，不机械对碰
+        let rules = self.guizang.load_rules().await?;
+        let empirical_rules: Vec<String> = rules
+            .iter()
+            .map(|r| {
+                let mut s = format!("[经验条文] {}", r.id);
+                if !r.require.is_empty() {
+                    s.push_str(&format!(" 通常需要: {}", r.require.join(",")));
+                }
+                if !r.forbid.is_empty() {
+                    s.push_str(&format!(" 通常避免: {}", r.forbid.join(",")));
+                }
+                s
+            })
+            .collect();
 
         // Soft violations 注入
         let soft_context: Vec<String> = pre_check
@@ -228,7 +298,7 @@ impl YinJudge {
             .build();
 
         let input = format!(
-            "Task output:\n{task_output}\n\nTool results:\n{results}\n\nSoft violations:\n{soft}\n\nCausal priors (归藏因果):\n{causal}\n\nAtomic checks (mechanical, cannot override):\n{atomic}",
+            "Task output:\n{task_output}\n\nTool results:\n{results}\n\nSoft violations:\n{soft}\n\nCausal priors (归藏因果):\n{causal}\n\nEmpirical rules (经验条文, advisory):\n{emp}\n\nAtomic checks (mechanical, cannot override):\n{atomic}",
             task_output = task_output,
             results = tool_results.join("\n---\n"),
             soft = if soft_context.is_empty() {
@@ -240,6 +310,11 @@ impl YinJudge {
                 "None".to_string()
             } else {
                 causal_hints.join("\n")
+            },
+            emp = if empirical_rules.is_empty() {
+                "None".to_string()
+            } else {
+                empirical_rules.join("\n")
             },
             atomic = if atomic_summary.is_empty() {
                 "None".to_string()
@@ -263,6 +338,7 @@ impl YinJudge {
                         confidence: 0.0,
                         summary: "verify context_overflow".into(),
                         constraint_violations: vec![],
+                        hodge: None,
                     });
                 }
                 LimitKind::HardCutoff => {

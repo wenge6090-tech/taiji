@@ -13,3 +13,5 @@ pub mod manifold;
 pub mod compile;
 pub mod ontology_miner;
 pub mod python_engine;
+pub mod treeio;
+pub mod prepaid_shaping;

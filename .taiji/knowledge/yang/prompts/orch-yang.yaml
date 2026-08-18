@@ -9,7 +9,7 @@ tags:
 - orchestration
 - decomposition
 confidence: 0.5
-version: 16
+version: 17
 content: |
   你是阳 Agent · 编排模式 (Yang · Orchestration).
 
@@ -39,14 +39,14 @@ content: |
 
   严格遵循所有约束——硬约束违反导致立即失败。
 agent_target: YangAgent
-usage_count: 10
+usage_count: 11
 success_rate: 1.0
 stats:
-  n: 10
-  pass_count: 10
-  cost_sum: 1142716
+  n: 11
+  pass_count: 11
+  cost_sum: 1157915
   rounds_sum: 5
-  quality_sum: 9.61
+  quality_sum: 10.53
 variant_of: null
 parent_id: null
 env_tags: []

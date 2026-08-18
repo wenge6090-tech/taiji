@@ -306,6 +306,18 @@ mod tests {
         assert!((edges[0].strength - 0.96).abs() < 1e-9);
     }
 
+    /// V62：挖掘合法产出只有对称关联（互信息对称无因果方向，§17.1）——
+    /// Sequence 边在干预验因果前是伪因果，永不产出（枚举变体保留读兼容）。
+    #[test]
+    fn mine_dependencies_never_emits_sequence() {
+        let pairs = vec![
+            p("deploy", "security", 60, 60),
+            p("security", "verify", 55, 55),
+        ];
+        let edges = mine_dependencies(&pairs, 50, 0.8);
+        assert!(edges.iter().all(|e| e.kind == OntologyEdgeKind::WeakDependency));
+    }
+
     #[test]
     fn mine_constraints_requires_full_failure() {
         let failures = vec![

@@ -1013,6 +1013,7 @@ mod tests {
             objects: vec!["deploy-action".into()],
             env: None,
             is_critical: false,
+            verb: None,
         };
         let relations = vec![OntologyEdge {
             from: "deploy-action".into(),
@@ -1040,6 +1041,7 @@ mod tests {
             objects: vec![],
             env: Some("Production".into()),
             is_critical: true,
+            verb: None,
         };
         let rules = vec![OntologyRule {
             id: "guard-prod".into(),
